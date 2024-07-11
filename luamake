@@ -286,30 +286,36 @@ end
 
 ---@class src_file
 ---@field name string
+---@field hash integer
 ---@field recompile boolean
 ---@field deps src_file[]
 ---@field notify_deps function(self) nil
 ---@field depends_on function(self, src) boolean
 
+local src_file = {}
+
 ---@param name string
+---@param hash integer
 ---@return src_file
-local function new_src_file(name)
+function src_file.new(name, hash)
 	---@type src_file
-	local src_file = {
+	local src_file_tmp = {
 		name = name,
+		hash = hash,
 		-- start off by assuming no files need to be recompiled
 		recompile = false,
 		deps = {},
 		notify_deps = notify_deps,
 		depends_on = depends_on,
 	}
-	setmetatable(src_file, src_meta)
-	return src_file
+	setmetatable(src_file_tmp, src_meta)
+	return src_file_tmp
 end
 
 ---@return src_file
 local sentinal_src_file <const> = {
-	name = "__sentinal_src_file__lua_cache" .. fnv1a("__sentinal_src_file__lua_cache"),
+	name = "__sentinal_src_file__lua_cache",
+	hash = fnv1a("__sentinal_src_file__lua_cache"),
 	recompile = false,
 	deps = {},
 	notify_deps = notify_deps,
@@ -327,33 +333,29 @@ local function get_all_files(path)
 	---@type table<string, src_file>
 	local files = {}
 	for file in io.popen('ls -a "' .. path .. "/src/" .. '"'):lines() do
-		-- debug things
-		-- io.stdout:write("\t>file " .. file .. "\n")
 		if file:find(".cpp") ~= nil then
-			files[file] = new_src_file(file)
+			files[file] = src_file.new(file, hash_file(path .. "/src/" .. file))
 		elseif file:find(".hpp") ~= nil then
-			files[file] = new_src_file(file)
+			files[file] = src_file.new(file, hash_file(path .. "/src/" .. file))
 		end
 	end
 
 	-- filter files based on the cache_dir
 	-- check which files we need to recompile
-	local _has_cache_dir = has_cache_dir(path .. "/build/")
-	if not _has_cache_dir then
+	if not has_cache_dir(path .. "/build/") then
 		-- make the lua dir
 		-- !!! WARNING !!! need to add check to make sure path is properly formed, because this can technically be a dangerous thing (can probably do some code injection)
 		-- io.stdout:write("\trunning:" .. "mkdir " .. path .. "/build/__luamake_cache/\n")
 		os.execute("mkdir " .. path .. "/build/__luamake_cache/")
 		-- io.stdout:write("\trunning:" .. "touch " .. path .. "/build/__luamake_cache/" .. path .. "_cache\n")
-		os.execute("touch " .. path .. "/build/__luamake_cache/" .. path .. "_cache")
+		os.execute("touch " .. path .. "/build/__luamake_cache/__cache")
 		-- go through every file to be compiled and hash the input of it
 
-		local cache_file = helper.open(path .. "/build/__luamake_cache/" .. path .. "_cache", "w")
-		local root_fpath = path .. "/src/"
+		local cache_file = helper.open(path .. "/build/__luamake_cache/__cache", "w")
 
 		for name, src in pairs(files) do
 			src.recompile = true
-			cache_file:write(("%s 0x%x\n"):format(name, hash_file(root_fpath .. name)))
+			cache_file:write(("%s %x\n"):format(name, src.hash))
 		end
 
 		io.close(cache_file)
@@ -361,7 +363,7 @@ local function get_all_files(path)
 		return files
 	end
 
-	local cache_file_str <const> = path .. "/build/__luamake_cache/" .. path .. "_cache"
+	local cache_file_str <const> = path .. "/build/__luamake_cache/__cache"
 	---@type file*
 	local cache_file = helper.open(cache_file_str, "r")
 
@@ -374,7 +376,7 @@ local function get_all_files(path)
 		local file_name = line:sub(0, line:find(" ") - 1)
 		---@type string
 		-- for some fucking reason cutting off the last digit seems to fix the fucking issue of the hashes being the exact fucking same, but them saying that they're different this is such a fucking stupid issue to have idk why the fuck lua is like that fucking christ
-		local file_hash = line:sub(line:find("0x") + 2, #line)
+		local file_hash = line:sub(line:find(" ") + 1, #line)
 		cached_files[file_name] = tonumber(file_hash, 16)
 	end
 
@@ -556,7 +558,7 @@ local function clean_dir(path)
 	-- remove cache dir if there
 	if has_cache_dir(path .. "/build/") then
 		-- reset the cache file
-		local path_to_cache_file <const> = path .. "/build/__luamake_cache/" .. path .. "_cache"
+		local path_to_cache_file <const> = path .. "/build/__luamake_cache/__cache"
 		-- overwrite all info in the cache file (effectively deleting it)
 		local cache_file = helper.open(path_to_cache_file, "w")
 		io.close(cache_file)
