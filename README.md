@@ -41,6 +41,7 @@ Smallest Configuration needed :)
 local config = {
     compiler = "clang++",
     flags = {},
+    bin_name = 'a',
 }
 
 return config
@@ -50,7 +51,7 @@ The config fields `compiler` and `flags` must be set (even if `flags` is an empt
 
 Here is the types for every (current) configuration option
 ```lua
----@type { compiler: string, flags: string[], bin_name: string?, linking: string[]?, pre_exec: string[]?, post_exec: string[]?}
+---@type { compiler: string, flags: string[], bin_name: string, linking: string[]?, pre_exec: string[]?, post_exec: string[]?}
 local config = { }
 ```
 
@@ -59,23 +60,19 @@ Path of the compiler to be invoked (ex. "clang++", "g++", etc)
 
 ### `flags`
 List of the compiler flags to be passed to the compiler
-> As of now you have to include the `-`, but that will likely change.
 #### Example
 ```lua
 flags = {
-    "-std=c++17",
-    "-Wall",
-    "-Wpedantic",
-    "-Wconversion",
-    "-Werror",
+    "std=c++17",
+    "Wall",
+    "Wpedantic",
+    "Wconversion",
+    "Werror",
 }
 ```
 
 ### `bin_name`
 Name of the output binary.
-* If left `nil` then the output binary will be the path to the root build
-* Of note if you call `luamake .` without setting `config.bin_name`, then the output will be `build/..out' which might be hard to work with.
-  * This is probably going to change because I will be the first to admit that it is a little dumb.
 
 ### `linking`
 List of the external dependencies that you are linking against
