@@ -390,7 +390,11 @@ local function build(path, flags)
 		local executable_command <const> =
 			string.format("%s %s %s-o %s %s", config.compiler, config_flags, obj_files, out_file, linkage)
 		io.stdout:write(("\t%s\n"):format(executable_command))
-		os.execute(executable_command)
+		local _, _, code = os.execute(executable_command)
+		-- similar issue to if we're compiling the other files and some error occurs
+		if code ~= 0 then
+			return
+		end
 	end
 
 	if config.post_exec ~= nil then
