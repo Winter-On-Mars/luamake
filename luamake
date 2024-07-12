@@ -367,6 +367,10 @@ local function build(path, flags)
 
 	-- early return so we don't add files to the cache, recompile the output, or run the post_exec functions
 	if had_error then
+		-- update the cache file before leaving, so that the files that were successfully recompiled don't have to be next time
+		local cache_file = helper.open(path .. "/build/__luamake_cache/__cache.lua", "w")
+		cache_file:write(("local cache=%s;return cache"):format(helper.dump(cache)))
+		io.close(cache_file)
 		return
 	end
 
