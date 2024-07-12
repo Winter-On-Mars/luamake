@@ -1,57 +1,67 @@
 #!/usr/bin/env lua
 
----@type {compiler: string, flags: string[], bin_name: string?, linking: string[]?, pre_exec: string[]?, post_exec: string[]?}
+---@class config
+---@field compiler string
+---@field flags string[]
+---@field bin_name string
+---@field linking string[]?
+---@field pre_exec string[]?
+---@field post_exec string[]?
+
+---@alias file_hashes table<string, integer>
+
+---@class make_flags
+---@field clean boolean
+---@field opt_level string
+---@field debug_info boolean
+
+---@class cache
+---@field cfg config
+---@field files file_hashes
+---@field flags make_flags
+
+---@type config
 local config = require("config")
+
+---@param a make_flags
+---@param b make_flags
+---@return boolean
+local function comp_flags(a, b)
+	return (a.clean == b.clean) and (a.debug_info == b.debug_info) and (a.opt_level == b.opt_level)
+end
 
 -- this is a linux way of getting all of the logical cores
 -- so if we wanted to add cross platform support we'd have to figure that out, and do something else (maybe function ptr's(?))
-
----@type integer
-local number_of_cpu_cores <const> = (function()
-	local cpu_info, err = io.open("/proc/cpuinfo", "r")
-	if cpu_info == nil then
-		io.stderr:write(("unable to open /proc/cpuinfo, no idea what that means\n\t[%s]\n"):format(err))
-		os.exit(1)
-	end
-
-	local number_of_logical_cores = 0
-
-	for line in cpu_info:lines() do
-		if line:match("processor") then
-			number_of_logical_cores = math.tointeger(line:sub(line:find(":") + 2, #line)) or number_of_logical_cores
-		end
-	end
-
-	-- the cores are listed from 0..number of cores - 1, so we have to add one to get the number of logical cores
-	return number_of_logical_cores + 1
-end)()
 
 -- <helper functions>
 ---@param o any
 local function __dump(o)
 	if type(o) == "table" then
-		local s = "{ "
+		local s = "{"
 		for k, v in pairs(o) do
 			if type(k) ~= "number" then
 				k = '"' .. k .. '"'
 			end
-			s = s .. "[" .. k .. "] = " .. __dump(v) .. ","
+			s = s .. "[" .. k .. "]=" .. __dump(v) .. ","
 		end
-		return s .. "} "
+		return s .. "}"
+	elseif type(o) == "string" then
+		return '"' .. o .. '"'
 	else
 		return tostring(o)
 	end
 end
 
 ---@param strs string[]
+---@param sep string
 ---@return string
-local function __flatten(strs)
+local function __flatten(strs, sep)
 	local str = ""
 	for i, s in pairs(strs) do
 		if i == #strs then
 			str = str .. s
 		else
-			str = str .. s .. " "
+			str = str .. s .. sep
 		end
 	end
 	return str
@@ -91,117 +101,7 @@ local helper <const> = {
 }
 -- </helper functions>
 
--- <basic thread pool>
--- test to see if we can remove this i think we can but don't wanna break anything :)
-local function call_task(self)
-	self.func(self.data)
-end
-
-local task_meta = {
-	__call = call_task,
-}
-
----@class Task
----@field func function(data)
----@field data table
-local task = {}
-setmetatable(task, task_meta)
-
----@param fn function(data) nil
----@param data table
----@return Task
-function task.new(fn, data)
-	local t = {
-		func = fn,
-		data = data,
-	}
-
-	setmetatable(t, task_meta)
-	return t
-end
-
----@class ThreadPool
----@field task_queue Task[]
----@field threads thread[]
----@field current_active integer
-local thread_pool = {
-	task_queue = {},
-	threads = {},
-	current_active = 1,
-}
-
----@private
-local function __compiling_function(data)
-	local command_str <const> = string.format(
-		"%s %s -o " .. data.path .. "/build/%s.o -c " .. data.path .. "/src/%s",
-		-- reading from the config global variable
-		config.compiler,
-		data.config_flags,
-		data.file:sub(1, data.file:find("%.") - 1),
-		data.file
-	)
-	io.stdout:write(("\t%s\n"):format(command_str))
-	os.execute(command_str)
-end
-
-function thread_pool:init(lof, path, config_flags)
-	local recompile_any = false
-	for file, src in pairs(lof) do
-		if src.recompile and file:find("%.hpp") == nil then
-			recompile_any = true
-			local t =
-				task.new(__compiling_function, { file = file, src = src, path = path, config_flags = config_flags })
-			if #self.threads < number_of_cpu_cores then
-				table.insert(
-					self.threads,
-					coroutine.create(function()
-						t.func(t.data)
-					end)
-				)
-			else
-				table.insert(self.task_queue, t)
-			end
-		end
-	end
-	return recompile_any
-end
-
-function thread_pool:run()
-	-- start all of the current threads
-	for _, thread in pairs(self.threads) do
-		coroutine.resume(thread)
-	end
-
-	-- then wait to finish the function while we still have tasks queued
-	while #self.task_queue ~= 0 do
-		for _, thread in pairs(self.threads) do
-			if coroutine.status(thread) == "dead" then
-				-- i think we could also do coroutine.wrap, but idk we'll have to read the docs
-				thread = coroutine.create(function()
-					self.task_queue[#self.task_queue].func(self.task_queue[#self.task_queue].data)
-				end)
-				coroutine.resume(thread)
-				table.remove(self.task_queue, #self.task_queue)
-			end
-		end
-	end
-end
-
-function thread_pool:join()
-	local count_running_co = function()
-		local count = 0
-		for _, thread in pairs(self.threads) do
-			if coroutine.status(thread) == "running" then
-				count = count + 1
-			end
-		end
-		return count
-	end
-	while count_running_co() ~= 0 do
-	end
-end
--- </basic thread pool>
-
+-- <hashing stuff>
 ---@param input string
 ---@return integer
 local function fnv1a(input)
@@ -211,8 +111,6 @@ local function fnv1a(input)
 		hash = hash | tonumber(input:byte(i))
 		hash = hash * 0x00000100000001B3 -- FNV_prime
 	end
-	-- because we're doing bitwise operations this should never fire, and idk if it's a performance impact, so i'll just remove it for now
-	-- assert(math.type(hash) == "integer", "this must be an integer")
 	return hash
 end
 
@@ -229,11 +127,9 @@ local function hash_file(fpath)
 	io.close(file_to_hash)
 	return hash
 end
+-- </hashing stuff>
 
-local function print_help()
-	io.stderr:write("Useage: input the subdir being compiled\n")
-end
-
+-- <build helpers>
 ---@param path string
 ---@return boolean
 local function has_cache_dir(path)
@@ -244,22 +140,6 @@ local function has_cache_dir(path)
 	end
 	return false
 end
-
----@param self src_file
-local function __src_tostring(self)
-	local r_str = string.format("@%p {\n", self)
-
-	r_str = r_str .. "\t" .. (self.recompile and "recompile = true" or "recompile = false") .. "\n\tdeps = [ "
-	for _, dep in pairs(self.deps) do
-		r_str = r_str .. ("%s, "):format(dep.name)
-	end
-
-	return r_str .. "]\n}"
-end
-
-local src_meta <const> = {
-	__tostring = __src_tostring,
-}
 
 ---@param self src_file
 local function notify_deps(self)
@@ -308,7 +188,6 @@ function src_file.new(name, hash)
 		notify_deps = notify_deps,
 		depends_on = depends_on,
 	}
-	setmetatable(src_file_tmp, src_meta)
 	return src_file_tmp
 end
 
@@ -321,13 +200,10 @@ local sentinal_src_file <const> = {
 	notify_deps = notify_deps,
 	depends_on = depends_on,
 }
-setmetatable(sentinal_src_file, src_meta)
-
--- current idea, have the recompile flag indicate that this cpp file needs to be recompiled
--- the name field doesn't include the file extension, presuming that the .cpp and .hpp pair share the same name
 
 ---@param path string
 ---@return table<string, src_file>
+---@return cache
 local function get_all_files(path)
 	-- get all of the cpp files
 	---@type table<string, src_file>
@@ -340,48 +216,33 @@ local function get_all_files(path)
 		end
 	end
 
-	-- filter files based on the cache_dir
-	-- check which files we need to recompile
 	if not has_cache_dir(path .. "/build/") then
-		-- make the lua dir
+		-- make the lua cache dir + cache file
 		-- !!! WARNING !!! need to add check to make sure path is properly formed, because this can technically be a dangerous thing (can probably do some code injection)
-		-- io.stdout:write("\trunning:" .. "mkdir " .. path .. "/build/__luamake_cache/\n")
 		os.execute("mkdir " .. path .. "/build/__luamake_cache/")
-		-- io.stdout:write("\trunning:" .. "touch " .. path .. "/build/__luamake_cache/" .. path .. "_cache\n")
-		os.execute("touch " .. path .. "/build/__luamake_cache/__cache")
-		-- go through every file to be compiled and hash the input of it
+		os.execute("touch " .. path .. "/build/__luamake_cache/__cache.lua")
 
-		local cache_file = helper.open(path .. "/build/__luamake_cache/__cache", "w")
+		-- populate the cache file with the current build state
+		local new_cache_file = helper.open(path .. "/build/__luamake_cache/__cache.lua", "w")
+		new_cache_file:write(string.format("local cache={cfg=%s,files={}};return cache", helper.dump(config)))
+		io.close(new_cache_file)
 
-		for name, src in pairs(files) do
+		-- mark all files as needing to be recompiled
+		for _, src in pairs(files) do
 			src.recompile = true
-			cache_file:write(("%s %x\n"):format(name, src.hash))
 		end
 
-		io.close(cache_file)
+		---@type cache
+		local cache = require(path .. "build/__luamake_cache/__cache")
 
-		return files
+		return files, cache
 	end
 
-	local cache_file_str <const> = path .. "/build/__luamake_cache/__cache"
-	---@type file*
-	local cache_file = helper.open(cache_file_str, "r")
+	-- now we know that there is a cache dir
+	---@type cache
+	local cache = require(path .. "/build/__luamake_cache/__cache")
 
-	---@type table<string, number>
-	local cached_files = {}
-	for line in cache_file:lines() do
-		-- layout of each line
-		-- $(file_name) 0x$(file_hash)
-		---@type string
-		local file_name = line:sub(0, line:find(" ") - 1)
-		---@type string
-		-- for some fucking reason cutting off the last digit seems to fix the fucking issue of the hashes being the exact fucking same, but them saying that they're different this is such a fucking stupid issue to have idk why the fuck lua is like that fucking christ
-		local file_hash = line:sub(line:find(" ") + 1, #line)
-		cached_files[file_name] = tonumber(file_hash, 16)
-	end
-
-	io.close(cache_file)
-
+	-- <building up the dependency tree>
 	for fname, src in pairs(files) do
 		local path_to_file = path .. "/src/" .. fname
 		local file = helper.open(path_to_file, "r")
@@ -423,32 +284,26 @@ local function get_all_files(path)
 		-- remove the actual sentinal_src_file
 		table.remove(src.deps, 1)
 	end
+	-- </building up the dependency tree>
 
-	local write_cache_file = helper.open(cache_file_str, "w")
-
-	for file, src in pairs(files) do
-		local fhash = hash_file(path .. "/src/" .. file)
-		if cached_files[file] ~= nil then
-			-- check the hash
-			local same_hashes <const> = fhash == cached_files[file]
-
-			src.recompile = not same_hashes
+	-- loop over the dependencies to see what needs to be updated
+	for fname, src in pairs(files) do
+		if cache.files[fname] ~= nil then
+			src.recompile = src.hash ~= cache.files[fname]
 			if src.recompile then
 				src:notify_deps()
 			end
-		else -- this means that the file was not found in the hashed files list
+		else
 			src.recompile = true
 			src:notify_deps()
 		end
-		write_cache_file:write(("%s 0x%x\n"):format(file, fhash))
+		-- write_cache_file:write(("%s 0x%x\n"):format(file, fhash))
 	end
 
-	io.close(write_cache_file)
-
-	return files
+	return files, cache
 end
 
---- @param path string
+---@param path string
 ---@param cpp_files table<string, src_file>
 ---@return string
 local function get_all_object_files(path, cpp_files)
@@ -464,6 +319,7 @@ local function get_all_object_files(path, cpp_files)
 	end
 	return r_str
 end
+-- </build helpers>
 
 ---@param path string
 ---@param flags make_flags
@@ -475,28 +331,57 @@ local function build(path, flags)
 		end
 	end
 
-	local config_flags = helper.flatten(config.flags)
+	local config_flags = "-" .. helper.flatten(config.flags, " -")
 	if flags.debug_info then
 		config_flags = config_flags .. " -g"
 	end
 	config_flags = config_flags .. " -" .. flags.opt_level
 
 	-- get all the cpp files we need to recompile
-	local cpp_files <const> = get_all_files(path)
+	local cpp_files <const>, cache = get_all_files(path)
+	local same_flags <const> = comp_flags(flags, cache.flags)
+	cache.flags = flags
 
 	-- compile all cpp files into obj files
-	local recompile_output <const> = thread_pool:init(cpp_files, path, config_flags)
+	local recompile_output = false
+	local had_error = false
+	for file, src in pairs(cpp_files) do
+		if (not same_flags or src.recompile) and file:find("%.hpp") == nil then
+			recompile_output = true
+			local command_str <const> = string.format(
+				"%s %s -o " .. path .. "/build/%s.o -c " .. path .. "/src/%s",
+				config.compiler,
+				config_flags,
+				file:sub(1, file:find("%.") - 1),
+				file
+			)
+			io.stdout:write(("\t%s\n"):format(command_str))
+			local _, _, code = os.execute(command_str)
+			if code ~= 0 then
+				had_error = true
+			else
+				cache.files[file] = src.hash
+			end
+		end
+	end
 
-	thread_pool:run()
+	-- early return so we don't add files to the cache, recompile the output, or run the post_exec functions
+	if had_error then
+		return
+	end
 
-	thread_pool:join()
+	for file, src in pairs(cpp_files) do
+		-- technically overwriting the previously input hash values, but it's fine because the hash is the same
+		cache.files[file] = src.hash
+	end
 
 	-- compile all of the obj files into the final executable
 	if recompile_output then
 		local obj_files <const> = get_all_object_files(path, cpp_files)
 		---@type string
 		local out_file <const> = path .. "/build/" .. (config.bin_name and config.bin_name or path .. ".out")
-		local linkage <const> = config.linking and "-l" .. helper.flatten(config.linking) or ""
+		-- should probably check if this is correct
+		local linkage <const> = config.linking and "-l" .. helper.flatten(config.linking, " -l") or ""
 		-- have to not include a space here bc we're including a space in the for loop
 		local executable_command <const> =
 			string.format("%s %s %s-o %s %s", config.compiler, config_flags, obj_files, out_file, linkage)
@@ -510,25 +395,41 @@ local function build(path, flags)
 			os.execute(command)
 		end
 	end
+
+	-- update the cache file
+	local cache_file = helper.open(path .. "/build/__luamake_cache/__cache.lua", "w")
+	cache_file:write(("local cache=%s;return cache"):format(helper.dump(cache)))
+	io.close(cache_file)
 end
 
----@param into make_flags
-local function parse_compiler_flags(into)
+---@return make_flags
+local function parse_compiler_flags()
+	local flags = {
+		clean = false,
+		opt_level = "O0",
+		debug_info = false,
+	}
 	for i = 2, #arg, 1 do
 		if arg[i] == "-c" then
-			into.clean = true
+			flags.clean = true
 		end
 		if arg[i] == "-r" then
-			into.opt_level = "O3"
+			flags.opt_level = "O3"
 		end
 		if arg[i] == "-g" then
-			into.debug_info = true
+			flags.debug_info = true
 		end
 	end
+	return flags
+end
+
+local function print_help()
+	io.stderr:write("Useage: input the subdir being compiled\n")
 end
 
 ---@param path string
-local function clean_dir(path)
+---@param flags make_flags
+local function clean_dir(path, flags)
 	io.stdout:write(("\tremoving .o, .out, and cache files from: %s/build/\n"):format(path))
 
 	local build_dir <const> = path .. "/build/"
@@ -555,63 +456,66 @@ local function clean_dir(path)
 		os.execute(command_str)
 	end
 
-	-- remove cache dir if there
 	if has_cache_dir(path .. "/build/") then
-		-- reset the cache file
-		local path_to_cache_file <const> = path .. "/build/__luamake_cache/__cache"
-		-- overwrite all info in the cache file (effectively deleting it)
+		local path_to_cache_file <const> = path .. "/build/__luamake_cache/__cache.lua"
+		-- reset the file
 		local cache_file = helper.open(path_to_cache_file, "w")
+		-- add back the basic things needed for luamake to not crash
+		---@type cache
+		local cache = {
+			["cfg"] = config,
+			["files"] = {},
+			["flags"] = flags,
+		}
+		-- might be able to speed this up by just embedding the values into the string instead of making a new object, but it's probably fine as is
+		cache_file:write(("local cache=%s;return cache"):format(helper.dump(cache)))
 		io.close(cache_file)
-		--[[ idk if it's a good idea to completely remove the cache dir's and stuff(?)
-		io.stdout:write((">running: [rm %s]\n"):format(path_to_cache_file))
-		-- os.execute(("rm %s"):format(path_to_cache_file))
-		local path_to_cache_dir <const> = path .. "/build/__luamake_cache"
-		io.stdout:write((">running: [rm -d %s]\n"):format(path_to_cache_dir))
-		-- os.execute(("rm -d %s"):format(path_to_cache_dir))
-		-- ]]
 	end
+
+	--[[
+  -- remove cache dir if there
+  if has_cache_dir(path .. "/build/") then
+    -- reset the cache file
+    -- local path_to_cache_file <const> = path .. "/build/__luamake_cache/__cache.lua"
+    -- overwrite all info in the cache file (effectively deleting it)
+    -- probably have to check on this to make sure we're not doing something really dumb right here
+    -- local cache_file = helper.open(path_to_cache_file, "w")
+    -- io.close(cache_file)
+    -- idk if it's a good idea to completely remove the cache dir's and stuff(?)
+    io.stdout:write((">running: [rm %s]\n"):format(path_to_cache_file))
+    -- os.execute(("rm %s"):format(path_to_cache_file))
+    local path_to_cache_dir <const> = path .. "/build/__luamake_cache"
+    io.stdout:write((">running: [rm -d %s]\n"):format(path_to_cache_dir))
+    -- os.execute(("rm -d %s"):format(path_to_cache_dir))
+  end
+  --]]
 end
 
----@class make_flags
----@field clean boolean
----@field opt_level string
----@field debug_info boolean
-
 -- main
----@type make_flags
-local flags = {
-	clean = false,
-	opt_level = "O0",
-	debug_info = false,
-}
-
 if #arg == 0 then
 	print_help()
 	os.exit(2)
 else
-	-- normalized_dir so that if the person inputs a dir as 'dir/' or 'dir' it just always becomes 'dir'
-	-- this is also among the stupidests bits of code i've written, like what's the point of trying to
-	-- make the language "simple" if trying to do basic things takes up a while f*cking line of code
-	local normalized_dir = arg[1]:byte(#arg[1]) == ("/"):byte(1) and arg[1]:sub(0, #arg[1] - 1) or arg[1]
-	parse_compiler_flags(flags)
+	local dir = arg[1]
+	local flags = parse_compiler_flags()
 
 	if flags.clean then
-		clean_dir(normalized_dir)
+		clean_dir(dir:byte(#dir) == ("/"):byte(1) and dir:sub(0, #dir - 1) or dir, flags)
 	else
 		-- <displaying the config for better feedback>
 		io.stdout:write(
 			string.format(
 				"Building with config: {\n\tcompiler: %s,\n\tflags: %s,\n\tbinary name: %s,\n\tlinking: %s,\n\tpre_exec: %s,\n\tpost_exec: %s\n}\n",
 				config.compiler,
-				helper.flatten(config.flags),
-				config.bin_name and config.bin_name or normalized_dir,
-				config.linking and helper.flatten(config.linking) or "nil",
-				config.pre_exec and helper.flatten(config.pre_exec) or "nil",
-				config.post_exec and helper.flatten(config.post_exec) or "nil"
+				helper.flatten(config.flags, ", "),
+				config.bin_name,
+				config.linking and helper.flatten(config.linking, ", ") or "nil",
+				config.pre_exec and helper.flatten(config.pre_exec, ", ") or "nil",
+				config.post_exec and helper.flatten(config.post_exec, ", ") or "nil"
 			)
 		)
 		-- </displaying the config for better feedback>
-		build(normalized_dir, flags)
+		build(dir:byte(#dir) == ("/"):byte(1) and dir:sub(0, #dir - 1) or dir, flags)
 	end
 	os.exit(0)
 end
