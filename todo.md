@@ -1,12 +1,9 @@
-- [x] add caching support to make it so we don't have to recompile some code
-- [x] add -c compile flag for clearing
-- [?] add multthreading for the compilation step
-- [:)] fix code :)
+- [ ] add multthreading for the compilation step
+  - going to wait till the c rewrite to impl this
 - [ ] add config option to switch caching algorithm
   - [ ] add other hashing algorithms
-- [ ] add some way to check what the previous config flags were, and recompile the files if that's the case (i.e. if you compile -g, then compile with -r, it should recompile all of the files)
-- [ ] update config layout to allow pre_exec and post_exec to include lua functions, so that we can allow lua code to be run instead of just shell commands
-- [ ] update config layout to remove the requirement that config.flags always start with '-'
-- [ ] odd bug that occurs if you change something and it results in the same hash code meaning hat the program doesn't recompile (no idea how to fix this)
 - [ ] issue where we're writing the cache to the file even if there's a compilation failure, so we should fix that some how :)
-- [ ] need to make it so that if there is a compilation error with one of the previous compilations that the post_exec commands and such are not run
+  - will probably be fixed by adding other hashing functions
+- [ ] update the help message
+- [x] fix cleaning with `-c`
+  - [ ] add option to write something like `-c file1 file2` to only remove those files from the cache
