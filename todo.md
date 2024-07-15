@@ -7,3 +7,5 @@
 - [ ] update the help message
 - [x] fix cleaning with `-c`
   - [ ] add option to write something like `-c file1 file2` to only remove those files from the cache
+- [ ] bug when creating new project, it attempts to read from cache.config_flags, which is nil
+  - [ ] running `luamake dir -c` then `luamake dir` fixes the issue
