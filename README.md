@@ -12,8 +12,6 @@ A simple build system for C++ projects, configured with lua
 ## Dependencies
 * lua (obviously)
   * Version >= 5.4 (could probably work with 5.3, we just need integers and bitwise operations for the hashing)
-* linux
-  * As of now the way that we do "multithreading" is by checking the users number of logical cores by reading from `/proc/cpuinfo` which I'm pretty sure is only available on linux (at the very least this won't work on Windows), I'll be "working" on making it cross platform :).
 
 ## Script
 ```sh
@@ -85,7 +83,7 @@ linking = {
 
 ### `pre_exec`
 List of strings that will be run in the shell before any of the files are compiled
-  * I honestly haven't personally found a use for this, but I'm sure one *probably* exists, so I added it
+  * Can be used to precompile shaders (but we might just want to add something later to watch certain files for changes(?))
 
 ### `post_exec`
 List of strings that will be run after all of the files are compiled (including the output binary)
