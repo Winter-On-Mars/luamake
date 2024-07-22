@@ -49,7 +49,7 @@ The config fields `compiler` and `flags` must be set (even if `flags` is an empt
 
 Here is the types for every (current) configuration option
 ```lua
----@type { compiler: string, flags: string[], bin_name: string, linking: string[]?, pre_exec: string[]?, post_exec: string[]?}
+---@type { compiler: string, flags: string[], bin_name: string, linking: string[]?, linking_dir: string?, pre_exec: string[]?, post_exec: string[]?}
 local config = { }
 ```
 
@@ -80,6 +80,10 @@ linking = {
     "SDL2"
 }
 ```
+
+### `linking_dir`
+Flag to specify dir to search for linking
+* This should probably be an array but I don't really know how this work.
 
 ### `pre_exec`
 List of strings that will be run in the shell before any of the files are compiled
