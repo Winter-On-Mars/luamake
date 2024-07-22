@@ -7,5 +7,3 @@
 - [ ] update the help message
 - [x] fix cleaning with `-c`
   - [ ] add option to write something like `-c file1 file2` to only remove those files from the cache
-- [x] bug when creating new project, it attempts to read from cache.config_flags, which is nil
-- [ ] compiling with empty flags list causes the compiler to crash
