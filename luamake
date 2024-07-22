@@ -202,9 +202,10 @@ local sentinal_src_file <const> = {
 }
 
 ---@param path string
+---@param flags make_flags
 ---@return table<string, src_file>
 ---@return cache
-local function get_all_files(path)
+local function get_all_files(path, flags)
 	-- get all of the cpp files
 	---@type table<string, src_file>
 	local files = {}
@@ -224,16 +225,19 @@ local function get_all_files(path)
 
 		-- populate the cache file with the current build state
 		local new_cache_file = helper.open(path .. "/build/__luamake_cache/__cache.lua", "w")
-		new_cache_file:write(string.format("local cache={cfg=%s,files={}};return cache", helper.dump(config)))
+		---@type cache
+		local cache = {
+			["cfg"] = config,
+			["files"] = {},
+			["flags"] = flags,
+		}
+		new_cache_file:write(("local cache=%s;return cache"):format(helper.dump(cache)))
 		io.close(new_cache_file)
 
 		-- mark all files as needing to be recompiled
 		for _, src in pairs(files) do
 			src.recompile = true
 		end
-
-		---@type cache
-		local cache = require(path .. "build/__luamake_cache/__cache")
 
 		return files, cache
 	end
@@ -338,7 +342,7 @@ local function build(path, flags)
 	config_flags = config_flags .. " -" .. flags.opt_level
 
 	-- get all the cpp files we need to recompile
-	local cpp_files <const>, cache = get_all_files(path)
+	local cpp_files <const>, cache = get_all_files(path, flags)
 	local same_flags <const> = comp_flags(flags, cache.flags)
 	cache.flags = flags
 
