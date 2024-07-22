@@ -30,9 +30,6 @@ local function comp_flags(a, b)
 	return (a.clean == b.clean) and (a.debug_info == b.debug_info) and (a.opt_level == b.opt_level)
 end
 
--- this is a linux way of getting all of the logical cores
--- so if we wanted to add cross platform support we'd have to figure that out, and do something else (maybe function ptr's(?))
-
 -- <helper functions>
 ---@param o any
 local function __dump(o)
