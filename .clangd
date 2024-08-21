@@ -1,2 +1,2 @@
 CompileFlags:
-  Add: [ -std=c23 ]
+  Add: [ -std=c++20, -Wpedantic, -Wconversion, -Wall ]
