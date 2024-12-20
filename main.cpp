@@ -1,14 +1,13 @@
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <numeric>
 #include <optional>
 #include <span>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
-
-#include <filesystem>
 
 #include <lua.hpp>
 
@@ -19,14 +18,13 @@ auto constexpr flatten(std::span<string_view const> const arr,
                        string_view const seperator) noexcept -> string {
   auto const sep = string(seperator);
   return std::accumulate(
-    arr.begin(), arr.end(), string(),
-    [sep](auto&& init, auto&& n) { return (init + sep) + string(n); }
-  );
+      arr.begin(), arr.end(), string(),
+      [sep](auto &&init, auto &&n) { return (init + sep) + string(n); });
 }
 
 // how tf do you do cpp doc comments >:(
 /* @description: dumps content of lua value in standard way */
-auto constexpr dump(lua_State* state /*, lua_table* ...*/) noexcept -> string {
+auto constexpr dump(lua_State *state /*, lua_table* ...*/) noexcept -> string {
   // TODO: actually write function
   return string("");
 }
@@ -46,8 +44,8 @@ struct Config final {
 
   static auto make(lua_State *) noexcept -> std::optional<Config>;
 
-  friend auto operator<<(std::ostream &,
-                         Config const &) noexcept -> std::ostream &;
+  friend auto operator<<(std::ostream &, Config const &) noexcept
+      -> std::ostream &;
 };
 
 // See what functions modify the lua_State stack
@@ -115,8 +113,8 @@ auto Config::make(lua_State *state) noexcept -> std::optional<Config> {
                 /* post_exec= */ vector<string_view>()};
 }
 
-auto operator<<(std::ostream &os,
-                Config const &cfg) noexcept -> std::ostream & {
+auto operator<<(std::ostream &os, Config const &cfg) noexcept
+    -> std::ostream & {
   // don't like that we have to cast the std::string_view to a std::string,
   // because it seems like there should be string::operator+(string_view)
   // but whatever :)
@@ -162,7 +160,6 @@ auto operator<<(std::ostream &os,
   return os;
 }
 
-// TODO: try to rewrite this to be more memory efficient, maybe with a memory allocator or something like that
 struct src_file final {
   string name;
   std::size_t hash;
@@ -175,147 +172,297 @@ struct src_file final {
     if (name == src) {
       return true;
     }
-    if (std::any_of(deps.begin(), deps.end(), [src](auto&& dep) { return dep.name == src; })) {
+    if (std::any_of(deps.begin(), deps.end(),
+                    [src](auto &&dep) { return dep.name == src; })) {
       return true;
     }
     return false;
   }
 };
 
-struct MakeFlags final {
-  enum class opt_level : int8_t {
-    O0,
-    O1,
-    O2,
-    O3,
-  };
+namespace MakeTypes {
+auto build(lua_State *) noexcept -> int;
+auto new_project(char const *) noexcept -> int;
+auto clean() noexcept -> int;
+auto test(lua_State *) noexcept -> int;
+auto run(lua_State *) noexcept -> int;
+auto help() noexcept -> int;
 
-  std::string_view build_dir = std::string_view(".");
+struct Type final {
+  enum {
+    UNKNOWN_ARG,
+    BUILD,
+    NEW,
+    CLEAN,
+    TEST,
+    RUN,
+    HELP,
+  } type_t;
 
-  opt_level level = opt_level::O0;
-  bool clean = false;
-  bool debug_info = false;
+  char const *project_name;
 
-  // try and move this to be std::span<std::string_view> maybe by part 2 rewrite
-  // :)
-  static auto make(std::span<char *> const) noexcept -> MakeFlags;
+  static auto make(int, char **) noexcept -> Type;
+
+  auto run() const noexcept -> int;
 };
 
-auto MakeFlags::make(std::span<char *> const args) noexcept -> MakeFlags {
-  auto flags = MakeFlags{};
-  for (auto const flag : args) {
-    if (std::strcmp(flag, "-c") == 0) {
-      flags.clean = true;
-    } else if (std::strcmp(flag, "-r") == 0) {
-      flags.level = opt_level::O3;
-    } else if (std::strcmp(flag, "-g") == 0) {
-      flags.debug_info = true;
-    } else {
-      if (std::filesystem::is_directory(flag)) {
-        flags.build_dir = std::string_view(flag, strlen(flag));
-      } else {
-        if (flag != args[0]) {
-          std::cerr << "Error parsing command line args\nNo idea what [" << flag
-                    << "] is, so it's being ignored. See README for more info.";
-        }
-      }
-    }
+auto Type::make(int argc, char **argv) noexcept -> Type {
+  if (argc == 1) {
+    return {Type::RUN, ""};
   }
-  return flags;
+
+  if (strcmp(argv[1], "-b") == 0) {
+    return {Type::BUILD, ""};
+  } else if (strcmp(argv[1], "-n") == 0) {
+    // TODO: make sure to see there's no potential security
+    // issues with this command
+    if (argc != 3) {
+      // TODO: write error message about improperly formatted input
+      fprintf(stderr, "");
+      return {Type::HELP, ""};
+    }
+    return {Type::NEW, argv[2]};
+  } else if (strcmp(argv[1], "-c") == 0) {
+    return {Type::CLEAN, ""};
+  } else if (strcmp(argv[1], "-t") == 0) {
+    return {Type::TEST, ""};
+  } else if (strcmp(argv[1], "-r") == 0) {
+    return {Type::RUN, ""};
+  } else if (strcmp(argv[1], "-h") == 0) {
+    return {Type::HELP, ""};
+  } else {
+    return {Type::UNKNOWN_ARG, ""};
+  }
 }
 
-auto constexpr get_all_files(MakeFlags const& flags) noexcept -> std::pair<std::unordered_map<string, src_file>, cache>{
+auto Type::run() const noexcept -> int {
+  switch (type_t) {
+  case UNKNOWN_ARG:
+    return help();
+  case BUILD: {
+    auto *state = luaL_newstate();
+    if (state == nullptr) {
+      fprintf(stderr,
+              "Unable to init lua vm.\nidk what the error is, try adding a "
+              "post onto the github with more info so we can fix this issue");
+      return 67;
+    }
+    return build(state);
+  }
+  case NEW:
+    return new_project(project_name);
+  case CLEAN:
+    return clean();
+  case TEST: {
+    auto *state = luaL_newstate();
+    if (state == nullptr) {
+      fprintf(stderr,
+              "Unable to init lua vm.\nidk what the error is, try adding a "
+              "post onto the github with more info so we can fix this issue");
+      return 67;
+    }
+    return test(state);
+  }
+  case RUN: {
+    auto *state = luaL_newstate();
+    if (state == nullptr) {
+      fprintf(stderr,
+              "Unable to init lua vm.\nidk what the error is, try adding a "
+              "post onto the github with more info so we can fix this issue");
+      return 67;
+    }
+    return ::MakeTypes::run(state);
+  }
+  case HELP:
+    return help();
+  }
+}
+
+auto build(lua_State *) noexcept -> int {
+  printf("%s\n", __PRETTY_FUNCTION__);
+  help();
+  return -1;
+}
+
+auto new_project(char const *project_name) noexcept -> int {
+  namespace fs = std::filesystem;
+
+  auto const project_root = fs::current_path() / project_name;
+
+  if (fs::exists(project_root)) {
+    fprintf(stderr, "Project %s, already exists at %s", project_name,
+            project_root.c_str());
+    return 1;
+  }
+
+  // create the dir
+  fs::create_directory(project_root);
+
+  // create build + src dirs
+  fs::create_directory(project_root / "build");
+  fs::create_directory(project_root / "src");
+
+  // creating default `luamake.lua`
+  auto *luamake_lua = fopen((project_root / "luamake.lua").c_str(), "w");
+  // TODO: check that this doesn't throw some lifetime error
+  // TODO: write the default config for `luamake.lua`
+  auto constexpr lua_f_content =
+      string_view{"#include <print>\n"
+                  "\n"
+                  "auto main(int argc, char** argv) -> int {\n"
+                  "    std::println(\"Hello World!\");\n"
+                  "}"};
+  auto amount_lua_written = fprintf(luamake_lua, "%s", lua_f_content.data());
+  if (amount_lua_written != lua_f_content.length()) {
+    fprintf(
+        stderr,
+        "Unable to write full luamake template string into the lua file at %s",
+        (project_root / "luamake.lua").c_str());
+    fclose(luamake_lua);
+    return 65;
+  }
+
+  // creating simple hello world cpp file
+  auto main_cpp = fopen((project_root / "src/main.cpp").c_str(), "w");
+  auto constexpr cpp_f_content =
+      string_view{"#include <print>\n"
+                  "\n"
+                  "auto main(int argc, char** argv) -> int {\n"
+                  "    std::println(\"Hello World!\");\n"
+                  "}\n"};
+  auto amount_cpp_written = fprintf(main_cpp, "%s", cpp_f_content.data());
+  if (amount_cpp_written != cpp_f_content.length()) {
+    fprintf(stderr,
+            "Unable to write full c++ template string into the c++ file at %s",
+            (project_root / "src/main.cpp").c_str());
+    fclose(luamake_lua);
+    fclose(main_cpp);
+    return 65;
+  }
+
+  fclose(luamake_lua);
+  fclose(main_cpp);
+
+  return 0;
+}
+
+auto clean() noexcept -> int {
+  namespace fs = std::filesystem;
+  // remove everything from ./build
+  // where `.` is the dir that luamake is being called from
+
+  auto const clean_path = fs::current_path() / "build";
+  using namespace std::string_view_literals;
+  printf("Cleaning [%s]\n", clean_path.c_str());
+
+  if (!fs::exists(clean_path)) {
+    printf("[%s] does not exist (either previously cleaned, or never "
+           "constructed).\nNothing to do exiting\n",
+           clean_path.c_str());
+    return 0;
+  }
+
+  for (auto const &dir_ent : fs::recursive_directory_iterator(clean_path)) {
+    // maybe a better way to go about thing?
+    switch (dir_ent.status().type()) {
+    case fs::file_type::not_found:
+    case fs::file_type::none:
+    case fs::file_type::regular:
+    case fs::file_type::block:
+    case fs::file_type::directory:
+    case fs::file_type::fifo:
+    case fs::file_type::character:
+    case fs::file_type::socket:
+    case fs::file_type::symlink:
+    case fs::file_type::unknown:
+      break;
+    }
+    if (dir_ent.is_regular_file()) {
+      std::cout << "Removing" << dir_ent << '\n';
+      fs::remove(dir_ent);
+    }
+    // fs::remove(file);
+  }
+
+  printf("Done Cleaning");
+
+  return 0;
+}
+
+auto test(lua_State *state) noexcept -> int {
+  // build object
+  // TODO: have nrec != 0, figure out how much we'll need
+  lua_createtable(state, 0, 0);
+
+  auto const build_res = build(state);
+  if (build_res != 0) {
+    fprintf(stderr, "Error dunig compiling phase of test");
+    return build_res;
+  }
+
+  // TODO
+}
+
+auto run(lua_State *state) noexcept -> int {
+  auto build_res = build(state);
+  if (build_res != 0) {
+    fprintf(stderr, "Error during build phase of compiling");
+    return build_res;
+  }
+
+  auto run_fn = lua_getglobal(state, "Run");
+  if (lua_type(state, run_fn) == LUA_TNIL) {
+    fprintf(stderr,
+            "Function `Run` is undefined in the discovered `luamake.lua`. See "
+            "README in [[github link]] for more info.");
+    return 1;
+  }
+
+  // TODO: create `config` object, then call run_fn, and return if there's any
+  // errors
+}
+
+auto help() noexcept -> int {
+  std::printf(
+      "Usage: luamake [options]?\n"
+      "options:\n"
+      "\t-h               : Displays this help message.\n"
+      "\t-c               : Cleans the cache dir and removes the output.\n"
+      "\t-n <project-name>: Creates a new subdir with name <project-name>, "
+      "creating a default luamake build script.\n"
+      "\t-b               : Builds the project based on the `Build` function "
+      "defined in the `luamake.lua` file in the current dir.\n"
+      "\t-t               : Builds the project based on the `Build` function "
+      "in the `luamake.lua` file in the current dir, with the additional macro "
+      "`LUAMAKE_TESTS` defined. Then runs the tests defined in the `Test` "
+      "function "
+      "defined in the `luamake.lua` file in the current dir, displaying the "
+      "number of tests that succeeded.\n"
+      "\t-r               : Builds the project based on the `Build` function "
+      "defined in the `luamake.lua` file in the current dir. Then runs the "
+      "program, based on the `Run` function defined in the current dirs "
+      "`luamake.lua` file.\n"
+      "If no options are passed in, it is the same as calling `luamake -r`\n"
+      "For more information see the `README.md` at "
+      "[[https://github.com/Winter-On-Mars/luamake]]\n");
+  return 1;
+}
+} // namespace MakeTypes
+
+/*
+auto constexpr get_all_files(MakeFlags const &flags) noexcept
+    -> std::pair<std::unordered_map<string, src_file>, cache> {
   auto files = std::unordered_map<string, src_file>();
-  for (auto const& files : std::filesystem::open_dir(flags.build_dir)) {
+  for (auto const &files : std::filesystem::open_dir(flags.build_dir)) {
     std::cout << files.name << '\n';
   }
 
   if (!has_cache_dir(flags.build_dir)) {
   }
 }
-
-auto make_dir(Config const &cfg, MakeFlags const &flags) noexcept -> void {
-  // if cfg.pre_exec.empty() then loop shouldn't run
-  for (auto const command : cfg.pre_exec) {
-    std::cout << '\t' << command << '\n';
-    // TODO: figure out how to run commands
-    // think we might have to make some function
-    // to allow for this to work across platforms
-  }
-
-  auto const [cpp_files, cache] = get_all_files(flags);
-  auto const same_flags = flags == cache.flags;
-  cache.flags = flags;
-
-  if (!same_flags) {
-    // for loop
-  }
-
-  // TODO: see about adding the debug info flag to this, if that results in any
-  // speed improvements or things like that
-  auto const config_flags =
-      cfg.flags.empty() ? string("")
-                        : string(" -") + helper::flatten(cfg.flags, " -");
-}
-
-auto inline print_incorrect_usage() noexcept -> void {
-  std::cerr << "Usage: input the subdir being compiled\n";
-}
-
-auto clean_dir(std::string_view const dir) noexcept -> void {}
+*/
 
 auto main(int argc, char **argv) -> int {
-  // TODO: add help message and -h flag
-
-  auto const cl_args = std::span<char *>(argv, static_cast<size_t>(argc));
-
-  auto *state = luaL_newstate();
-  if (state == nullptr) {
-    std::cerr << "Unable to init lua vm\n";
-    return 65;
-  }
-  // luaL_openlibs(state);
-  // have to turn off the gc, bc we need the strings to stay alive for the whole
-  // program idk if we should maybe have the Config object own the strings but
-  // this seems fine for a first draft :)
-  auto const _ = lua_gc(state, LUA_GCSTOP);
-
-  if (luaL_dofile(state, "config.lua") != LUA_OK) {
-    std::cerr << "Error parsing config.lua\n";
-    return 67;
-  }
-
-  // now config should be at the top of the stack
-  if (!lua_istable(state, -1)) {
-    std::cerr << "Error parsing config.lua, expected table found not a "
-                 "table\nMight be an issue with project layout, see README for "
-                 "details about expected project layout\nIf not please open an "
-                 "issue on the Github with Details.";
-    return 67;
-  }
-
-  lua_setglobal(state, "config_table");
-
-  // crash if we're unable to parse it :)
-  auto const config = [state]() -> Config {
-    auto cfg = Config::make(state);
-    if (cfg.has_value()) {
-      return *cfg;
-    } else {
-      std::cerr << "Error while parsing config.lua, todo fix issues";
-      std::exit(65);
-    }
-  }();
-
-  std::cout << config << '\n';
-
-  auto const flags = MakeFlags::make(cl_args);
-
-  if (flags.clean) {
-    clean_dir(flags.build_dir);
-  } else {
-    make_dir(config, flags);
-  }
-
-  return 0;
+  auto const flags = MakeTypes::Type::make(argc, argv);
+  return flags.run();
 }
