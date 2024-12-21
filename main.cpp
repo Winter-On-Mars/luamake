@@ -11,7 +11,36 @@
 
 #include <lua.hpp>
 
+// TODO: really just a lot of things to do with cross platform support
+// mostly just with the \r\n vs \n, and the terminal colors listed below
+
+// color things for error messages/ warnings
+// TODO: add an option to not define these in the `Makefile`
+// TODO: extract these into a platform independent thing so this'll actually
+// work on windows and shit
+#define ERROR "\033[0;31m"
+#define WARNING "\033[0;33m"
+#define DBG "\033[0;32m"
+#define NORMAL "\033[0;0m" // TODO: make sure this resets the terminal text
+
 using std::vector, std::string, std::string_view;
+
+// TODO: remove this and add <utility> header if you ever upgrade to c++23
+// source = [[https://en.cppreference.com/w/cpp/utility/unreachable]]
+[[noreturn]] void unreachable() {
+#if defined(_MSC_VER) && !defined(__clang__)
+  __assume(false);
+#else
+  __builtin_unreachable();
+#endif
+}
+
+// TODO: update all fprintf(stderr) to have the ERROR thing so the terminal
+// output is colored
+
+#define BUILDER_OBJ "__luamake_builder"
+#define RUNNER_OBJ "__luamake_runner"
+#define TESTING_MACRO "__define_testing_macro"
 
 namespace helper {
 auto constexpr flatten(std::span<string_view const> const arr,
@@ -189,6 +218,7 @@ auto run(lua_State *) noexcept -> int;
 auto help() noexcept -> int;
 
 struct Type final {
+  // TODO: add init flag to inplace init a new project
   enum {
     UNKNOWN_ARG,
     BUILD,
@@ -217,8 +247,10 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
     // TODO: make sure to see there's no potential security
     // issues with this command
     if (argc != 3) {
-      // TODO: write error message about improperly formatted input
-      fprintf(stderr, "");
+      fprintf(stderr,
+              ERROR "Fatel Error: Expected string for the name of the "
+                    "project, found nothing" NORMAL
+                    "\n\tDisplaying help message for more information\n");
       return {Type::HELP, ""};
     }
     return {Type::NEW, argv[2]};
@@ -231,6 +263,9 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
   } else if (strcmp(argv[1], "-h") == 0) {
     return {Type::HELP, ""};
   } else {
+    printf(WARNING "Unknown argument" NORMAL " [%s]\n"
+                   "\tDisplaying help for list of accepted arguments\n",
+           argv[1]);
     return {Type::UNKNOWN_ARG, ""};
   }
 }
@@ -239,48 +274,87 @@ auto Type::run() const noexcept -> int {
   switch (type_t) {
   case UNKNOWN_ARG:
     return help();
-  case BUILD: {
-    auto *state = luaL_newstate();
-    if (state == nullptr) {
-      fprintf(stderr,
-              "Unable to init lua vm.\nidk what the error is, try adding a "
-              "post onto the github with more info so we can fix this issue");
-      return 67;
-    }
-    return build(state);
-  }
   case NEW:
     return new_project(project_name);
   case CLEAN:
     return clean();
-  case TEST: {
-    auto *state = luaL_newstate();
-    if (state == nullptr) {
-      fprintf(stderr,
-              "Unable to init lua vm.\nidk what the error is, try adding a "
-              "post onto the github with more info so we can fix this issue");
-      return 67;
-    }
-    return test(state);
-  }
-  case RUN: {
-    auto *state = luaL_newstate();
-    if (state == nullptr) {
-      fprintf(stderr,
-              "Unable to init lua vm.\nidk what the error is, try adding a "
-              "post onto the github with more info so we can fix this issue");
-      return 67;
-    }
-    return ::MakeTypes::run(state);
-  }
   case HELP:
     return help();
+  case BUILD:
+    [[fallthrough]];
+  case TEST:
+    [[fallthrough]];
+  case RUN:
+    break;
   }
+
+  auto *state = luaL_newstate();
+  if (state == nullptr) {
+    fprintf(stderr, ERROR
+            "Fatel Error: Unable to init luavm.\n" NORMAL
+            "\tThere may be some issue with your lua lib, if "
+            "not feel free to message me on discord/ open an issue on the "
+            "gh");
+    return 70; // internal service error
+  }
+
+  // TODO: add a check to make sure that the `luamake.lua` file exists
+  // and maybe print out a nice error message if it doesn't
+  if (luaL_dofile(state, "luamake.lua") != LUA_OK) {
+    // TODO: write helpful error message about seeing the errors on screen
+    return 78; // config error
+  }
+
+  switch (type_t) {
+  case BUILD:
+    return build(state);
+  case TEST:
+    return test(state);
+  case RUN:
+    return MakeTypes::run(state);
+  case UNKNOWN_ARG:
+    [[fallthrough]];
+  case NEW:
+    [[fallthrough]];
+  case CLEAN:
+    [[fallthrough]];
+  case HELP:
+    break;
+  }
+  unreachable();
 }
 
-auto build(lua_State *) noexcept -> int {
-  printf("%s\n", __PRETTY_FUNCTION__);
-  help();
+auto build(lua_State *state) noexcept -> int {
+  printf(DBG "%s\n" NORMAL, __PRETTY_FUNCTION__);
+
+  auto build_lua_fn = lua_getglobal(state, "Build");
+  // function undefined in `luamake.lua`
+  if (build_lua_fn == LUA_TNIL) {
+    // TODO: write error message
+    return -1;
+  }
+  // value Build is defined as a global, but isn't a function
+  if (build_lua_fn != LUA_TFUNCTION) {
+    // TODO: write error message
+    return -1;
+  }
+
+  auto builder = lua_getglobal(state, BUILDER_OBJ);
+  // builder is undefined
+  if (builder == LUA_TNIL) {
+    // TODO: define the builder object
+    return 65;
+  }
+
+  // TODO: switch this to pcall
+  lua_call(state, 1, 0);
+
+  // TODO: check the lua stack to make sure the table is actually there :)
+  // this might not even be needed, bc the function should be modifying builder
+  // in place, so it'll just be modifying the global [probably bad for
+  // performance but that's fine :)]
+  lua_setglobal(state, BUILDER_OBJ);
+
   return -1;
 }
 
@@ -290,10 +364,15 @@ auto new_project(char const *project_name) noexcept -> int {
   auto const project_root = fs::current_path() / project_name;
 
   if (fs::exists(project_root)) {
-    fprintf(stderr, "Project %s, already exists at %s", project_name,
-            project_root.c_str());
+    fprintf(stderr,
+            ERROR "Fatel Error: Project" NORMAL " [%s] " ERROR
+                  " already exists at" NORMAL " [%s]\n"
+                  "\tExiting\n",
+            project_name, project_root.c_str());
     return 1;
   }
+
+  // TODO: error checking on making these dirs :)
 
   // create the dir
   fs::create_directory(project_root);
@@ -305,13 +384,31 @@ auto new_project(char const *project_name) noexcept -> int {
   // creating default `luamake.lua`
   auto *luamake_lua = fopen((project_root / "luamake.lua").c_str(), "w");
   // TODO: check that this doesn't throw some lifetime error
-  // TODO: write the default config for `luamake.lua`
   auto constexpr lua_f_content =
-      string_view{"#include <print>\n"
+      string_view{"function Build(builder)\n"
+                  "    builder.type = \"exe\"\n"
+                  "    builder.exe = {\n"
+                  "        root = \"src/main.cpp\",\n"
+                  "        compiler = Clang({}),\n"
+                  "        name = \"a\",\n"
+                  "    }\n"
+                  "    builder.version = \"0.0.1\"\n"
+                  "    builder.description = \"TODO change me :)\"\n"
+                  "end\n"
                   "\n"
-                  "auto main(int argc, char** argv) -> int {\n"
-                  "    std::println(\"Hello World!\");\n"
-                  "}"};
+                  "function Run(runner)\n"
+                  "    runner.exe = \"build/a\"\n"
+                  "end\n"
+                  "\n"
+                  "Tests = {\n"
+                  "    {\n"
+                  "        fun = function(tester)\n"
+                  "            tester.exe = \"build/a\"\n"
+                  "            tester:add_args({\"This does nothing\"})\n"
+                  "        end,\n"
+                  "        expected_output = \"Hello World!\\n\"\n"
+                  "    }\n"
+                  "}\n"};
   auto amount_lua_written = fprintf(luamake_lua, "%s", lua_f_content.data());
   if (amount_lua_written != lua_f_content.length()) {
     fprintf(
@@ -325,10 +422,11 @@ auto new_project(char const *project_name) noexcept -> int {
   // creating simple hello world cpp file
   auto main_cpp = fopen((project_root / "src/main.cpp").c_str(), "w");
   auto constexpr cpp_f_content =
-      string_view{"#include <print>\n"
+      string_view{"#include <iostream>\n"
                   "\n"
                   "auto main(int argc, char** argv) -> int {\n"
-                  "    std::println(\"Hello World!\");\n"
+                  "    using std::cout;\n"
+                  "    cout << \"Hello World!\\n\";\n"
                   "}\n"};
   auto amount_cpp_written = fprintf(main_cpp, "%s", cpp_f_content.data());
   if (amount_cpp_written != cpp_f_content.length()) {
@@ -384,15 +482,17 @@ auto clean() noexcept -> int {
     // fs::remove(file);
   }
 
-  printf("Done Cleaning");
+  printf("Done Cleaning\n");
 
   return 0;
 }
 
 auto test(lua_State *state) noexcept -> int {
-  // build object
-  // TODO: have nrec != 0, figure out how much we'll need
+  // builder object
   lua_createtable(state, 0, 0);
+  lua_pushboolean(state, true);
+  lua_setfield(state, -2, TESTING_MACRO);
+  lua_setglobal(state, BUILDER_OBJ);
 
   auto const build_res = build(state);
   if (build_res != 0) {
@@ -401,6 +501,7 @@ auto test(lua_State *state) noexcept -> int {
   }
 
   // TODO
+  return -1;
 }
 
 auto run(lua_State *state) noexcept -> int {
@@ -411,15 +512,17 @@ auto run(lua_State *state) noexcept -> int {
   }
 
   auto run_fn = lua_getglobal(state, "Run");
-  if (lua_type(state, run_fn) == LUA_TNIL) {
+  if (run_fn == LUA_TNIL) {
     fprintf(stderr,
-            "Function `Run` is undefined in the discovered `luamake.lua`. See "
-            "README in [[github link]] for more info.");
-    return 1;
+            ERROR "Fatel Error:" NORMAL " Function `Run` is undefined in the "
+                  "discovered `luamake.lua`.\n"
+                  "\tSee README in [[github link]] for more info.");
+    return 70;
   }
 
   // TODO: create `config` object, then call run_fn, and return if there's any
   // errors
+  return -1;
 }
 
 auto help() noexcept -> int {
