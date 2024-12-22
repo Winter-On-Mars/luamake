@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <lua.h>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -18,10 +19,17 @@
 // TODO: add an option to not define these in the `Makefile`
 // TODO: extract these into a platform independent thing so this'll actually
 // work on windows and shit
+#ifdef NO_TERM_COLOR
+#define ERROR
+#define WARNING
+#define DBG
+#define NORMAL
+#else
 #define ERROR "\033[0;31m"
 #define WARNING "\033[0;33m"
 #define DBG "\033[0;32m"
-#define NORMAL "\033[0;0m" // TODO: make sure this resets the terminal text
+#define NORMAL "\033[0;0m"
+#endif
 
 using std::vector, std::string, std::string_view;
 
@@ -219,6 +227,7 @@ auto help() noexcept -> int;
 
 struct Type final {
   // TODO: add init flag to inplace init a new project
+  // TODO: add --release flag for O3 optimizations
   enum {
     UNKNOWN_ARG,
     BUILD,
@@ -247,10 +256,10 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
     // TODO: make sure to see there's no potential security
     // issues with this command
     if (argc != 3) {
-      fprintf(stderr,
-              ERROR "Fatel Error: Expected string for the name of the "
-                    "project, found nothing" NORMAL
-                    "\n\tDisplaying help message for more information\n");
+      fprintf(stderr, ERROR
+              "Fatel Error:" NORMAL " Expected string for the name of the "
+              "project, found nothing"
+              "\n\tDisplaying help message for more information\n");
       return {Type::HELP, ""};
     }
     return {Type::NEW, argv[2]};
@@ -291,7 +300,7 @@ auto Type::run() const noexcept -> int {
   auto *state = luaL_newstate();
   if (state == nullptr) {
     fprintf(stderr, ERROR
-            "Fatel Error: Unable to init luavm.\n" NORMAL
+            "Fatel Error:" NORMAL " Unable to init luavm.\n"
             "\tThere may be some issue with your lua lib, if "
             "not feel free to message me on discord/ open an issue on the "
             "gh");
@@ -330,30 +339,54 @@ auto build(lua_State *state) noexcept -> int {
   auto build_lua_fn = lua_getglobal(state, "Build");
   // function undefined in `luamake.lua`
   if (build_lua_fn == LUA_TNIL) {
-    // TODO: write error message
-    return -1;
+    fprintf(stderr, ERROR
+            "Fatel Error:" NORMAL
+            " Unable to find function `Build` in discovered `luamake.lua`.\n"
+            "\tSee README/wiki for more info\n");
+    return 70;
   }
   // value Build is defined as a global, but isn't a function
   if (build_lua_fn != LUA_TFUNCTION) {
-    // TODO: write error message
-    return -1;
+    fprintf(stderr,
+            ERROR "Fatel Error:" NORMAL
+                  " `Build` value found in `luamake.lua`, but is not a "
+                  "function (might be callable [why would you do that?]).\n"
+                  "\tSee README/wiki for more info, and if is a callable, feel "
+                  "free to open a gh issue to fix this problem (and maybe "
+                  "explain why the code's formatted this way lol)\n");
+    return 70;
   }
 
   auto builder = lua_getglobal(state, BUILDER_OBJ);
-  // builder is undefined
-  if (builder == LUA_TNIL) {
-    // TODO: define the builder object
-    return 65;
+  switch (builder) {
+  case LUA_TNIL:       // builder is undefined
+    lua_pop(state, 1); // remove the nil from the stack otherwise things fuck up
+                       // when we call the Build function
+    lua_createtable(state, 0, 0);
+    break;
+  case LUA_TTABLE: // table already defined, i.e. this function is being called
+                   // from run/test
+    break;
+  default:
+    // TODO: error on this case
+    return -1;
   }
 
   // TODO: switch this to pcall
   lua_call(state, 1, 0);
 
-  // TODO: check the lua stack to make sure the table is actually there :)
-  // this might not even be needed, bc the function should be modifying builder
-  // in place, so it'll just be modifying the global [probably bad for
-  // performance but that's fine :)]
-  lua_setglobal(state, BUILDER_OBJ);
+  // TODO: pre_exec
+
+  builder = lua_getglobal(state, BUILDER_OBJ);
+  if (builder != LUA_TTABLE) {
+    // TODO: write error message
+    // some fuckery happened in the `Build` function
+    return -1;
+  }
+
+  auto builder_type_t = lua_getfield(state, -1, "type");
+
+  // TODO: post_exec
 
   return -1;
 }
@@ -383,15 +416,18 @@ auto new_project(char const *project_name) noexcept -> int {
 
   // creating default `luamake.lua`
   auto *luamake_lua = fopen((project_root / "luamake.lua").c_str(), "w");
+  if (luamake_lua == nullptr) {
+    // TODO: error message about not being able to open file
+    return -1;
+  }
   // TODO: check that this doesn't throw some lifetime error
   auto constexpr lua_f_content =
       string_view{"function Build(builder)\n"
                   "    builder.type = \"exe\"\n"
-                  "    builder.exe = {\n"
-                  "        root = \"src/main.cpp\",\n"
-                  "        compiler = Clang({}),\n"
-                  "        name = \"a\",\n"
-                  "    }\n"
+                  "    builder.root = \"src/main.cpp\"\n"
+                  "    builder.compiler = Clang({})\n"
+                  "    builder.name = \"a\"\n"
+                  "\n"
                   "    builder.version = \"0.0.1\"\n"
                   "    builder.description = \"TODO change me :)\"\n"
                   "end\n"
@@ -421,6 +457,10 @@ auto new_project(char const *project_name) noexcept -> int {
 
   // creating simple hello world cpp file
   auto main_cpp = fopen((project_root / "src/main.cpp").c_str(), "w");
+  if (main_cpp == nullptr) {
+    // TODO: error message about not being able to open file
+    return -1;
+  }
   auto constexpr cpp_f_content =
       string_view{"#include <iostream>\n"
                   "\n"
