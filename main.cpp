@@ -1,14 +1,19 @@
-#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <lua.h>
 #include <numeric>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
+
+#ifdef __linux
+#include <sysexits.h>
+#endif
 
 #include <lua.hpp>
 
@@ -50,6 +55,24 @@ using std::vector, std::string, std::string_view;
 #define RUNNER_OBJ "__luamake_runner"
 #define TESTING_MACRO "__define_testing_macro"
 
+namespace luamake_builtins {
+static auto clang(lua_State* state) -> int {
+  // TODO: actually impl this function
+  auto num_args = lua_gettop(state);
+  if (num_args != 1) {
+    lua_pushliteral(state, "fuck");
+  } else {
+    lua_createtable(state, 0, 0);
+  }
+  return 1;
+}
+
+static luaL_Reg const funcs[] = {
+  { "Clang", clang },
+  { nullptr, nullptr }
+};
+}
+
 namespace helper {
 auto constexpr flatten(std::span<string_view const> const arr,
                        string_view const seperator) noexcept -> string {
@@ -67,6 +90,7 @@ auto constexpr dump(lua_State *state /*, lua_table* ...*/) noexcept -> string {
 }
 } // namespace helper
 
+namespace dependency_graph {
 // all of the strings we parse from the config.lua are owned by
 // the lua_State gc, so these all are non-owning references
 struct Config final {
@@ -198,24 +222,30 @@ auto operator<<(std::ostream &os, Config const &cfg) noexcept
 }
 
 struct src_file final {
-  string name;
   std::size_t hash;
-  bool recompile;
-  vector<src_file> deps;
-
-  auto constexpr notify_deps() noexcept -> void;
-
-  auto constexpr depens_on(string_view const src) const noexcept -> bool {
-    if (name == src) {
-      return true;
-    }
-    if (std::any_of(deps.begin(), deps.end(),
-                    [src](auto &&dep) { return dep.name == src; })) {
-      return true;
-    }
-    return false;
-  }
+  string name;
+  vector<string> deps;
 };
+
+using dep_graph = std::unordered_map<string, src_file>;
+
+auto generate(FILE* root, char const *root_name) noexcept -> dep_graph {
+  auto graph = dep_graph{};
+
+  char * line = nullptr;
+  try {
+    char* line = nullptr;
+    size_t len = 0;
+    size_t amount_read = getline(&line, &len, root);
+    // todo: finish this stupid fuckin c code shit
+  } catch (...) {
+  }
+
+  free(line);
+
+  return graph;
+}
+}
 
 namespace MakeTypes {
 auto build(lua_State *) noexcept -> int;
@@ -297,6 +327,8 @@ auto Type::run() const noexcept -> int {
     break;
   }
 
+  // TODO: actually close down the lua_State*
+  // when we're done
   auto *state = luaL_newstate();
   if (state == nullptr) {
     fprintf(stderr, ERROR
@@ -307,11 +339,18 @@ auto Type::run() const noexcept -> int {
     return 70; // internal service error
   }
 
-  // TODO: add a check to make sure that the `luamake.lua` file exists
-  // and maybe print out a nice error message if it doesn't
-  if (luaL_dofile(state, "luamake.lua") != LUA_OK) {
-    // TODO: write helpful error message about seeing the errors on screen
-    return 78; // config error
+  // TODO: remove this and make it a bit safer
+  luaL_openlibs(state);
+
+  auto* lm_lua = fopen((std::filesystem::current_path()/"luamake.lua").c_str(), "r");
+  if (lm_lua == nullptr) {
+    fprintf(stderr, ERROR "Fatel Error:" NORMAL " unable to discover `luamake.lua` in current dir at [%s]\n\tRun -n <proj-name> to create a new project [and maybe in the future i'll add a -i to init a new project we'll see :)]", std::filesystem::current_path().c_str());
+    return EX_CONFIG;
+  }
+  (void)fclose(lm_lua);
+  if (luaL_dofile(state, "luamake.lua")) {
+    fprintf(stderr, ERROR "Fatel Error:" NORMAL " unable to run the discovered `luamake.lua` file at [%s]\n\tLua error message [%s]", std::filesystem::current_path().c_str(), lua_tostring(state, -1));
+    return EX_CONFIG;
   }
 
   switch (type_t) {
@@ -334,7 +373,11 @@ auto Type::run() const noexcept -> int {
 }
 
 auto build(lua_State *state) noexcept -> int {
-  printf(DBG "%s\n" NORMAL, __PRETTY_FUNCTION__);
+  printf(DBG "fn" NORMAL " [%s]\n", __PRETTY_FUNCTION__);
+  fflush(stdout);
+
+  lua_pushcfunction(state, luamake_builtins::clang);
+  lua_setglobal(state, "Clang");
 
   auto build_lua_fn = lua_getglobal(state, "Build");
   // function undefined in `luamake.lua`
@@ -363,12 +406,15 @@ auto build(lua_State *state) noexcept -> int {
     lua_pop(state, 1); // remove the nil from the stack otherwise things fuck up
                        // when we call the Build function
     lua_createtable(state, 0, 0);
+    lua_setglobal(state, BUILDER_OBJ);
+    lua_getglobal(state, BUILDER_OBJ); // there's definately a better way to go about this, but i can't think of one rn, basically it's because the setglobal function pops the value from the stack, but we need it on the stack bc we're passing it into the funciton being called :)
     break;
   case LUA_TTABLE: // table already defined, i.e. this function is being called
                    // from run/test
     break;
   default:
-    // TODO: error on this case
+      // TODO: check that this is the correct use of lua_typename
+      fprintf(stderr, ERROR "Fatel Error:" NORMAL " `builder` object was defined, but it's type was expected to be table, got [%s]", lua_typename(state, 1));
     return -1;
   }
 
@@ -376,15 +422,40 @@ auto build(lua_State *state) noexcept -> int {
   lua_call(state, 1, 0);
 
   // TODO: pre_exec
-
   builder = lua_getglobal(state, BUILDER_OBJ);
   if (builder != LUA_TTABLE) {
-    // TODO: write error message
-    // some fuckery happened in the `Build` function
+    fprintf(stderr, ERROR "Fatel Error:" NORMAL " You ended up changing the type of the `builder` object that was passed into your `Build` function.\n\tIdk just fuck'in don't do that?\n");
+    return 70;
+  }
+
+  auto pre_exec_t = lua_getfield(state, -1, "pre_exec");
+  if (pre_exec_t == LUA_TTABLE) {
+    // TODO: run the pre_exec stuff
+    fprintf(stderr, WARNING "Warning:" NORMAL " pre_exec table things are not currently implimented, and thus will not be run\n\tConsider adding this section to the gh by opening an issue or however github works idk.");
+  }
+  lua_pop(state, 1); // remove the pre_exec stuff
+
+  auto const builder_root_t = lua_getfield(state, -1, "root");
+  if (builder_root_t != LUA_TSTRING) {
+    fprintf(stderr, ERROR "Fatel Error:" NORMAL " fucked up root path to the main file");
+    return 70;
+  }
+
+  auto const* builder_root = lua_tostring(state, -1);
+  printf("Testing builder_root [%s]\n", builder_root);
+  fflush(stdout);
+
+  auto* root_file = fopen((std::filesystem::current_path()/builder_root).c_str(), "r");
+  if (root_file == nullptr) {
+    fprintf(stderr, ERROR "Fatel Error:" NORMAL " The file specified as the root of the project [%s] does not exist at [%s]", builder_root, (std::filesystem::current_path()/builder_root).c_str());
     return -1;
   }
 
-  auto builder_type_t = lua_getfield(state, -1, "type");
+  // TODO: strip the 'src/' from the builder_root
+  auto const* stripped_builder_name = builder_root;
+  auto dep_graph = dependency_graph::generate(root_file, stripped_builder_name);
+
+  fclose(root_file);
 
   // TODO: post_exec
 
@@ -545,6 +616,9 @@ auto test(lua_State *state) noexcept -> int {
 }
 
 auto run(lua_State *state) noexcept -> int {
+  printf(DBG "fn" NORMAL " [%s]\n", __PRETTY_FUNCTION__);
+  fflush(stdout);
+
   auto build_res = build(state);
   if (build_res != 0) {
     fprintf(stderr, "Error during build phase of compiling");
