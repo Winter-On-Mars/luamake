@@ -108,7 +108,74 @@ static auto clang(lua_State *state) -> int {
   return 1;
 }
 
-constexpr luaL_Reg const funcs[] = {{"Clang", clang}, {nullptr, nullptr}};
+static auto dump(lua_State *state) -> int {
+  dbg_print();
+
+  auto const num_args = lua_gettop(state);
+  if (num_args != 1) { // idk if this is actually how to do error handling (?)
+    lua_pushnil(state);
+    return 1;
+  }
+
+  auto res = string();
+
+  switch (lua_type(state, -1)) {
+  case LUA_TNONE:
+    lua_error(state);
+    return 1; // (?)
+    break;
+  case LUA_TNIL:
+    res = string("nil");
+    break;
+  case LUA_TBOOLEAN:
+    res = lua_toboolean(state, -1) == 1 ? string("true") : string("false");
+    break;
+  case LUA_TLIGHTUSERDATA:
+    lua_error(state);
+    return 1; // (?)
+    break;
+  case LUA_TNUMBER:
+    res = std::to_string(lua_tonumber(state, -1));
+    break;
+  case LUA_TSTRING:
+    res = string(lua_tostring(state, -1));
+    break;
+  case LUA_TTABLE:
+    res += string("Work in progress on dumping tables values\n");
+    res += '{';
+    res += '\n';
+    res += '\t';
+
+    lua_pushnil(state);
+    while (lua_next(state, -1) != 0) {
+      res += lua_typename(state, lua_type(state, -2));
+      res += lua_typename(state, lua_type(state, -1));
+      lua_pop(state, 1); // would be better to have a variable in the while loop
+      // so that we don't have a bunch of this stack manip going on
+    }
+    lua_pop(state, 1);
+
+    res += '}';
+    res += '\n';
+    break;
+  case LUA_TFUNCTION:
+    res = string("<lua: fn>");
+    break;
+  case LUA_TUSERDATA:
+    lua_error(state);
+    return 1;
+    break;
+  case LUA_TTHREAD:
+    res = string("<lua: thread>");
+    break;
+  }
+
+  lua_pushstring(state, res.c_str());
+  return 1;
+}
+
+constexpr luaL_Reg const funcs[] = {
+    {"clang", clang}, {"dump", dump}, {nullptr, nullptr}};
 } // namespace luamake_builtins
 
 namespace helper {
