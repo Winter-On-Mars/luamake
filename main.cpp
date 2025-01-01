@@ -26,7 +26,6 @@
 #endif
 
 // color things for error messages/ warnings
-// TODO: add an option to not define these in the `Makefile`
 // TODO: extract these into a platform independent thing so this'll actually
 // work on windows and shit
 #ifdef NO_TERM_COLOR
