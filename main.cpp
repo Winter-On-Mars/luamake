@@ -14,8 +14,16 @@
 
 #include <lua.hpp>
 
-// TODO: really just a lot of things to do with cross platform support
-// mostly just with the \r\n vs \n, and the terminal colors listed below
+#if defined(_WIN32)
+#define NL "\r\n"
+#elif defined(__unix__)
+#define NL "\n"
+#elif defined(__MACH__)
+#define NL "\n"
+#else
+#warning("new line macro defined, you can help the project by adding another header guard and defining it");
+#define NL ""
+#endif
 
 // color things for error messages/ warnings
 // TODO: add an option to not define these in the `Makefile`
@@ -34,16 +42,16 @@
 #endif
 
 #define error_message(msg)                                                     \
-  fprintf(stderr, ERROR "Fatel Error:" NORMAL " " msg "\n")
+  fprintf(stderr, ERROR "Fatel Error:" NORMAL " " msg NL)
 #define ferror_message(msg, ...)                                               \
-  fprintf(stderr, ERROR "Fatel Error:" NORMAL " " msg "\n", __VA_ARGS__)
+  fprintf(stderr, ERROR "Fatel Error:" NORMAL " " msg NL, __VA_ARGS__)
 #define warning_message(msg)                                                   \
-  fprintf(stderr, WARNING "Warning:" NORMAL " " msg "\n")
+  fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL)
 #define fwarning_message(msg, ...)                                             \
-  fprintf(stderr, WARNING "Warning:" NORMAL " " msg "\n", __VA_ARGS__)
+  fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL, __VA_ARGS__)
 
 #define dbg_print()                                                            \
-  fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]\n", __PRETTY_FUNCTION__)
+  fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
 
 using std::array, std::vector, std::string, std::string_view;
 
@@ -60,9 +68,6 @@ template <class T> using opt = std::optional<T>;
   __builtin_unreachable();
 #endif
 }
-
-// TODO: update all fprintf(stderr) to have the ERROR thing so the terminal
-// output is colored
 
 #define BUILDER_OBJ "__luamake_builder"
 #define RUNNER_OBJ "__luamake_runner"
@@ -569,10 +574,9 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
     // TODO: make sure to see there's no potential security
     // issues with this command
     if (argc != 3) {
-      fprintf(stderr, ERROR
-              "Fatel Error:" NORMAL " Expected string for the name of the "
-              "project, found nothing"
-              "\n\tDisplaying help message for more information\n");
+      error_message("Expected string for the name of the "
+                    "project, found nothing" NL
+                    "\tDisplaying help message for more information" NL);
       return {Type::HELP, ""};
     }
     return {Type::NEW, argv[2]};
@@ -585,9 +589,9 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
   } else if (strcmp(argv[1], "-h") == 0) {
     return {Type::HELP, ""};
   } else {
-    printf(WARNING "Unknown argument" NORMAL " [%s]\n"
-                   "\tDisplaying help for list of accepted arguments\n",
-           argv[1]);
+    fwarning_message("Unknown argument [%s]" NL
+                     "\tDisplaying help for list of accepted arguments",
+                     argv[1]);
     return {Type::UNKNOWN_ARG, ""};
   }
 }
@@ -613,11 +617,11 @@ auto Type::run() const noexcept -> exit_t {
 
   auto *state = luaL_newstate();
   if (state == nullptr) {
-    fprintf(stderr, ERROR
-            "Fatel Error:" NORMAL " Unable to init luavm.\n"
-            "\tThere may be some issue with your lua lib, if "
-            "not feel free to message me on discord/ open an issue on the "
-            "gh");
+    error_message(
+        "Unable to init luavm." NL
+        "\tThere may be some issue with your lua lib, if "
+        "not feel free to message me on discord/ open an issue on the "
+        "gh");
     return exit_t::lua_vm_error; // internal service error
   }
 
@@ -627,22 +631,19 @@ auto Type::run() const noexcept -> exit_t {
   auto *lm_lua =
       fopen((std::filesystem::current_path() / "luamake.lua").c_str(), "r");
   if (lm_lua == nullptr) {
-    fprintf(stderr,
-            ERROR
-            "Fatel Error:" NORMAL
-            " unable to discover `luamake.lua` in current dir at [%s]\n\tRun "
-            "-n <proj-name> to create a new project [and maybe in the future "
-            "i'll add a -i to init a new project we'll see :)]",
-            std::filesystem::current_path().c_str());
+    ferror_message(
+        "unable to discover `luamake.lua` in current dir at [%s]" NL "\tRun "
+        "-n <proj-name> to create a new project [and maybe in the future "
+        "i'll add a -i to init a new project we'll see :)]",
+        std::filesystem::current_path().c_str());
     return exit_t::config_error;
   }
   (void)fclose(lm_lua);
   if (luaL_dofile(state, "luamake.lua")) {
-    fprintf(stderr,
-            ERROR "Fatel Error:" NORMAL
-                  " unable to run the discovered `luamake.lua` file at "
-                  "[%s]\n\tLua error message [%s]",
-            std::filesystem::current_path().c_str(), lua_tostring(state, -1));
+    ferror_message("unable to run the discovered `luamake.lua` file at "
+                   "[%s]" NL "\tLua error message [%s]",
+                   std::filesystem::current_path().c_str(),
+                   lua_tostring(state, -1));
     return exit_t::config_error;
   }
 
@@ -680,21 +681,18 @@ auto build(lua_State *state) noexcept -> exit_t {
   auto build_lua_fn = lua_getglobal(state, "Build");
   // function undefined in `luamake.lua`
   if (build_lua_fn == LUA_TNIL) {
-    fprintf(stderr, ERROR
-            "Fatel Error:" NORMAL
-            " Unable to find function `Build` in discovered `luamake.lua`.\n"
-            "\tSee README/wiki for more info\n");
+    error_message(
+        "Unable to find function `Build` in discovered `luamake.lua`." NL
+        "\tSee README/wiki for more info");
     return exit_t::config_error;
   }
   // value Build is defined as a global, but isn't a function
   if (build_lua_fn != LUA_TFUNCTION) {
-    fprintf(stderr,
-            ERROR "Fatel Error:" NORMAL
-                  " `Build` value found in `luamake.lua`, but is not a "
-                  "function (might be callable [why would you do that?]).\n"
+    error_message("`Build` value found in `luamake.lua`, but is not a "
+                  "function (might be callable [why would you do that?])." NL
                   "\tSee README/wiki for more info, and if is a callable, feel "
                   "free to open a gh issue to fix this problem (and maybe "
-                  "explain why the code's formatted this way lol)\n");
+                  "explain why the code's formatted this way lol)");
     return exit_t::config_error;
   }
 
@@ -717,12 +715,9 @@ auto build(lua_State *state) noexcept -> exit_t {
                    // from run/test
     break;
   default:
-    // TODO: check that this is the correct use of lua_typename
-    fprintf(stderr,
-            ERROR "Fatel Error:" NORMAL
-                  " `builder` object was defined, but it's type was expected "
-                  "to be table, got [%s]",
-            lua_typename(state, 1));
+    ferror_message("`builder` object was defined, but it's type was expected "
+                   "to be table, got [%s]",
+                   lua_typename(state, lua_type(state, -1)));
     return exit_t::config_error;
   }
 
@@ -732,28 +727,25 @@ auto build(lua_State *state) noexcept -> exit_t {
   // TODO: pre_exec
   builder = lua_getglobal(state, BUILDER_OBJ);
   if (builder != LUA_TTABLE) {
-    fprintf(stderr, ERROR "Fatel Error:" NORMAL
-                          " You ended up changing the type of the `builder` "
-                          "object that was passed into your `Build` "
-                          "function.\n\tIdk just fuck'in don't do that?\n");
+    error_message(" You ended up changing the type of the `builder` "
+                  "object that was passed into your `Build` "
+                  "function." NL "\tIdk just fuck'in don't do that?");
     return exit_t::config_error;
   }
 
   auto pre_exec_t = lua_getfield(state, -1, "pre_exec");
   if (pre_exec_t == LUA_TTABLE) {
     // TODO: run the pre_exec stuff
-    fprintf(stderr,
-            WARNING "Warning:" NORMAL
-                    " pre_exec table things are not currently implimented, and "
-                    "thus will not be run\n\tConsider adding this section to "
+    warning_message("pre_exec table things are not currently implimented, and "
+                    "thus will not be run" NL
+                    "\tConsider adding this section to "
                     "the gh by opening an issue or however github works idk.");
   }
   lua_pop(state, 1); // remove the pre_exec stuff
 
   auto const builder_root_t = lua_getfield(state, -1, "root");
   if (builder_root_t != LUA_TSTRING) {
-    fprintf(stderr, ERROR "Fatel Error:" NORMAL
-                          " fucked up root path to the main file");
+    error_message("fucked up root path to the main file");
     return exit_t::config_error;
   }
 
@@ -769,12 +761,10 @@ auto build(lua_State *state) noexcept -> exit_t {
   auto *root_file =
       fopen((std::filesystem::current_path() / builder_root).c_str(), "r");
   if (root_file == nullptr) {
-    fprintf(stderr,
-            ERROR "Fatel Error:" NORMAL
-                  " The file specified as the root of the project [%s] does "
-                  "not exist at [%s]",
-            builder_root.data(),
-            (std::filesystem::current_path() / builder_root).c_str());
+    ferror_message("The file specified as the root of the project [%s] does "
+                   "not exist at [%s]",
+                   builder_root.data(),
+                   (std::filesystem::current_path() / builder_root).c_str());
     return exit_t::config_error;
   }
 
@@ -783,7 +773,7 @@ auto build(lua_State *state) noexcept -> exit_t {
   fclose(root_file);
 
   if (!dep_graph.has_value()) {
-    fprintf(stderr, "fucky wucky :3");
+    error_message("fucky wucky :3");
     return exit_t::internal_error;
   }
 
@@ -821,11 +811,8 @@ auto new_project(char const *project_name) noexcept -> exit_t {
   auto const project_root = fs::current_path() / project_name;
 
   if (fs::exists(project_root)) {
-    fprintf(stderr,
-            ERROR "Fatel Error: Project" NORMAL " [%s] " ERROR
-                  " already exists at" NORMAL " [%s]\n"
-                  "\tExiting\n",
-            project_name, project_root.c_str());
+    ferror_message("Project [%s] already exists at [%s]" NL "\tExiting",
+                   project_name, project_root.c_str());
     return exit_t::useage_error;
   }
 
@@ -841,43 +828,42 @@ auto new_project(char const *project_name) noexcept -> exit_t {
   // creating default `luamake.lua`
   auto *luamake_lua = fopen((project_root / "luamake.lua").c_str(), "w");
   if (luamake_lua == nullptr) {
-    fprintf(stderr,
-            ERROR "Fatel Error:" NORMAL
-                  " Unable to open file at [%s].\n\tThis could be an issue "
-                  "with permissions, or out of space.\n",
-            (fs::current_path() / "luamake.lua").c_str());
+    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
+                   "with permissions, or out of space.",
+                   (fs::current_path() / "luamake.lua").c_str());
     return exit_t::internal_error;
   }
   auto constexpr lua_f_content =
-      string_view{"function Build(builder)\n"
-                  "    builder.type = \"exe\"\n"
-                  "    builder.root = \"src/main.cpp\"\n"
-                  "    builder.compiler = Clang({})\n"
-                  "    builder.name = \"a\"\n"
-                  "\n"
-                  "    builder.version = \"0.0.1\"\n"
-                  "    builder.description = \"TODO change me :)\"\n"
-                  "end\n"
-                  "\n"
-                  "function Run(runner)\n"
-                  "    runner.exe = \"build/a\"\n"
-                  "end\n"
-                  "\n"
-                  "Tests = {\n"
-                  "    {\n"
-                  "        fun = function(tester)\n"
-                  "            tester.exe = \"build/a\"\n"
-                  "            tester:add_args({\"This does nothing\"})\n"
-                  "        end,\n"
-                  "        expected_output = \"Hello World!\\n\"\n"
-                  "    }\n"
-                  "}\n"};
+      // clang-format off
+      string_view{"function Build(builder)" NL
+                  "    builder.type = \"exe\"" NL
+                  "    builder.root = \"src/main.cpp\"" NL
+                  "    builder.compiler = Clang({})" NL
+                  "    builder.name = \"a\"" NL
+                  NL
+                  "    builder.version = \"0.0.1\"" NL
+                  "    builder.description = \"TODO change me :)\"" NL
+                  "end" NL
+                  NL
+                  "function Run(runner)" NL
+                  "    runner.exe = \"build/a\"" NL
+                  "end" NL
+                  NL
+                  "Tests = {" NL
+                  "    {" NL
+                  "        fun = function(tester)" NL
+                  "            tester.exe = \"build/a\"" NL
+                  "            tester:add_args({\"This does nothing\"})" NL
+                  "        end," NL
+                  "        expected_output = \"Hello World!\\n\"" NL
+                  "    }" NL
+                  "}" NL};
+  // clang-format on
   auto amount_lua_written = fprintf(luamake_lua, "%s", lua_f_content.data());
   if (amount_lua_written != lua_f_content.length()) {
-    fprintf(
-        stderr,
-        "Unable to write full luamake template string into the lua file at %s",
-        (project_root / "luamake.lua").c_str());
+    ferror_message("Unable to write full luamake template string into the lua "
+                   "file at [%s]",
+                   (project_root / "luamake.lua").c_str());
     fclose(luamake_lua);
     return exit_t::internal_error;
   }
@@ -885,25 +871,25 @@ auto new_project(char const *project_name) noexcept -> exit_t {
   // creating simple hello world cpp file
   auto main_cpp = fopen((project_root / "src/main.cpp").c_str(), "w");
   if (main_cpp == nullptr) {
-    fprintf(stderr,
-            ERROR "Fatel Error:" NORMAL
-                  " Unable to open file at [%s].\n\tThis could be an issue "
-                  "with permissions, or out of space.\n",
-            (fs::current_path() / "src/main.cpp").c_str());
+    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
+                   "with permissions, or out of space.",
+                   (fs::current_path() / "src/main.cpp").c_str());
     return exit_t::internal_error;
   }
   auto constexpr cpp_f_content =
-      string_view{"#include <iostream>\n"
-                  "\n"
-                  "auto main(int argc, char** argv) -> int {\n"
-                  "    using std::cout;\n"
-                  "    cout << \"Hello World!\\n\";\n"
-                  "}\n"};
+      // clang-format off
+      string_view{"#include <iostream>" NL
+                  NL
+                  "auto main(int argc, char** argv) -> int {" NL
+                  "    using std::cout;" NL
+                  "    cout << \"Hello World!\\n\";" NL
+                  "}" NL};
+  // clang-format on
   auto amount_cpp_written = fprintf(main_cpp, "%s", cpp_f_content.data());
   if (amount_cpp_written != cpp_f_content.length()) {
-    fprintf(stderr,
-            "Unable to write full c++ template string into the c++ file at %s",
-            (project_root / "src/main.cpp").c_str());
+    ferror_message(
+        "Unable to write full c++ template string into the c++ file at [%s]",
+        (project_root / "src/main.cpp").c_str());
     fclose(luamake_lua);
     fclose(main_cpp);
     return exit_t::internal_error;
@@ -961,16 +947,14 @@ auto clean() noexcept -> exit_t {
 
 auto test(lua_State *state) noexcept -> exit_t {
   dbg_print();
-  // builder object
-  lua_createtable(state, 0, 0);
+  lua_createtable(state, 0, 1); // builder object
   lua_pushboolean(state, true);
   lua_setfield(state, -2, TESTING_MACRO);
   lua_setglobal(state, BUILDER_OBJ);
-  // TODO: pop these from the stack
 
   auto const build_res = build(state);
   if (build_res != exit_t::ok) {
-    fprintf(stderr, "Error dunig compiling phase of test");
+    error_message("Occurred during build phase of test");
     return build_res;
   }
 
@@ -983,15 +967,14 @@ auto run(lua_State *state) noexcept -> exit_t {
 
   auto build_res = build(state);
   if (build_res != exit_t::ok) {
-    fprintf(stderr, "Error during build phase of compiling");
+    error_message("Occurred during build phase of run");
     return build_res;
   }
 
   auto run_fn = lua_getglobal(state, "Run");
   if (run_fn == LUA_TNIL) {
-    fprintf(stderr,
-            ERROR "Fatel Error:" NORMAL " Function `Run` is undefined in the "
-                  "discovered `luamake.lua`.\n"
+    error_message("Function `Run` is undefined in the "
+                  "discovered `luamake.lua`." NL
                   "\tSee README in [[github link]] for more info.");
     return exit_t::config_error;
   }
@@ -1003,28 +986,31 @@ auto run(lua_State *state) noexcept -> exit_t {
 
 auto help() noexcept -> exit_t {
   dbg_print();
-  std::printf(
-      "Usage: luamake [options]?\n"
-      "options:\n"
-      "\t-h               : Displays this help message.\n"
-      "\t-c               : Cleans the cache dir and removes the output.\n"
+  // clang-format off
+  printf(
+      "Usage: luamake [options]?" NL
+      "options:" NL
+      "\t-h               : Displays this help message." NL
+      "\t-c               : Cleans the cache dir and removes the output." NL
       "\t-n <project-name>: Creates a new subdir with name <project-name>, "
-      "creating a default luamake build script.\n"
+      "creating a default luamake build script." NL
       "\t-b               : Builds the project based on the `Build` function "
-      "defined in the `luamake.lua` file in the current dir.\n"
+      "defined in the `luamake.lua` file in the current dir." NL
       "\t-t               : Builds the project based on the `Build` function "
       "in the `luamake.lua` file in the current dir, with the additional macro "
       "`LUAMAKE_TESTS` defined. Then runs the tests defined in the `Test` "
       "function "
       "defined in the `luamake.lua` file in the current dir, displaying the "
-      "number of tests that succeeded.\n"
+      "number of tests that succeeded." NL
       "\t-r               : Builds the project based on the `Build` function "
       "defined in the `luamake.lua` file in the current dir. Then runs the "
       "program, based on the `Run` function defined in the current dirs "
-      "`luamake.lua` file.\n"
-      "If no options are passed in, it is the same as calling `luamake -r`\n"
+      "`luamake.lua` file." NL
+      "If no options are passed in, it is the same as calling `luamake -r`" NL
       "For more information see the `README.md` at "
-      "[[https://github.com/Winter-On-Mars/luamake]]\n");
+      "[[https://github.com/Winter-On-Mars/luamake]]" NL);
+  // clang-format on
+  fflush(stdout);
   return exit_t::ok;
 }
 } // namespace MakeTypes
