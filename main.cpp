@@ -852,9 +852,12 @@ auto new_project(char const *project_name) noexcept -> exit_t {
                   "    {" NL
                   "        fun = function(tester)" NL
                   "            tester.exe = \"build/a\"" NL
-                  "            tester:add_args({\"This does nothing\"})" NL
+                  "            tester.args = {\"This does nothing\"}" NL
                   "        end," NL
-                  "        expected_output = \"Hello World!\\n\"" NL
+                  "        output = {" NL
+                  "            expected = \"Hello World!\\n\"," NL
+                  "            from = \"stdout\"," NL
+                  "        }," NL
                   "    }" NL
                   "}" NL};
   // clang-format on
@@ -1013,19 +1016,6 @@ auto help() noexcept -> exit_t {
   return exit_t::ok;
 }
 } // namespace MakeTypes
-
-/*
-auto constexpr get_all_files(MakeFlags const &flags) noexcept
-    -> std::pair<std::unordered_map<string, src_file>, cache> {
-  auto files = std::unordered_map<string, src_file>();
-  for (auto const &files : std::filesystem::open_dir(flags.build_dir)) {
-    std::cout << files.name << '\n';
-  }
-
-  if (!has_cache_dir(flags.build_dir)) {
-  }
-}
-*/
 
 auto main(int argc, char **argv) -> int {
   auto const flags = MakeTypes::Type::make(argc, argv);

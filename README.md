@@ -11,20 +11,25 @@ A programmable, (semi)-simple build system for C++ projects, configured with lua
 
 # Installation
 ## Dependencies
-* lua-devel (obviously)
+* lua-devel
   * Version >= 5.4 (could probably work with 5.3, we just need integers and bitwise operations for the hashing)
   * I'll probably do a git sub-module or something to have the lua vm be included in the project so that you can build the project from a single `make` file, but as of now we depend on system libs.
 
 ## Script
+In whatever dir you'll want to add this command in, run
 ```sh
 git clone https://github.com/Winter-On-Mars/luamake
+
+cd luamake
+make
 ```
 Then just add it to your path however you want to
 
-If you installed the program into `$HOME/dev/luamake`, then you'd run
+something like this should work for most people using bash
 ```sh
-export PATH = "$HOME/dev/luamake:$PATH"
+export PATH = "$(pwd):$PATH"
 ```
+assuming you are in the the place you just cd'ed into the place you cloned `luamake` into.
 
 Then if you'd like to shorten the name (it's what I do) you can edit your .bashrc (or .config/fish/config.fish if you're a cool person)
 ```.bashrc
@@ -34,6 +39,47 @@ alias lm="luamake"
 
 # Configuration
 ## `Build`
+Type: `function(builder: Builder): nil`
+
+You're expected to modify the passed in `builder` object to have the following fields specified
+* `type`: `"exe" | "slib" | "dlib"`
+  * Specifies this modules output type as one of the following
+  * `exe`: Executable program, the output will be the same as specified by `builder.name`.
+  * `slib`: Static library, the output will be prefixed with `lib`, with a file extension of `.a` on linux + mac platforms, and `.LIB` extension on windows.
+  * `dlib`: Dynamic library, output will be prefixed with `lib`, with it's file extension being `.so`, `.dylib`, or `.dll` on unix, mac, and windows respective platforms.
+* `root`: `string`
+  * Relative path from where the luamake file is to the root of the project
+* `compiler`: TODO
+* `name`: `string`
+  * Name of the modules output, may be modified by `builder.type` as mentioned above.
+* `version`: `string`
+  * Defaults to semantic versioning tag of the current program.
+* `description`: `string`
+  * Description of the module, to be used for searching through deps.
+
+## `Run`
+Type = `function(runner: Runner): nil`
+
+## `Test`
+A global array of objects that look like
+```
+{
+  fun: function(tester: Tester): nil;
+  output?: {
+    expected: string;
+    from: "stdout"|"stderr"|FilePath;
+  };
+}
+```
+
+`fun` is called to set up the testing environment. You are expected to set the following field in the tester object passed in
+* `exe`: `string`
+  * The program to be called
+With the following fields being optional
+* `args`: `Array<string>`
+  * An array of strings to be passed to the program through command line arguments, in the order specified here
+
+After the program is finished running, if `output` is specified then it will compare the contents of the specified `from` field with that in the `expected` field.
 
 
 -- Warning this section is out of date, we are working on updating it to the new standard (so basically just completely ignore this section and its sub-sections)
