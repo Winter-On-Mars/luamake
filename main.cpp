@@ -112,7 +112,7 @@ static auto clang(lua_State *state) -> int {
   return 1;
 }
 
-auto constexpr dump_impl(lua_State *state, int const idx) noexcept -> string {
+auto dump_impl(lua_State *state, int const idx) noexcept -> string {
   switch (lua_type(state, idx)) {
   case LUA_TNONE:
     lua_error(state);
