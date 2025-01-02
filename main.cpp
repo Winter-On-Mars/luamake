@@ -112,6 +112,64 @@ static auto clang(lua_State *state) -> int {
   return 1;
 }
 
+auto constexpr dump_impl(lua_State *state, int const idx) noexcept -> string {
+  switch (lua_type(state, idx)) {
+  case LUA_TNONE:
+    lua_error(state);
+    return string(); // (?)
+  case LUA_TNIL:
+    return string("nil");
+  case LUA_TBOOLEAN:
+    return lua_toboolean(state, idx) == 1 ? string("true") : string("false");
+  case LUA_TLIGHTUSERDATA: {
+    auto res = string(luaL_tolstring(state, idx, nullptr));
+    lua_pop(state, 1);
+    return res;
+  } break;
+  case LUA_TNUMBER:
+    return std::to_string(lua_tonumber(state, idx));
+  case LUA_TSTRING:
+    return string(lua_tostring(state, idx));
+  case LUA_TTABLE: {
+    auto res = string("Work in progress on dumping tables values\n");
+    res += '{';
+    res += '\n';
+    res += '\t';
+
+    lua_pushnil(state);
+    while (lua_next(state, -1) != 0) {
+      res += dump_impl(state, -2);
+      res += dump_impl(state, -1);
+      lua_pop(state, 1); // would be better to have a variable in the while loop
+      // so that we don't have a bunch of this stack manip going on
+    }
+    lua_pop(state, 1);
+
+    res += '}';
+    res += '\n';
+  } break;
+  case LUA_TFUNCTION: {
+    auto res = string("<lua: fn>");
+    res += ' ';
+    res += luaL_tolstring(state, idx, nullptr);
+    lua_pop(state, 1);
+    return res;
+  } break;
+  case LUA_TUSERDATA: {
+    auto res = string(luaL_tolstring(state, idx, nullptr));
+    lua_pop(state, 1);
+    return res;
+  } break;
+  case LUA_TTHREAD: {
+    auto res = string("<lua: thread>");
+    res += string(luaL_tolstring(state, idx, nullptr));
+    lua_pop(state, 1);
+    return res;
+  } break;
+  }
+  unreachable();
+}
+
 static auto dump(lua_State *state) -> int {
   dbg_print();
 
@@ -135,8 +193,8 @@ static auto dump(lua_State *state) -> int {
     res = lua_toboolean(state, -1) == 1 ? string("true") : string("false");
     break;
   case LUA_TLIGHTUSERDATA:
-    lua_error(state);
-    return 1; // (?)
+    luaL_tolstring(state, -1, nullptr);
+    return 1;
     break;
   case LUA_TNUMBER:
     res = std::to_string(lua_tonumber(state, -1));
@@ -152,8 +210,8 @@ static auto dump(lua_State *state) -> int {
 
     lua_pushnil(state);
     while (lua_next(state, -1) != 0) {
-      res += lua_typename(state, lua_type(state, -2));
-      res += lua_typename(state, lua_type(state, -1));
+      res += dump_impl(state, -2);
+      res += dump_impl(state, -1);
       lua_pop(state, 1); // would be better to have a variable in the while loop
       // so that we don't have a bunch of this stack manip going on
     }
@@ -166,11 +224,13 @@ static auto dump(lua_State *state) -> int {
     res = string("<lua: fn>");
     break;
   case LUA_TUSERDATA:
-    lua_error(state);
+    luaL_tolstring(state, -1, nullptr);
     return 1;
     break;
   case LUA_TTHREAD:
     res = string("<lua: thread>");
+    res += string(luaL_tolstring(state, -1, nullptr));
+    lua_pop(state, 1);
     break;
   }
 
@@ -189,13 +249,6 @@ auto constexpr flatten(std::span<string_view const> const arr,
   return std::accumulate(
       arr.begin(), arr.end(), string(),
       [sep](auto &&init, auto &&n) { return (init + sep) + string(n); });
-}
-
-// how tf do you do cpp doc comments >:(
-/* @description: dumps content of lua value in standard way */
-auto constexpr dump(lua_State *state /*, lua_table* ...*/) noexcept -> string {
-  // TODO: actually write function
-  return string("");
 }
 } // namespace helper
 
