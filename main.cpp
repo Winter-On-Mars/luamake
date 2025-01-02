@@ -528,45 +528,49 @@ auto generate(FILE *root, string_view const root_name) noexcept
       }
 
       auto const name = include_line.substr(start + 1, name_len);
-      if (name.find(".hpp") == string_view::npos &&
-          name.find(".cpp") == string_view::npos) {
+      auto const hpp_pos = name.find(".hpp");
+      auto const cpp_pos = name.find(".cpp");
+      if (hpp_pos == string_view::npos && cpp_pos == string_view::npos) {
         error_message("While parsing include directives, unable to find .hpp "
                       "or .cpp in the files name");
         return std::nullopt;
       }
 
-      if (auto const hpp_pos = name.find(".hpp");
-          hpp_pos != string_view::npos) {
-        if (hpp_pos != name.rfind(".hpp")) {
-          error_message("While parsing include directives, stumbled "
-                        "upon multiple '.hpp' file extensions in include.");
-          return std::nullopt;
-        } else if (name.find(".cpp") != string_view::npos) {
-          error_message("While parsing include directives, stumbled "
-                        "upon multiple file extensions (a '.hpp' and '.cpp') "
-                        "in include.");
-          return std::nullopt;
-        } else {
-          graph[string(name)].push_back(src_file(string(root_name)));
-          generate_files_deps(graph, name, line);
-        }
-      } else if (auto const cpp_pos = name.find(".cpp");
-                 cpp_pos != string_view::npos) {
-        if (cpp_pos != name.rfind(".cpp")) {
-          error_message("While parsing include directives, stumbled "
-                        "upon multiple '.cpp' file extensions in include.");
-          return std::nullopt;
-        } else if (name.find(".hpp") != string_view::npos) {
-          error_message("While parsing include directives, stumbled "
-                        "upon multiple file extensions (a '.cpp' and '.hpp') "
-                        "in include.");
-          return std::nullopt;
-        } else {
-          auto const f_name = include_line.substr(start, name_len);
-          graph[string(f_name)].push_back(src_file(string(root_name)));
-          generate_files_deps(graph, f_name, line);
-        }
+      if (hpp_pos != string_view::npos && cpp_pos != string_view::npos) {
+        // TODO: remove the NL char from the line buf bc it kinda fucks error
+        // messages up :(
+        ferror_message("While parsing include directives, found multiple valid "
+                       "file extensions on line [%s]",
+                       line);
+        return std::nullopt;
       }
+
+      if (hpp_pos != string_view::npos) {
+        auto const last_hpp_pos = name.rfind(".hpp");
+        if (last_hpp_pos != hpp_pos) {
+          ferror_message(
+              "While parsing include directives, found multiple instances of "
+              "'.hpp' file extension in line [%s]" NL
+              "\tIf this is intentional, maybe as a part of some code "
+              "generation, open an issue on gh and we can work to resolve it",
+              line);
+          return std::nullopt;
+        }
+        graph[string(name)].push_back(src_file(string(root_name)));
+        generate_files_deps(graph, name, line);
+      }
+      auto const last_cpp_pos = name.rfind(".cpp");
+      if (last_cpp_pos != cpp_pos) {
+          ferror_message(
+              "While parsing include directives, found multiple instances of "
+              "'.cpp' file extension in line [%s]" NL
+              "\tIf this is intentional, maybe as a part of some code "
+              "generation, open an issue on gh and we can work to resolve it",
+              line);
+          return std::nullopt;
+      }
+      graph[string(name)].push_back(src_file(string(root_name)));
+      generate_files_deps(graph, name, line);
     }
   } catch (...) {
     error_message("Something went wrong while generating dependencies\n\tAn "
@@ -841,9 +845,6 @@ auto build(lua_State *state) noexcept -> exit_t {
     std::cout << "])\n";
   }
   std::cout << std::flush;
-
-  printf("here\n");
-  fflush(stdout);
 
   lua_pop(state, 1);
 
