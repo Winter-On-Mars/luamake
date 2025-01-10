@@ -49,8 +49,14 @@
 #define fwarning_message(msg, ...)                                             \
   fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL, __VA_ARGS__)
 
-#define dbg_print()                                                            \
+#define fn_print()                                                             \
   fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
+
+#define expr_dbg(expr)                                                         \
+  do {                                                                         \
+    auto const res = (expr);                                                   \
+    std::cerr << DBG "[expr] " NORMAL #expr " = " << res << '\n';              \
+  } while (false);
 
 using std::array, std::vector, std::string, std::string_view;
 
@@ -74,7 +80,7 @@ template <class T> using opt = std::optional<T>;
 
 namespace luamake_builtins {
 static auto clang(lua_State *state) -> int {
-  dbg_print();
+  fn_print();
 
   auto num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -99,12 +105,11 @@ static auto clang(lua_State *state) -> int {
   lua_setfield(state, -2, "optimize");
 
   lua_createtable(state, 3, 0);
-  auto table_idx = int{-1};
-  for (auto idx = lua_Integer{0}; auto const warning : warnings) {
-    ++idx;
+  auto constexpr table_idx = int{-2};
+  for (auto idx = lua_Integer{1}; auto const warning : warnings) {
     lua_pushstring(state, warning.data());
-    --table_idx;
     lua_seti(state, table_idx, idx); // pops the val from the stack :)
+    ++idx;
   }
 
   lua_setfield(state, -2, "warnings");
@@ -171,7 +176,7 @@ auto dump_impl(lua_State *state, int const idx) noexcept -> string {
 }
 
 static auto dump(lua_State *state) -> int {
-  dbg_print();
+  fn_print();
 
   auto const num_args = lua_gettop(state);
   if (num_args != 1) { // idk if this is actually how to do error handling (?)
@@ -242,147 +247,7 @@ constexpr luaL_Reg const funcs[] = {
     {"clang", clang}, {"dump", dump}, {nullptr, nullptr}};
 } // namespace luamake_builtins
 
-namespace helper {
-auto constexpr flatten(std::span<string_view const> const arr,
-                       string_view const seperator) noexcept -> string {
-  auto const sep = string(seperator);
-  return std::accumulate(
-      arr.begin(), arr.end(), string(),
-      [sep](auto &&init, auto &&n) { return (init + sep) + string(n); });
-}
-} // namespace helper
-
 namespace dependency_graph {
-// all of the strings we parse from the config.lua are owned by
-// the lua_State gc, so these all are non-owning references
-struct Config final {
-  string_view compiler;
-  vector<string_view> flags;
-  string_view name;
-  string_view type;
-  vector<string_view> linking;
-  string_view linking_dir;
-  vector<string_view> pre_exec;
-  vector<string_view> post_exec;
-
-  static auto make(lua_State *) noexcept -> std::optional<Config>;
-
-  friend auto operator<<(std::ostream &, Config const &) noexcept
-      -> std::ostream &;
-};
-
-// See what functions modify the lua_State stack
-auto Config::make(lua_State *state) noexcept -> std::optional<Config> {
-  // returns the type of the global as an int
-  // all of the lua_get... functions seem to just return the type of the
-  // returned value (could be useful)
-  (void)lua_getglobal(state, "config_table");
-  int cfg_tbl_pos_in_stack = -1;
-
-  (void)lua_getfield(state, cfg_tbl_pos_in_stack, "compiler");
-  --cfg_tbl_pos_in_stack;
-  auto *compiler_str = luaL_tolstring(state, -1, NULL);
-  // luaL_tolstring pushes a value onto the stack for some reason :(
-  --cfg_tbl_pos_in_stack;
-
-  (void)lua_getfield(state, cfg_tbl_pos_in_stack, "bin_name");
-  --cfg_tbl_pos_in_stack;
-  auto *bin_name_str = luaL_tolstring(state, -1, NULL);
-  --cfg_tbl_pos_in_stack;
-
-  // checking to see what happens if we try to get a field that doesn't exist
-  (void)lua_getfield(state, cfg_tbl_pos_in_stack, "output_type");
-  --cfg_tbl_pos_in_stack;
-  // pretty sure we could just use lua_isnil(state, -1)
-  auto output_type =
-      (lua_type(state, -1) == LUA_TNIL)
-          ? (std::cout
-                 << "No type found: Defaulting to binary output (If this isn't "
-                    "what you want read the README for more information)\n",
-             std::string_view{"binary"})
-          : (--cfg_tbl_pos_in_stack,
-             std::string_view{luaL_tolstring(state, -1, NULL)});
-
-  auto flags = vector<string_view>();
-  flags.reserve(4);
-  (void)lua_getfield(state, cfg_tbl_pos_in_stack, "flags");
-  if (lua_isnil(state, -1)) {
-    std::cout << "Error: config.flags == nil\n";
-    std::exit(64);
-  }
-  if (!lua_istable(state, -1)) {
-    std::cout << "Error: typeof(config.flags) ~= table\n";
-    std::exit(64);
-  }
-  int flags_pos_in_stack = -1;
-  --cfg_tbl_pos_in_stack;
-
-  auto const len = lua_rawlen(state, flags_pos_in_stack);
-  for (auto i = 1ull; i <= len; ++i) {
-    (void)lua_rawgeti(state, flags_pos_in_stack, static_cast<lua_Integer>(i));
-    --flags_pos_in_stack;
-    --cfg_tbl_pos_in_stack;
-    auto tmp = string_view{luaL_tolstring(state, -1, NULL)};
-    flags.push_back(tmp);
-  }
-
-  return Config{/* compiler= */ string_view{compiler_str},
-                /* flags= */ flags,
-                /* name (out_name)= */ string_view{bin_name_str},
-                /* type= */ output_type,
-                /* linking= */ vector<string_view>(),
-                /* linking_dir= */ string_view{},
-                /* pre_exec= */ vector<string_view>(),
-                /* post_exec= */ vector<string_view>()};
-}
-
-auto operator<<(std::ostream &os, Config const &cfg) noexcept
-    -> std::ostream & {
-  // don't like that we have to cast the std::string_view to a std::string,
-  // because it seems like there should be string::operator+(string_view)
-  // but whatever :)
-  auto const flags =
-      std::accumulate(cfg.flags.cbegin(), cfg.flags.cend(), std::string(),
-                      [](auto &&init, auto &&next) {
-                        return (init + ", ") + std::string(next);
-                      });
-  auto const linking =
-      cfg.linking.size() == 0
-          ? std::string("nil")
-          : std::accumulate(cfg.linking.cbegin(), cfg.linking.cend(),
-                            std::string(), [](auto &&init, auto &&next) {
-                              return init + ", " + std::string(next);
-                            });
-
-  auto const pre_exec =
-      cfg.pre_exec.size() == 0
-          ? std::string("nil")
-          : std::accumulate(cfg.pre_exec.cbegin(), cfg.pre_exec.cend(),
-                            std::string(), [](auto &&init, auto &&next) {
-                              return init + ", " + std::string(next);
-                            });
-  auto const post_exec =
-      cfg.post_exec.size() == 0
-          ? std::string("nil")
-          : std::accumulate(cfg.post_exec.cbegin(), cfg.post_exec.cend(),
-                            std::string(), [](auto &&init, auto &&next) {
-                              return init + ", " + std::string(next);
-                            });
-
-  os << "{\n\tcompiler: " << cfg.compiler;
-  os << ",\n\tflags: " << flags;
-  os << ",\n\tbin_name: " << cfg.name;
-  os << ",\n\ttype: " << cfg.type;
-  os << ",\n\tlinking: " << linking;
-  os << ",\n\tlinking_dir: " << cfg.linking_dir;
-  os << ",\n\tpre_exec: " << pre_exec;
-  os << ",\n\tpost_exec: " << post_exec;
-
-  os << "\n}\n";
-
-  return os;
-}
-
 struct src_file final {
   // std::size_t hash;
   string name;
@@ -408,11 +273,22 @@ auto skip_ws(char const *current, char const *const end) noexcept
   return nullptr; // (?)
 }
 
-auto generate_files_deps(dep_graph &graph, string_view const f_name,
-                         char *line) noexcept -> void /* return code(?)*/ {
-  auto *cur_file = fopen(f_name.data(), "r");
+struct LWF final {
+  FILE *handle;
 
-  if (cur_file == nullptr) {
+  LWF(fs::path const f_name) noexcept : handle(fopen(f_name.c_str(), "r")) {}
+  ~LWF() noexcept {
+    if (handle != nullptr)
+      fclose(handle);
+  }
+};
+
+auto generate_files_deps(dep_graph &graph, string_view const f_name,
+                         fs::path rel_path, char *line) noexcept
+    -> void /* return code(?)*/ {
+  fn_print();
+  auto file = LWF(rel_path / f_name);
+  if (file.handle == nullptr) {
     ferror_message(
         "While parsing include directives, unable to open file at %s",
         f_name.data());
@@ -421,8 +297,10 @@ auto generate_files_deps(dep_graph &graph, string_view const f_name,
 
   try {
     size_t len = 0;
-    auto amount_read = getline(&line, &len, cur_file);
-    while (amount_read != -1) {
+
+    for (auto amount_read = getline(&line, &len, file.handle);
+         amount_read != -1; amount_read = getline(&line, &len, file.handle)) {
+
       auto include_line = string_view(line, len);
       if (include_line.find("#include") == string_view::npos) {
         continue;
@@ -443,43 +321,50 @@ auto generate_files_deps(dep_graph &graph, string_view const f_name,
       }
 
       auto const name = include_line.substr(start + 1, name_len);
-      if (name.find(".hpp") == string_view::npos &&
-          name.find(".cpp") == string_view::npos) {
-        error_message("While parsing include directives, unable to find .hpp "
-                      "or .cpp in the files name");
+      auto const hpp_pos = name.find(".hpp");
+      auto const cpp_pos = name.find(".cpp");
+
+      if (hpp_pos == string_view::npos && cpp_pos == string_view::npos) {
+        error_message("While parsing include directives, unable to find '.hpp' "
+                      "or '.cpp' in files name");
         return;
       }
 
-      if (auto const hpp_pos = name.find(".hpp");
-          hpp_pos != string_view::npos) {
-        if (hpp_pos != name.find_last_of(".hpp")) {
-          error_message("While parsing include directives, stumbled "
-                        "upon multiple file extensions in include.");
+      if (hpp_pos != string_view::npos && cpp_pos != string_view::npos) {
+        ferror_message("While parsing include directives, found multiple valid "
+                       "file extensions on line [%s]",
+                       line);
+        return;
+      }
+
+      if (hpp_pos != string_view::npos) {
+        auto const last_hpp_pos = name.rfind(".hpp");
+        if (last_hpp_pos != hpp_pos) {
+          ferror_message(
+              "While parsing include directives, found multiple instances of "
+              "'.hpp' file extension in line [%s]" NL
+              "\tIf this is intentional, maybe as a part of some code "
+              "generation, open an issue on gh and we can work to resolve it",
+              line);
           return;
-        } else if (name.find(".cpp") != string_view::npos) {
-          error_message("While parsing include directives, stumbled "
-                        "upon multiple file extensions in include.");
-          return;
-        } else {
-          auto const next_f_name = include_line.substr(start, name_len);
-          graph[string(f_name)].push_back(src_file(string(next_f_name)));
-          generate_files_deps(graph, next_f_name, line);
         }
-      } else if (auto const cpp_pos = name.find(".cpp");
-                 cpp_pos != string_view::npos) {
-        if (cpp_pos != name.find_last_of(".cpp")) {
-          error_message("While parsing include directives, stumbled "
-                        "upon multiple file extensions in include.");
+        auto const next_f_name = include_line.substr(start, name_len);
+        graph[string(f_name)].push_back(src_file(string(next_f_name)));
+        generate_files_deps(graph, next_f_name, rel_path, line);
+      } else {
+        auto const last_cpp_pos = name.rfind(".cpp");
+        if (last_cpp_pos != cpp_pos) {
+          ferror_message(
+              "While parsing include directives, found multiple instances of "
+              "'.hpp' file extension in line [%s]" NL
+              "\tIf this is intentional, maybe as a part of some code "
+              "generation, open an issue on gh and we can work to resolve it",
+              line);
           return;
-        } else if (name.find(".hpp") != string_view::npos) {
-          error_message("While parsing include directives, stumbled "
-                        "upon multiple file extensions in include.");
-          return;
-        } else {
-          auto const next_f_name = include_line.substr(start, name_len);
-          graph[string(f_name)].push_back(src_file(string(next_f_name)));
-          generate_files_deps(graph, next_f_name, line);
         }
+        auto const next_f_name = include_line.substr(start, name_len);
+        graph[string(f_name)].push_back(src_file(string(next_f_name)));
+        generate_files_deps(graph, next_f_name, rel_path, line);
       }
     }
   } catch (...) {
@@ -490,8 +375,9 @@ auto generate_files_deps(dep_graph &graph, string_view const f_name,
   free(line);
 }
 
-auto generate(FILE *root, string_view const root_name) noexcept
-    -> opt<dep_graph> {
+auto generate(FILE *root, string_view const root_name,
+              fs::path rel_path) noexcept -> opt<dep_graph> {
+  fn_print();
   auto graph = dep_graph{};
 
   auto *line = static_cast<char *>(malloc(128 * sizeof(char)));
@@ -557,10 +443,10 @@ auto generate(FILE *root, string_view const root_name) noexcept
           return std::nullopt;
         }
         graph[string(name)].push_back(src_file(string(root_name)));
-        generate_files_deps(graph, name, line);
-      }
-      auto const last_cpp_pos = name.rfind(".cpp");
-      if (last_cpp_pos != cpp_pos) {
+        generate_files_deps(graph, name, rel_path, line);
+      } else {
+        auto const last_cpp_pos = name.rfind(".cpp");
+        if (last_cpp_pos != cpp_pos) {
           ferror_message(
               "While parsing include directives, found multiple instances of "
               "'.cpp' file extension in line [%s]" NL
@@ -568,14 +454,20 @@ auto generate(FILE *root, string_view const root_name) noexcept
               "generation, open an issue on gh and we can work to resolve it",
               line);
           return std::nullopt;
+        }
+        graph[string(name)].push_back(src_file(string(root_name)));
+        generate_files_deps(graph, name, rel_path, line);
       }
-      graph[string(name)].push_back(src_file(string(root_name)));
-      generate_files_deps(graph, name, line);
     }
   } catch (...) {
     error_message("Something went wrong while generating dependencies\n\tAn "
                   "exception was thrown");
   }
+
+  for (auto const &files : fs::directory_iterator(rel_path)) {
+    std::cout << "[" << files << "]\n";
+  }
+  std::cout << std::flush;
 
   free(line);
 
@@ -653,7 +545,7 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
 }
 
 auto Type::run() const noexcept -> exit_t {
-  dbg_print();
+  fn_print();
   switch (type_t) {
   case UNKNOWN_ARG:
     return help();
@@ -684,24 +576,24 @@ auto Type::run() const noexcept -> exit_t {
   // TODO: remove this and make it a bit safer
   luaL_openlibs(state);
 
-  auto *lm_lua =
-      fopen((std::filesystem::current_path() / "luamake.lua").c_str(), "r");
+  auto *lm_lua = fopen((fs::current_path() / "luamake.lua").c_str(), "r");
   if (lm_lua == nullptr) {
     ferror_message(
         "unable to discover `luamake.lua` in current dir at [%s]" NL "\tRun "
         "-n <proj-name> to create a new project [and maybe in the future "
         "i'll add a -i to init a new project we'll see :)]",
-        std::filesystem::current_path().c_str());
+        fs::current_path().c_str());
     return exit_t::config_error;
   }
   (void)fclose(lm_lua);
-  if (luaL_dofile(state, "luamake.lua")) {
+  if (luaL_dofile(state, "luamake.lua") != LUA_OK) {
     ferror_message("unable to run the discovered `luamake.lua` file at "
                    "[%s]" NL "\tLua error message [%s]",
-                   std::filesystem::current_path().c_str(),
-                   lua_tostring(state, -1));
+                   fs::current_path().c_str(), lua_tostring(state, -1));
     return exit_t::config_error;
   }
+
+  (void)lua_gc(state, LUA_GCSTOP);
 
   auto res = exit_t::ok;
   switch (type_t) {
@@ -729,7 +621,7 @@ auto Type::run() const noexcept -> exit_t {
 }
 
 auto build(lua_State *state) noexcept -> exit_t {
-  dbg_print();
+  fn_print();
 
   lua_pushcfunction(state, luamake_builtins::clang);
   lua_setglobal(state, "Clang");
@@ -779,6 +671,7 @@ auto build(lua_State *state) noexcept -> exit_t {
 
   // TODO: switch this to pcall
   lua_call(state, 1, 0);
+  (void)lua_gc(state, LUA_GCSTOP);
 
   // TODO: pre_exec
   builder = lua_getglobal(state, BUILDER_OBJ);
@@ -805,27 +698,27 @@ auto build(lua_State *state) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  // this might do a life-time exception(?)
-  auto const builder_root = [](lua_State *state) -> string_view {
-    auto const *builder_root = lua_tostring(state, -1);
-    return string_view{builder_root};
+  auto const [rel_path, froot] =
+      [](lua_State *state) -> std::pair<fs::path, string_view> {
+    auto const builder_root = string_view(lua_tostring(state, -1));
+    auto const path_split = builder_root.find('/');
+    return std::make_pair(fs::path(builder_root.substr(0, path_split)),
+                          builder_root.substr(path_split + 1));
   }(state);
-  // auto const* builder_root = lua_tostring(state, -1);
-  printf("Testing builder_root [%s]\n", builder_root.data());
-  fflush(stdout);
+  expr_dbg(rel_path);
+  expr_dbg(froot);
 
-  auto *root_file =
-      fopen((std::filesystem::current_path() / builder_root).c_str(), "r");
+  auto *root_file = fopen((fs::current_path() / rel_path / froot).c_str(), "r");
   if (root_file == nullptr) {
     ferror_message("The file specified as the root of the project [%s] does "
                    "not exist at [%s]",
-                   builder_root.data(),
-                   (std::filesystem::current_path() / builder_root).c_str());
+                   (rel_path / froot).c_str(),
+                   (fs::current_path() / rel_path / froot).c_str());
     return exit_t::config_error;
   }
 
   // TODO: check that there's no cycles in the dep graph
-  auto dep_graph = dependency_graph::generate(root_file, builder_root);
+  auto dep_graph = dependency_graph::generate(root_file, froot, rel_path);
   fclose(root_file);
 
   if (!dep_graph.has_value()) {
@@ -834,7 +727,6 @@ auto build(lua_State *state) noexcept -> exit_t {
   }
 
   std::cout << "dep_graph size = " << dep_graph->size() << '\n';
-
   for (auto const &[k, v] : dep_graph.value()) {
     std::cout << "\t(" << k << ", [";
 
@@ -846,13 +738,110 @@ auto build(lua_State *state) noexcept -> exit_t {
   }
   std::cout << std::flush;
 
-  lua_pop(state, 1);
-
-  auto const builder_compiler_t = lua_getfield(state, -1, "compiler");
+  auto const builder_compiler_t = lua_getfield(state, -2, "compiler");
   if (builder_compiler_t != LUA_TTABLE) {
-    error_message("expected `builder.compiler` field to be of type table");
+    error_message("Expected `builder.compiler` field to be of type table");
     return exit_t::config_error;
   }
+
+  auto envoked_command = string();
+  auto const compiler_field_name_t = lua_getfield(state, -1, "compiler");
+  if (compiler_field_name_t != LUA_TSTRING) {
+    error_message(
+        "Expected `builder.compiler.compiler` field to be of type string.");
+    return exit_t::config_error;
+  }
+  auto const *compiler = lua_tostring(state, -1);
+  envoked_command += compiler;
+  envoked_command += ' ';
+
+  auto const compiler_opt_level_t = lua_getfield(state, -2, "optimize");
+  if (compiler_opt_level_t != LUA_TSTRING) {
+    error_message("Expected `builder.compiler.optimize` to be of type string.");
+    return exit_t::config_error;
+  }
+  auto const *compiler_opt_level = lua_tostring(state, -1);
+  envoked_command += '-';
+  envoked_command += compiler_opt_level;
+  envoked_command += ' ';
+
+  auto const compiler_warnings_t = lua_getfield(state, -3, "warnings");
+  if (compiler_warnings_t != LUA_TTABLE) {
+    error_message(
+        "Expected `builder.compiler.warnings` to be of type array (table).");
+    return exit_t::config_error;
+  }
+
+  auto const warnings_len = lua_rawlen(state, -1);
+  auto cc_flags = string();
+  for (auto [i, warnings_tbl] = std::make_pair(lua_Unsigned{1}, int{-1});
+       i <= warnings_len; ++i, --warnings_tbl) {
+    cc_flags += '-';
+    auto const warnings_i_t =
+        lua_geti(state, warnings_tbl, static_cast<lua_Integer>(i));
+    if (warnings_i_t != LUA_TSTRING) {
+      error_message("TODO: expected string found something else.");
+      return exit_t::config_error;
+    }
+    cc_flags += lua_tostring(state, -1);
+    cc_flags += ' ';
+  }
+
+  envoked_command += cc_flags;
+
+  envoked_command += "-o build/";
+  envoked_command += froot;
+  envoked_command += ".o ";
+
+  envoked_command += "-c ";
+  envoked_command += rel_path / froot;
+
+  expr_dbg(envoked_command);
+
+  //  auto sys_res = system(envoked_command.c_str());
+  //  if (sys_res != 0) {
+  //    // TODO: error
+  //    return exit_t::internal_error;
+  //  }
+
+  envoked_command.clear();
+
+  envoked_command += compiler;
+  envoked_command += ' ';
+
+  envoked_command += '-';
+  envoked_command += compiler_opt_level;
+  envoked_command += ' ';
+
+  envoked_command += cc_flags;
+
+  auto const output_name_t = lua_getfield(state, -warnings_len - 6, "name");
+  if (output_name_t != LUA_TSTRING) {
+    error_message("Expected `build.name` to be of type string");
+    return exit_t::config_error;
+  }
+
+  for (auto const &f : fs::directory_iterator(fs::current_path() / "build")) {
+    expr_dbg(fs::relative(f));
+    expr_dbg(fs::relative(f).extension());
+    if (fs::relative(f).extension() == fs::path(".o")) {
+      envoked_command += fs::relative(f);
+      envoked_command += ' ';
+    }
+  }
+
+  auto const output_name = lua_tostring(state, -1);
+
+  envoked_command += "-o build/";
+  envoked_command += output_name;
+
+  expr_dbg(envoked_command);
+
+  //  sys_res = system(envoked_command.c_str());
+  //  if (sys_res != 0) {
+  //    // TODO: error
+  //    return exit_t::internal_error;
+  //  }
 
   // TODO: post_exec
 
@@ -860,7 +849,7 @@ auto build(lua_State *state) noexcept -> exit_t {
 }
 
 auto new_project(char const *project_name) noexcept -> exit_t {
-  dbg_print();
+  fn_print();
   auto const project_root = fs::current_path() / project_name;
 
   if (fs::exists(project_root)) {
@@ -958,7 +947,7 @@ auto new_project(char const *project_name) noexcept -> exit_t {
 }
 
 auto clean() noexcept -> exit_t {
-  dbg_print();
+  fn_print();
   // remove everything from ./build
   // where `.` is the dir that luamake is being called from
 
@@ -1002,7 +991,7 @@ auto clean() noexcept -> exit_t {
 }
 
 auto test(lua_State *state) noexcept -> exit_t {
-  dbg_print();
+  fn_print();
   lua_createtable(state, 0, 1); // builder object
   lua_pushboolean(state, true);
   lua_setfield(state, -2, TESTING_MACRO);
@@ -1019,7 +1008,7 @@ auto test(lua_State *state) noexcept -> exit_t {
 }
 
 auto run(lua_State *state) noexcept -> exit_t {
-  dbg_print();
+  fn_print();
 
   auto build_res = build(state);
   if (build_res != exit_t::ok) {
@@ -1041,7 +1030,7 @@ auto run(lua_State *state) noexcept -> exit_t {
 }
 
 auto help() noexcept -> exit_t {
-  dbg_print();
+  fn_print();
   // clang-format off
   printf(
       "Usage: luamake [options]?" NL
