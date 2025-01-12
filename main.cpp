@@ -583,11 +583,11 @@ auto Type::run() const noexcept -> exit_t {
 
   auto *lm_lua = fopen((fs::current_path() / "luamake.lua").c_str(), "r");
   if (lm_lua == nullptr) {
-    ferror_message(
-        "unable to discover `luamake.lua` in current dir at [%s]" NL "\tRun "
-        "-n <proj-name> to create a new project [and maybe in the future "
-        "i'll add a -i to init a new project we'll see :)]",
-        fs::current_path().c_str());
+    ferror_message("unable to discover `luamake.lua` in current dir at [%s]" NL
+                   "\tRun "
+                   "init <proj-name> to create a initialize a new project, "
+                   "or new <proj-name> to create a new subproject.",
+                   fs::current_path().c_str());
     return exit_t::config_error;
   }
   (void)fclose(lm_lua);
