@@ -485,19 +485,20 @@ enum class exit_t : unsigned char {
 };
 
 auto build(lua_State *) noexcept -> exit_t;
-auto new_project(char const *) noexcept -> exit_t;
+auto new_proj(char const *) noexcept -> exit_t;
+auto init_proj() noexcept -> exit_t;
 auto clean() noexcept -> exit_t;
 auto test(lua_State *) noexcept -> exit_t;
 auto run(lua_State *) noexcept -> exit_t;
 auto help() noexcept -> exit_t;
 
 struct Type final {
-  // TODO: add init flag to inplace init a new project
   // TODO: add --release flag for O3 optimizations
   enum {
     UNKNOWN_ARG,
     BUILD,
     NEW,
+    INIT,
     CLEAN,
     TEST,
     RUN,
@@ -516,9 +517,9 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
     return {Type::RUN, ""};
   }
 
-  if (strcmp(argv[1], "-b") == 0) {
+  if (strcmp(argv[1], "b") == 0 || strcmp(argv[1], "build") == 0) {
     return {Type::BUILD, ""};
-  } else if (strcmp(argv[1], "-n") == 0) {
+  } else if (strcmp(argv[1], "n") == 0 || strcmp(argv[1], "new") == 0) {
     // TODO: make sure to see there's no potential security
     // issues with this command
     if (argc != 3) {
@@ -528,14 +529,16 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
       return {Type::HELP, ""};
     }
     return {Type::NEW, argv[2]};
-  } else if (strcmp(argv[1], "-c") == 0) {
+  } else if (strcmp(argv[1], "c") == 0 || strcmp(argv[1], "clean") == 0) {
     return {Type::CLEAN, ""};
-  } else if (strcmp(argv[1], "-t") == 0) {
+  } else if (strcmp(argv[1], "t") == 0 || strcmp(argv[1], "test") == 0) {
     return {Type::TEST, ""};
-  } else if (strcmp(argv[1], "-r") == 0) {
+  } else if (strcmp(argv[1], "run") == 0) {
     return {Type::RUN, ""};
-  } else if (strcmp(argv[1], "-h") == 0) {
+  } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
     return {Type::HELP, ""};
+  } else if (strcmp(argv[1], "init") == 0) {
+    return {Type::INIT, ""};
   } else {
     fwarning_message("Unknown argument [%s]" NL
                      "\tDisplaying help for list of accepted arguments",
@@ -550,7 +553,9 @@ auto Type::run() const noexcept -> exit_t {
   case UNKNOWN_ARG:
     return help();
   case NEW:
-    return new_project(project_name);
+    return new_proj(project_name);
+  case INIT:
+    return init_proj();
   case CLEAN:
     return clean();
   case HELP:
@@ -610,6 +615,8 @@ auto Type::run() const noexcept -> exit_t {
     [[fallthrough]];
   case NEW:
     [[fallthrough]];
+  case INIT:
+    [[fallthrough]];
   case CLEAN:
     [[fallthrough]];
   case HELP:
@@ -647,20 +654,20 @@ auto build(lua_State *state) noexcept -> exit_t {
   auto builder = lua_getglobal(state, BUILDER_OBJ);
   switch (builder) {
   case LUA_TNIL:       // builder is undefined
-    lua_pop(state, 1); // remove the nil from the stack otherwise things fuck up
-                       // when we call the Build function
+    lua_pop(state, 1); // remove the nil from the stack otherwise things fuck
+                       // up when we call the Build function
     lua_createtable(state, 0, 0);
     lua_setglobal(state, BUILDER_OBJ);
     lua_getglobal(
         state,
-        BUILDER_OBJ); // there's definately a better way to go about this, but i
-                      // can't think of one rn, basically it's because the
+        BUILDER_OBJ); // there's definately a better way to go about this, but
+                      // i can't think of one rn, basically it's because the
                       // setglobal function pops the value from the stack, but
                       // we need it on the stack bc we're passing it into the
                       // funciton being called :)
     break;
-  case LUA_TTABLE: // table already defined, i.e. this function is being called
-                   // from run/test
+  case LUA_TTABLE: // table already defined, i.e. this function is being
+                   // called from run/test
     break;
   default:
     ferror_message("`builder` object was defined, but it's type was expected "
@@ -848,7 +855,7 @@ auto build(lua_State *state) noexcept -> exit_t {
   return exit_t::ok;
 }
 
-auto new_project(char const *project_name) noexcept -> exit_t {
+auto new_proj(char const *project_name) noexcept -> exit_t {
   fn_print();
   auto const project_root = fs::current_path() / project_name;
 
@@ -946,6 +953,11 @@ auto new_project(char const *project_name) noexcept -> exit_t {
   return exit_t::ok;
 }
 
+auto init_proj() noexcept -> exit_t {
+  fn_print();
+  return exit_t::internal_error;
+}
+
 auto clean() noexcept -> exit_t {
   fn_print();
   // remove everything from ./build
@@ -1035,19 +1047,19 @@ auto help() noexcept -> exit_t {
   printf(
       "Usage: luamake [options]?" NL
       "options:" NL
-      "\t-h               : Displays this help message." NL
-      "\t-c               : Cleans the cache dir and removes the output." NL
-      "\t-n <project-name>: Creates a new subdir with name <project-name>, "
+      "\t-h, help              : Displays this help message." NL
+      "\tc, clean              : Cleans the cache dir and removes the output." NL
+      "\tn, new <project-name> : Creates a new subdir with name <project-name>, "
       "creating a default luamake build script." NL
-      "\t-b               : Builds the project based on the `Build` function "
+      "\tb, build              : Builds the project based on the `Build` function "
       "defined in the `luamake.lua` file in the current dir." NL
-      "\t-t               : Builds the project based on the `Build` function "
+      "\tt, test               : Builds the project based on the `Build` function "
       "in the `luamake.lua` file in the current dir, with the additional macro "
       "`LUAMAKE_TESTS` defined. Then runs the tests defined in the `Test` "
       "function "
       "defined in the `luamake.lua` file in the current dir, displaying the "
       "number of tests that succeeded." NL
-      "\t-r               : Builds the project based on the `Build` function "
+      "\tr, run                : Builds the project based on the `Build` function "
       "defined in the `luamake.lua` file in the current dir. Then runs the "
       "program, based on the `Run` function defined in the current dirs "
       "`luamake.lua` file." NL
