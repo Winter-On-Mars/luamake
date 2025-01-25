@@ -1,10 +1,14 @@
+cc:=clang++
+cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -O3
+bin_name:=luamake_c# change this when the c rewrite is done
+
 .PHONY: all, ncolor
 
 all:
-	c++ -std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -O3 -o luamake_c main.cpp -llua
+	$(cc) $(cc_flags) -o $(bin_name) main.cpp -llua
 
 ncolor:
-	c++ -std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -O3 -o luamake_c main.cpp -llua -DNO_TERM_COLOR
+	$(cc) $(cc_flags) -o $(bin_name) main.cpp -llua -DNO_TERM_COLOR
 
 clean:
-	rm luamake_c
+	rm $(bin_name)
