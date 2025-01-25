@@ -5,19 +5,17 @@ linker:=mold
 
 .PHONY: all, ncolor
 
-all:
-	$(cc) $(cc_flags) -o common.o -c common.cpp
-	$(cc) $(cc_flags) -o luamake_builtins.o -c luamake_builtins.cpp
-	$(cc) $(cc_flags) -o dependency_graph.o -c dependency_graph.cpp
-	$(cc) $(cc_flags) -o main.o -c main.cpp
-	$(cc) $(cc_flags) -o $(bin_name) main.o common.o luamake_builtins.o dependency_graph.o -fuse-ld=$(linker) -llua
+files:=common.o luamake_builtins.o dependency_graph.o main.o
 
-ncolor:
-	$(cc) $(cc_flags) -o common.o -c common.cpp -DNO_TERM_COLOR
-	$(cc) $(cc_flags) -o luamake_builtins.o -c luamake_builtins.cpp -DNO_TERM_COLOR
-	$(cc) $(cc_flags) -o dependency_graph.o -c dependency_graph.cpp -DNO_TERM_COLOR
-	$(cc) $(cc_flags) -o main.o -c main.cpp -DNO_TERM_COLOR
-	$(cc) $(cc_flags) -o $(bin_name) main.o common.o luamake_builtins.o dependency_graph.o -fuse-ld=$(linker) -llua
+all: $(files)
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) -llua
+
+ncolor: cc_flags += -DNO_TERM_COLOR
+ncolor: $(files)
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) -llua
+
+%.o: %.cpp
+	$(cc) $(cc_flags) -o $@ -c $^
 
 clean:
-	rm $(bin_name)
+	rm $(bin_name) *.o
