@@ -1,251 +1,28 @@
-#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <numeric>
 #include <optional>
-#include <span>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
 #include <lua.hpp>
 
-#if defined(_WIN32)
-#define NL "\r\n"
-#elif defined(__unix__)
-#define NL "\n"
-#elif defined(__MACH__)
-#define NL "\n"
-#else
-#warning("new line macro defined, you can help the project by adding another header guard and defining it");
-#define NL ""
-#endif
+#include "common.hpp"
+#include "luamake_builtins.hpp"
 
-// color things for error messages/ warnings
-// TODO: extract these into a platform independent thing so this'll actually
-// work on windows and shit
-#ifdef NO_TERM_COLOR
-#define ERROR
-#define WARNING
-#define DBG
-#define NORMAL
-#else
-#define ERROR "\033[0;31m"
-#define WARNING "\033[0;33m"
-#define DBG "\033[0;32m"
-#define NORMAL "\033[0;0m"
-#endif
-
-#define error_message(msg)                                                     \
-  fprintf(stderr, ERROR "Fatel Error:" NORMAL " " msg NL)
-#define ferror_message(msg, ...)                                               \
-  fprintf(stderr, ERROR "Fatel Error:" NORMAL " " msg NL, __VA_ARGS__)
-#define warning_message(msg)                                                   \
-  fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL)
-#define fwarning_message(msg, ...)                                             \
-  fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL, __VA_ARGS__)
-
-#define fn_print()                                                             \
-  fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
-
-#define expr_dbg(expr)                                                         \
-  do {                                                                         \
-    auto const res = (expr);                                                   \
-    std::cerr << DBG "[expr] " NORMAL #expr " = " << res << '\n';              \
-  } while (false);
-
-using std::array, std::vector, std::string, std::string_view;
+using std::vector, std::string, std::string_view;
 
 namespace fs = std::filesystem;
 
 template <class T> using opt = std::optional<T>;
 
-// TODO: remove this and add <utility> header if you ever upgrade to c++23
-// source = [[https://en.cppreference.com/w/cpp/utility/unreachable]]
-[[noreturn]] void unreachable() {
-#if defined(_MSC_VER) && !defined(__clang__)
-  __assume(false);
-#else
-  __builtin_unreachable();
-#endif
-}
-
 #define BUILDER_OBJ "__luamake_builder"
 #define RUNNER_OBJ "__luamake_runner"
 #define TESTING_MACRO "__define_testing_macro"
-
-namespace luamake_builtins {
-static auto clang(lua_State *state) -> int {
-  fn_print();
-
-  auto num_args = lua_gettop(state);
-  if (num_args != 1) {
-    lua_pushnil(state);
-    return 1;
-  }
-  auto constexpr compiler_field = string_view{"clang++"};
-  auto constexpr opt_level = string_view{"O2"};
-  auto constexpr warnings = array<string_view, 3>{{
-      string_view{"Wall"},
-      string_view{"Wconversion"},
-      string_view{"Wpedantic"},
-  }};
-
-  lua_createtable(state, 0, 3); // tbl
-
-  lua_pushstring(state, compiler_field.data());
-  lua_setfield(state, -2,
-               "compiler"); // setfield pops the value from the stack :)
-
-  lua_pushstring(state, opt_level.data());
-  lua_setfield(state, -2, "optimize");
-
-  lua_createtable(state, 3, 0);
-  auto constexpr table_idx = int{-2};
-  for (auto idx = lua_Integer{1}; auto const warning : warnings) {
-    lua_pushstring(state, warning.data());
-    lua_seti(state, table_idx, idx); // pops the val from the stack :)
-    ++idx;
-  }
-
-  lua_setfield(state, -2, "warnings");
-
-  return 1;
-}
-
-auto dump_impl(lua_State *state, int const idx) noexcept -> string {
-  switch (lua_type(state, idx)) {
-  case LUA_TNONE:
-    lua_error(state);
-    return string(); // (?)
-  case LUA_TNIL:
-    return string("nil");
-  case LUA_TBOOLEAN:
-    return lua_toboolean(state, idx) == 1 ? string("true") : string("false");
-  case LUA_TLIGHTUSERDATA: {
-    auto res = string(luaL_tolstring(state, idx, nullptr));
-    lua_pop(state, 1);
-    return res;
-  } break;
-  case LUA_TNUMBER:
-    return std::to_string(lua_tonumber(state, idx));
-  case LUA_TSTRING:
-    return string(lua_tostring(state, idx));
-  case LUA_TTABLE: {
-    auto res = string("Work in progress on dumping tables values\n");
-    res += '{';
-    res += '\n';
-    res += '\t';
-
-    lua_pushnil(state);
-    while (lua_next(state, -1) != 0) {
-      res += dump_impl(state, -2);
-      res += dump_impl(state, -1);
-      lua_pop(state, 1); // would be better to have a variable in the while loop
-      // so that we don't have a bunch of this stack manip going on
-    }
-    lua_pop(state, 1);
-
-    res += '}';
-    res += '\n';
-  } break;
-  case LUA_TFUNCTION: {
-    auto res = string("<lua: fn>");
-    res += ' ';
-    res += luaL_tolstring(state, idx, nullptr);
-    lua_pop(state, 1);
-    return res;
-  } break;
-  case LUA_TUSERDATA: {
-    auto res = string(luaL_tolstring(state, idx, nullptr));
-    lua_pop(state, 1);
-    return res;
-  } break;
-  case LUA_TTHREAD: {
-    auto res = string("<lua: thread>");
-    res += string(luaL_tolstring(state, idx, nullptr));
-    lua_pop(state, 1);
-    return res;
-  } break;
-  }
-  unreachable();
-}
-
-static auto dump(lua_State *state) -> int {
-  fn_print();
-
-  auto const num_args = lua_gettop(state);
-  if (num_args != 1) { // idk if this is actually how to do error handling (?)
-    lua_pushnil(state);
-    return 1;
-  }
-
-  auto res = string();
-
-  switch (lua_type(state, -1)) {
-  case LUA_TNONE:
-    lua_error(state);
-    return 1; // (?)
-    break;
-  case LUA_TNIL:
-    res = string("nil");
-    break;
-  case LUA_TBOOLEAN:
-    res = lua_toboolean(state, -1) == 1 ? string("true") : string("false");
-    break;
-  case LUA_TLIGHTUSERDATA:
-    luaL_tolstring(state, -1, nullptr);
-    return 1;
-    break;
-  case LUA_TNUMBER:
-    res = std::to_string(lua_tonumber(state, -1));
-    break;
-  case LUA_TSTRING:
-    res = string(lua_tostring(state, -1));
-    break;
-  case LUA_TTABLE:
-    res += string("Work in progress on dumping tables values\n");
-    res += '{';
-    res += '\n';
-    res += '\t';
-
-    lua_pushnil(state);
-    while (lua_next(state, -1) != 0) {
-      res += dump_impl(state, -2);
-      res += dump_impl(state, -1);
-      lua_pop(state, 1); // would be better to have a variable in the while loop
-      // so that we don't have a bunch of this stack manip going on
-    }
-    lua_pop(state, 1);
-
-    res += '}';
-    res += '\n';
-    break;
-  case LUA_TFUNCTION:
-    res = string("<lua: fn>");
-    break;
-  case LUA_TUSERDATA:
-    luaL_tolstring(state, -1, nullptr);
-    return 1;
-    break;
-  case LUA_TTHREAD:
-    res = string("<lua: thread>");
-    res += string(luaL_tolstring(state, -1, nullptr));
-    lua_pop(state, 1);
-    break;
-  }
-
-  lua_pushstring(state, res.c_str());
-  return 1;
-}
-
-constexpr luaL_Reg const funcs[] = {
-    {"clang", clang}, {"dump", dump}, {nullptr, nullptr}};
-} // namespace luamake_builtins
 
 namespace dependency_graph {
 struct src_file final {
@@ -688,6 +465,13 @@ auto build(lua_State *state) noexcept -> exit_t {
                   "function." NL "\tIdk just fuck'in don't do that?");
     return exit_t::config_error;
   }
+
+  struct Builder final {
+    string cc;
+    vector<string> cc_flags;
+  };
+
+  Builder builder_cfg;
 
   auto pre_exec_t = lua_getfield(state, -1, "pre_exec");
   if (pre_exec_t == LUA_TTABLE) {
