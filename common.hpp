@@ -45,14 +45,6 @@
     std::cerr << DBG "[expr] " NORMAL #expr " = " << res << '\n';              \
   } while (false);
 
-// TODO: remove this and add <utility> header if you ever upgrade to c++23
-// source = [[https://en.cppreference.com/w/cpp/utility/unreachable]]
-[[noreturn]] static void unreachable() {
-#if defined(_MSC_VER) && !defined(__clang__)
-  __assume(false);
-#else
-  __builtin_unreachable();
-#endif
-}
+[[noreturn]] auto unreachable() noexcept -> void;
 
 #endif
