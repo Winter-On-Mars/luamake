@@ -1,6 +1,8 @@
 #ifndef __LUAMAKE_COMMON_HPP
 #define __LUAMAKE_COMMON_HPP
 
+#include <filesystem>
+
 #if defined(_WIN32)
 #define NL "\r\n"
 #elif defined(__unix__)
@@ -46,5 +48,7 @@
   } while (false);
 
 [[noreturn]] auto unreachable() noexcept -> void;
+
+namespace fs = std::filesystem;
 
 #endif
