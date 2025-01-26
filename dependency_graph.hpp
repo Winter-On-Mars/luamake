@@ -13,6 +13,10 @@ namespace dependency_graph {
 struct src_file final {
   // std::size_t hash;
   std::string name;
+
+  auto constexpr is_cpp_file() const noexcept -> bool {
+    return name.rfind(".cpp") != std::string::npos;
+  }
 };
 
 class graph final {
@@ -30,6 +34,7 @@ public:
   auto operator=(graph const &) = delete;
 
   auto insert(std::string &&, src_file &&) noexcept -> void;
+
   auto constexpr size() const noexcept -> size_t { return dep_graph.size(); }
   auto begin() const noexcept -> graph_t::const_iterator {
     return dep_graph.begin();

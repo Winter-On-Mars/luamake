@@ -310,8 +310,6 @@ auto build(lua_State *state) noexcept -> exit_t {
     return exit_t::config_error;
   }
   auto const *compiler = lua_tostring(state, -1);
-  envoked_command += compiler;
-  envoked_command += ' ';
 
   auto const compiler_opt_level_t = lua_getfield(state, -2, "optimize");
   if (compiler_opt_level_t != LUA_TSTRING) {
@@ -319,9 +317,6 @@ auto build(lua_State *state) noexcept -> exit_t {
     return exit_t::config_error;
   }
   auto const *compiler_opt_level = lua_tostring(state, -1);
-  envoked_command += '-';
-  envoked_command += compiler_opt_level;
-  envoked_command += ' ';
 
   auto const compiler_warnings_t = lua_getfield(state, -3, "warnings");
   if (compiler_warnings_t != LUA_TTABLE) {
@@ -345,24 +340,60 @@ auto build(lua_State *state) noexcept -> exit_t {
     cc_flags += ' ';
   }
 
-  envoked_command += cc_flags;
+  if (dep_graph->size() != 0) {
+    for (auto const &[_, dependers] : dep_graph.value()) {
+      for (auto const &dep : dependers) {
+        if (!dep.is_cpp_file()) {
+          continue;
+        }
+        envoked_command += compiler;
+        envoked_command += ' ';
 
-  envoked_command += "-o build/";
-  envoked_command += froot;
-  envoked_command += ".o ";
+        envoked_command += '-';
+        envoked_command += compiler_opt_level;
+        envoked_command += ' ';
 
-  envoked_command += "-c ";
-  envoked_command += rel_path / froot;
+        envoked_command += cc_flags;
 
-  expr_dbg(envoked_command);
+        envoked_command += "-o build/";
+        envoked_command += dep.name;
+        envoked_command += ".o ";
 
-  //  auto sys_res = system(envoked_command.c_str());
-  //  if (sys_res != 0) {
-  //    // TODO: error
-  //    return exit_t::internal_error;
-  //  }
+        envoked_command += "-c ";
+        envoked_command += rel_path / dep.name;
 
-  envoked_command.clear();
+        expr_dbg(envoked_command);
+        if (0 != system(envoked_command.c_str())) {
+          error_message("When compiling the above command");
+          return exit_t::internal_error;
+        }
+        envoked_command.clear();
+      }
+    }
+  } else {
+    envoked_command += compiler;
+    envoked_command += ' ';
+
+    envoked_command += '-';
+    envoked_command += compiler_opt_level;
+    envoked_command += ' ';
+
+    envoked_command += cc_flags;
+
+    envoked_command += "-o build/";
+    envoked_command += froot;
+    envoked_command += ".o ";
+
+    envoked_command += "-c ";
+    envoked_command += rel_path / froot;
+
+    expr_dbg(envoked_command);
+    if (0 != system(envoked_command.c_str())) {
+      error_message("When compiling the above command");
+      return exit_t::internal_error;
+    }
+    envoked_command.clear();
+  }
 
   envoked_command += compiler;
   envoked_command += ' ';
@@ -395,11 +426,10 @@ auto build(lua_State *state) noexcept -> exit_t {
 
   expr_dbg(envoked_command);
 
-  //  sys_res = system(envoked_command.c_str());
-  //  if (sys_res != 0) {
-  //    // TODO: error
-  //    return exit_t::internal_error;
-  //  }
+  if (0 != system(envoked_command.c_str())) {
+    error_message("When compiling the output binary");
+    return exit_t::internal_error;
+  }
 
   // TODO: post_exec
 
@@ -629,6 +659,7 @@ auto main(int argc, char **argv) -> int {
   case MakeTypes::exit_t::ok:
     return 0;
   case MakeTypes::exit_t::internal_error:
+    error_message("Internal Service Error, probably not implimented yet :)");
     return 1;
   case MakeTypes::exit_t::lua_vm_error:
     return 1;
