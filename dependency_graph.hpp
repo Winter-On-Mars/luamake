@@ -16,7 +16,8 @@ struct src_file final {
 };
 
 class graph final {
-  std::unordered_map<std::string, std::vector<src_file>> dep_graph;
+  using graph_t = std::unordered_map<std::string, std::vector<src_file>>;
+  graph_t dep_graph;
 
 public:
   graph() noexcept = default;
@@ -29,6 +30,13 @@ public:
   auto operator=(graph const &) = delete;
 
   auto insert(std::string &&, src_file &&) noexcept -> void;
+  auto constexpr size() const noexcept -> size_t { return dep_graph.size(); }
+  auto begin() const noexcept -> graph_t::const_iterator {
+    return dep_graph.begin();
+  }
+  auto end() const noexcept -> graph_t::const_iterator {
+    return dep_graph.end();
+  }
 };
 
 auto generate(FILE *, std::string_view const, std::filesystem::path) noexcept
