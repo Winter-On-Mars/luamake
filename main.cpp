@@ -28,13 +28,19 @@ enum class exit_t : unsigned char {
   useage_error,
 };
 
-auto build(lua_State *) noexcept -> exit_t;
-auto new_proj(char const *) noexcept -> exit_t;
-auto init_proj() noexcept -> exit_t;
-auto clean() noexcept -> exit_t;
-auto test(lua_State *) noexcept -> exit_t;
-auto run(lua_State *) noexcept -> exit_t;
-auto help() noexcept -> exit_t;
+enum class proj_t : unsigned char {
+  Executable,
+  Dynamic,
+  Static,
+};
+
+static auto build(lua_State *) noexcept -> exit_t;
+static auto new_proj(char const *, proj_t const) noexcept -> exit_t;
+static auto init_proj() noexcept -> exit_t;
+static auto clean() noexcept -> exit_t;
+static auto test(lua_State *) noexcept -> exit_t;
+static auto run(lua_State *) noexcept -> exit_t;
+static auto help() noexcept -> exit_t;
 
 struct Type final {
   // TODO: add --release flag for O3 optimizations
@@ -49,7 +55,8 @@ struct Type final {
     HELP,
   } type_t;
 
-  char const *project_name;
+  int argc;
+  char **argv;
 
   static auto make(int, char **) noexcept -> Type;
 
@@ -58,36 +65,36 @@ struct Type final {
 
 auto Type::make(int argc, char **argv) noexcept -> Type {
   if (argc == 1) {
-    return {Type::RUN, ""};
+    return {Type::RUN, 0, nullptr};
   }
 
   if (strcmp(argv[1], "b") == 0 || strcmp(argv[1], "build") == 0) {
-    return {Type::BUILD, ""};
+    return {Type::BUILD, 0, nullptr};
   } else if (strcmp(argv[1], "n") == 0 || strcmp(argv[1], "new") == 0) {
     // TODO: make sure to see there's no potential security
     // issues with this command
-    if (argc != 3) {
+    if (argc < 3) {
       error_message("Expected string for the name of the "
                     "project, found nothing" NL
                     "\tDisplaying help message for more information" NL);
-      return {Type::HELP, ""};
+      return {Type::HELP, 0, nullptr};
     }
-    return {Type::NEW, argv[2]};
+    return {Type::NEW, argc, argv};
   } else if (strcmp(argv[1], "c") == 0 || strcmp(argv[1], "clean") == 0) {
-    return {Type::CLEAN, ""};
+    return {Type::CLEAN, 0, nullptr};
   } else if (strcmp(argv[1], "t") == 0 || strcmp(argv[1], "test") == 0) {
-    return {Type::TEST, ""};
+    return {Type::TEST, 0, nullptr};
   } else if (strcmp(argv[1], "run") == 0) {
-    return {Type::RUN, ""};
+    return {Type::RUN, 0, nullptr};
   } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
-    return {Type::HELP, ""};
+    return {Type::HELP, 0, nullptr};
   } else if (strcmp(argv[1], "init") == 0) {
-    return {Type::INIT, ""};
+    return {Type::INIT, 0, nullptr};
   } else {
     fwarning_message("Unknown argument [%s]" NL
                      "\tDisplaying help for list of accepted arguments",
                      argv[1]);
-    return {Type::UNKNOWN_ARG, ""};
+    return {Type::UNKNOWN_ARG, 0, nullptr};
   }
 }
 
@@ -96,8 +103,22 @@ auto Type::run() const noexcept -> exit_t {
   switch (type_t) {
   case UNKNOWN_ARG:
     return help();
-  case NEW:
-    return new_proj(project_name);
+  case NEW: {
+    auto project_type = proj_t::Executable;
+    // bad cli parsing
+    for (auto i = 0; i < argc; ++i) {
+      if (strcmp("--static", argv[i]) == 0) {
+        project_type = proj_t::Static;
+        break;
+      } else if (strcmp("--executable", argv[i]) == 0) {
+        break;
+      } else if (strcmp("--dynamic", argv[i]) == 0) {
+        project_type = proj_t::Dynamic;
+        break;
+      }
+    }
+    return new_proj(argv[2], project_type);
+  }
   case INIT:
     return init_proj();
   case CLEAN:
@@ -171,7 +192,7 @@ auto Type::run() const noexcept -> exit_t {
   return res;
 }
 
-auto build(lua_State *state) noexcept -> exit_t {
+static auto build(lua_State *state) noexcept -> exit_t {
   fn_print();
 
   lua_pushcfunction(state, luamake_builtins::clang);
@@ -436,7 +457,8 @@ auto build(lua_State *state) noexcept -> exit_t {
   return exit_t::ok;
 }
 
-auto new_proj(char const *project_name) noexcept -> exit_t {
+static auto new_proj(char const *project_name, proj_t const type) noexcept
+    -> exit_t {
   fn_print();
   auto const project_root = fs::current_path() / project_name;
 
@@ -463,7 +485,8 @@ auto new_proj(char const *project_name) noexcept -> exit_t {
                    (fs::current_path() / "luamake.lua").c_str());
     return exit_t::internal_error;
   }
-  auto constexpr lua_f_content =
+
+  auto constexpr lua_f_content_exe =
       // clang-format off
       string_view{"function Build(builder)" NL
                   "    builder.type = \"exe\"" NL
@@ -492,14 +515,69 @@ auto new_proj(char const *project_name) noexcept -> exit_t {
                   "    }" NL
                   "}" NL};
   // clang-format on
-  auto amount_lua_written = fprintf(luamake_lua, "%s", lua_f_content.data());
-  if (amount_lua_written != lua_f_content.length()) {
-    ferror_message("Unable to write full luamake template string into the lua "
-                   "file at [%s]",
-                   (project_root / "luamake.lua").c_str());
-    fclose(luamake_lua);
-    return exit_t::internal_error;
+  auto constexpr lua_f_content_slib =
+      // clang-format off
+      string_view{"function Build(builder)" NL
+                  "    builder.type = \"slib\"" NL
+                  "    builder.root = \"src/main.cpp\"" NL
+                  "    builder.compiler = Clang({})" NL
+                  "    builder.name = \"a\"" NL
+                  NL
+                  "    builder.version = \"0.0.1\"" NL
+                  "    builder.description = \"TODO change me :)\"" NL
+                  "end" NL
+                  };
+  // clang-format on
+  auto constexpr lua_f_content_dlib =
+      // clang-format off
+      string_view{"function Build(builder)" NL
+                  "    builder.type = \"dlib\"" NL
+                  "    builder.root = \"src/main.cpp\"" NL
+                  "    builder.compiler = Clang({})" NL
+                  "    builder.name = \"a\"" NL
+                  NL
+                  "    builder.version = \"0.0.1\"" NL
+                  "    builder.description = \"TODO change me :)\"" NL
+                  "end" NL
+                  };
+  // clang-format on
+  switch (type) {
+  case proj_t::Executable: {
+    if (fprintf(luamake_lua, "%s", lua_f_content_exe.data()) !=
+        lua_f_content_exe.length()) {
+      ferror_message(
+          "Unable to write full luamake template string into the lua "
+          "file at [%s]",
+          (project_root / "luamake.lua").c_str());
+      fclose(luamake_lua);
+      return exit_t::internal_error;
+    }
+  } break;
+  case proj_t::Dynamic: {
+    if (fprintf(luamake_lua, "%s", lua_f_content_dlib.data()) !=
+        lua_f_content_dlib.length()) {
+      ferror_message(
+          "Unable to write full luamake template string into the lua "
+          "file at [%s]",
+          (project_root / "luamake.lua").c_str());
+      fclose(luamake_lua);
+      return exit_t::internal_error;
+    }
+  } break;
+  case proj_t::Static: {
+    if (fprintf(luamake_lua, "%s", lua_f_content_slib.data()) !=
+        lua_f_content_slib.length()) {
+      ferror_message(
+          "Unable to write full luamake template string into the lua "
+          "file at [%s]",
+          (project_root / "luamake.lua").c_str());
+      fclose(luamake_lua);
+      return exit_t::internal_error;
+    }
+  } break;
   }
+
+  // TODO: write template main function for slib and dlib
 
   // creating simple hello world cpp file
   auto main_cpp = fopen((project_root / "src/main.cpp").c_str(), "w");
@@ -534,12 +612,12 @@ auto new_proj(char const *project_name) noexcept -> exit_t {
   return exit_t::ok;
 }
 
-auto init_proj() noexcept -> exit_t {
+static auto init_proj() noexcept -> exit_t {
   fn_print();
   return exit_t::internal_error;
 }
 
-auto clean() noexcept -> exit_t {
+static auto clean() noexcept -> exit_t {
   fn_print();
   // remove everything from ./build
   // where `.` is the dir that luamake is being called from
@@ -583,7 +661,7 @@ auto clean() noexcept -> exit_t {
   return exit_t::ok;
 }
 
-auto test(lua_State *state) noexcept -> exit_t {
+static auto test(lua_State *state) noexcept -> exit_t {
   fn_print();
   lua_createtable(state, 0, 1); // builder object
   lua_pushboolean(state, true);
@@ -600,7 +678,7 @@ auto test(lua_State *state) noexcept -> exit_t {
   return exit_t::internal_error;
 }
 
-auto run(lua_State *state) noexcept -> exit_t {
+static auto run(lua_State *state) noexcept -> exit_t {
   fn_print();
 
   auto build_res = build(state);
@@ -622,7 +700,7 @@ auto run(lua_State *state) noexcept -> exit_t {
   return exit_t::internal_error;
 }
 
-auto help() noexcept -> exit_t {
+static auto help() noexcept -> exit_t {
   fn_print();
   // clang-format off
   printf(
