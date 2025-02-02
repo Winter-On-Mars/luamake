@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -5,6 +6,7 @@
 #include <iostream>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include <lua.hpp>
@@ -13,7 +15,7 @@
 #include "dependency_graph.hpp"
 #include "luamake_builtins.hpp"
 
-using std::vector, std::string, std::string_view;
+using std::array, std::pair, std::vector, std::string, std::string_view;
 
 #define BUILDER_OBJ "__luamake_builder"
 #define RUNNER_OBJ "__luamake_runner"
@@ -36,7 +38,7 @@ enum class proj_t : unsigned char {
 
 static auto build(lua_State *) noexcept -> exit_t;
 static auto new_proj(char const *, proj_t const) noexcept -> exit_t;
-static auto init_proj() noexcept -> exit_t;
+static auto init_proj(char const *, proj_t const) noexcept -> exit_t;
 static auto clean() noexcept -> exit_t;
 static auto test(lua_State *) noexcept -> exit_t;
 static auto run(lua_State *) noexcept -> exit_t;
@@ -89,7 +91,7 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
   } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
     return {Type::HELP, 0, nullptr};
   } else if (strcmp(argv[1], "init") == 0) {
-    return {Type::INIT, 0, nullptr};
+    return {Type::INIT, argc, argv};
   } else {
     fwarning_message("Unknown argument [%s]" NL
                      "\tDisplaying help for list of accepted arguments",
@@ -105,8 +107,7 @@ auto Type::run() const noexcept -> exit_t {
     return help();
   case NEW: {
     auto project_type = proj_t::Executable;
-    // bad cli parsing
-    for (auto i = 0; i < argc; ++i) {
+    for (int i = 0; i < argc; ++i) {
       if (strcmp("--static", argv[i]) == 0) {
         project_type = proj_t::Static;
         break;
@@ -119,8 +120,46 @@ auto Type::run() const noexcept -> exit_t {
     }
     return new_proj(argv[2], project_type);
   }
-  case INIT:
-    return init_proj();
+  case INIT: {
+    char const *project_root = nullptr;
+    auto project_type = proj_t::Executable;
+
+    for (int i = 0; i < argc; ++i) {
+      if (*argv[i] != '-') {
+        continue;
+      }
+      auto const len = strlen(argv[i]);
+      if (len < 5) {
+        continue;
+      }
+
+      if (strncmp(argv[i], "-type", 5) == 0) {
+        ++i;
+        if (strcmp(argv[i], "executable") == 0) {
+        } else if (strcmp(argv[i], "dynamic") == 0) {
+          project_type = proj_t::Dynamic;
+        } else if (strcmp(argv[i], "static") == 0) {
+          project_type = proj_t::Static;
+        } else {
+          ferror_message(
+              "When parsing for 'init' command line args, came across "
+              "unknown type %s",
+              argv[i]);
+          return exit_t::useage_error;
+        }
+      } else if (strncmp(argv[i], "-root", 5) == 0) {
+        ++i;
+        project_root = argv[i];
+      }
+    }
+    if (project_root == nullptr) {
+      error_message(
+          "When parsing for 'init' command line args, expected a project root "
+          "file to be given, see help message for more information");
+      return exit_t::useage_error;
+    }
+    return init_proj(project_root, project_type);
+  }
   case CLEAN:
     return clean();
   case HELP:
@@ -486,7 +525,7 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
     return exit_t::internal_error;
   }
 
-  auto constexpr lua_f_content_exe =
+  auto constexpr lua_f_content = std::array<string_view, 3>{
       // clang-format off
       string_view{"function Build(builder)" NL
                   "    builder.type = \"exe\"" NL
@@ -513,107 +552,255 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
                   "            from = \"stdout\"," NL
                   "        }," NL
                   "    }" NL
-                  "}" NL};
-  // clang-format on
-  auto constexpr lua_f_content_slib =
-      // clang-format off
-      string_view{"function Build(builder)" NL
-                  "    builder.type = \"slib\"" NL
-                  "    builder.root = \"src/main.cpp\"" NL
-                  "    builder.compiler = Clang({})" NL
-                  "    builder.name = \"a\"" NL
-                  NL
-                  "    builder.version = \"0.0.1\"" NL
-                  "    builder.description = \"TODO change me :)\"" NL
-                  "end" NL
-                  };
-  // clang-format on
-  auto constexpr lua_f_content_dlib =
-      // clang-format off
+                  "}" NL},
       string_view{"function Build(builder)" NL
                   "    builder.type = \"dlib\"" NL
-                  "    builder.root = \"src/main.cpp\"" NL
+                  "    builder.root = \"src/dyn.cpp\"" NL
                   "    builder.compiler = Clang({})" NL
                   "    builder.name = \"a\"" NL
                   NL
                   "    builder.version = \"0.0.1\"" NL
                   "    builder.description = \"TODO change me :)\"" NL
                   "end" NL
-                  };
-  // clang-format on
-  switch (type) {
-  case proj_t::Executable: {
-    if (fprintf(luamake_lua, "%s", lua_f_content_exe.data()) !=
-        lua_f_content_exe.length()) {
-      ferror_message(
-          "Unable to write full luamake template string into the lua "
-          "file at [%s]",
-          (project_root / "luamake.lua").c_str());
-      fclose(luamake_lua);
-      return exit_t::internal_error;
-    }
-  } break;
-  case proj_t::Dynamic: {
-    if (fprintf(luamake_lua, "%s", lua_f_content_dlib.data()) !=
-        lua_f_content_dlib.length()) {
-      ferror_message(
-          "Unable to write full luamake template string into the lua "
-          "file at [%s]",
-          (project_root / "luamake.lua").c_str());
-      fclose(luamake_lua);
-      return exit_t::internal_error;
-    }
-  } break;
-  case proj_t::Static: {
-    if (fprintf(luamake_lua, "%s", lua_f_content_slib.data()) !=
-        lua_f_content_slib.length()) {
-      ferror_message(
-          "Unable to write full luamake template string into the lua "
-          "file at [%s]",
-          (project_root / "luamake.lua").c_str());
-      fclose(luamake_lua);
-      return exit_t::internal_error;
-    }
-  } break;
-  }
+                  },
+      string_view{"function Build(builder)" NL
+                  "    builder.type = \"slib\"" NL
+                  "    builder.root = \"src/static.cpp\"" NL
+                  "    builder.compiler = Clang({})" NL
+                  "    builder.name = \"a\"" NL
+                  NL
+                  "    builder.version = \"0.0.1\"" NL
+                  "    builder.description = \"TODO change me :)\"" NL
+                  "end" NL
+                  },
+      // clang-format on
+  };
 
-  // TODO: write template main function for slib and dlib
+  auto const actual_string =
+      lua_f_content[static_cast<std::underlying_type_t<proj_t>>(type)];
 
-  // creating simple hello world cpp file
-  auto main_cpp = fopen((project_root / "src/main.cpp").c_str(), "w");
-  if (main_cpp == nullptr) {
-    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
-                   "with permissions, or out of space.",
-                   (fs::current_path() / "src/main.cpp").c_str());
+  if (fprintf(luamake_lua, "%s", actual_string.data()) !=
+      actual_string.length()) {
+    ferror_message("Unable to write full luamake template string into the lua "
+                   "file at [%s]",
+                   (project_root / "luamake.lua").c_str());
+    fclose(luamake_lua);
     return exit_t::internal_error;
   }
-  auto constexpr cpp_f_content =
-      // clang-format off
-      string_view{"#include <iostream>" NL
-                  NL
-                  "auto main(int argc, char** argv) -> int {" NL
-                  "    using std::cout;" NL
-                  "    cout << \"Hello World!\\n\";" NL
-                  "}" NL};
-  // clang-format on
-  auto amount_cpp_written = fprintf(main_cpp, "%s", cpp_f_content.data());
-  if (amount_cpp_written != cpp_f_content.length()) {
-    ferror_message(
-        "Unable to write full c++ template string into the c++ file at [%s]",
-        (project_root / "src/main.cpp").c_str());
+
+  fflush(luamake_lua);
+
+  auto constexpr file_paths = array<pair<string_view, string_view>, 3>{
+      pair("", "src/main.cpp"),
+      pair("src/dyn.hpp", "src/dyn.cpp"),
+      pair("src/static.hpp", "src/static.cpp"),
+  };
+
+  auto constexpr hpp_cpp_f_content = array<pair<string_view, string_view>, 3>{
+      pair(string_view{""},
+           string_view{
+               ""
+               // clang-format off
+               "#include <iostream>" NL
+               NL
+               "auto main() -> int {" NL
+               "    using std::cout;" NL
+               "    cout << \"Hello World!\" << std::endl;" NL
+               "}" NL
+               // clang-format on
+           }),
+      pair(
+          string_view{
+              ""
+              // clang-format off
+              "#pragma once" NL
+              NL
+              "namespace dlib {" NL
+              "[[nodiscard]]" NL
+              "auto call_me(int) noexcept -> int;" NL
+              "}" NL
+              // clang-format on
+          },
+          string_view{
+              ""
+              // clang-format off
+              "#include \"dyn.hpp\"" NL
+              NL
+              "namespace dlib {" NL
+              "[[nodiscard]]" NL
+              "auto call_me(int i) noexcept -> int {" NL
+              "    return i + 1;" NL
+              "}" NL
+              "}" NL
+              // clang-format on
+          }),
+      pair(
+          string_view{
+              ""
+              // clang-format off
+              "#pragma once" NL
+              NL
+              "namespace slib {" NL
+              "[[nodiscard]]" NL
+              "auto call_me(int) noexcept -> int;" NL
+              "}" NL
+              // clang-format on
+          },
+          string_view{
+              ""
+              // clang-format off
+              "#include \"static.hpp\"" NL
+              NL
+              "namespace slib {" NL
+              "[[nodiscard]]" NL
+              "auto call_me(int i) noexcept -> int {" NL
+              "    return i + 1;" NL
+              "}" NL
+              "}" NL
+              // clang-format on
+          }),
+  };
+
+  auto const [header_f_name, impl_f_name] =
+      file_paths[static_cast<std::underlying_type_t<proj_t>>(type)];
+
+  auto const [header_string, impl_string] =
+      hpp_cpp_f_content[static_cast<std::underlying_type_t<proj_t>>(type)];
+
+  auto *header = (!header_f_name.empty())
+                     ? fopen((project_root / header_f_name).c_str(), "w")
+                     : nullptr;
+  if (type != proj_t::Executable && header == nullptr) {
+    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
+                   "with permissions, or out of space.",
+                   (project_root / header_f_name).c_str());
+    return exit_t::internal_error;
+  }
+
+  auto *impl = fopen((project_root / impl_f_name).c_str(), "w");
+  if (impl == nullptr) {
+    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
+                   "with permissions, or out of space.",
+                   (project_root / impl_f_name).c_str());
+    return exit_t::internal_error;
+  }
+
+  if (type != proj_t::Executable &&
+      fprintf(header, "%s", header_string.data()) != header_string.length()) {
+    ferror_message("Unable to write full hpp file template string at [%s]",
+                   (project_root / header_f_name).c_str());
     fclose(luamake_lua);
-    fclose(main_cpp);
+    fclose(header);
+    fclose(impl);
+    return exit_t::internal_error;
+  }
+
+  if (fprintf(impl, "%s", impl_string.data()) != impl_string.length()) {
+    ferror_message("Unable to write full cpp file template string at [%s]",
+                   (project_root / impl_f_name).c_str());
+    fclose(luamake_lua);
+    fclose(header);
+    fclose(impl);
     return exit_t::internal_error;
   }
 
   fclose(luamake_lua);
-  fclose(main_cpp);
+  fclose(header);
+  fclose(impl);
 
   return exit_t::ok;
 }
 
-static auto init_proj() noexcept -> exit_t {
+static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
   fn_print();
+  auto *luamake_file = fopen("./luamake.lua", "w");
+  if (luamake_file == nullptr) {
+    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
+                   "with permissions, or out of space.",
+                   (fs::current_path() / "luamake.lua").c_str());
+    return exit_t::internal_error;
+  }
+
+  auto luamake_content = string();
+  luamake_content.reserve(256);
+
+  auto constexpr types = std::array<string_view, 3>{
+      string_view{"exe"},
+      string_view{"dlib"},
+      string_view{"slib"},
+  };
+
+  auto const project_type_string =
+      types[static_cast<std::underlying_type_t<proj_t>>(type)];
+
+  luamake_content +=
+      // clang-format off
+    string_view{
+      "function Build(builder)" NL
+           "    builder.type = \"" NL
+    };
+  // clang-format on
+  luamake_content += project_type_string;
+  luamake_content +=
+      // clang-format off
+    string_view{"\"" NL
+        "    builder.root = \"" NL
+    };
+  // clang-format on
+  luamake_content +=
+      // clang-format off
+    string_view{"\"" NL
+        "    builder.compiler = Clang({})" NL
+        "    builder.name = \"a\"" NL // TODO: let user when calling this function specify the output name
+        NL
+        "    builder.version = \"0.0.1\"" NL
+        "    builder.description = \"TODO change me :)\"" NL
+        "end" NL
+    };
+  // clang-format on
+
+  if (type == proj_t::Executable) {
+    luamake_content +=
+        // clang-format off
+    string_view{""
+      "function Run(runner)" NL
+      "    runner.exe = \"build/a\"" NL
+      "end" NL
+      };
+    // clang-format on
+    luamake_content +=
+        // clang-format off
+    string_view{""
+      "Tests = {" NL
+      "    {" NL
+      "        fun = function(tester)" NL
+      "            tester.exe = \"build/a\"" NL
+      "            tester.args = {\"This does nothing\"}" NL
+      "        end," NL
+      "        output = {" NL
+      "            expected = \"Hello World!\\n\"," NL
+      "            from = \"stdout\"," NL
+      "        }," NL
+      "    }" NL
+      "}" NL
+    };
+    // clang-format on
+  }
+
+  // idk if it's worth calling this function?
+  // [luamake_content.shrink_to_fit()]
+  if (fprintf(luamake_file, "%s", luamake_content.data()) !=
+      luamake_content.length()) {
+    ferror_message(
+        "Unable to write `luamake.lua` content into luamake file at [%s]",
+        fs::current_path().c_str());
+    fclose(luamake_file);
+    fs::remove("./luamake.lua"); // delete file for attomic rw
+    return exit_t::internal_error;
+  }
+
+  fclose(luamake_file);
+
   return exit_t::internal_error;
 }
 
@@ -706,19 +893,20 @@ static auto help() noexcept -> exit_t {
   printf(
       "Usage: luamake [options]?" NL
       "options:" NL
-      "\t-h, help              : Displays this help message." NL
-      "\tc, clean              : Cleans the cache dir and removes the output." NL
-      "\tn, new <project-name> : Creates a new subdir with name <project-name>, "
+      "\t-h, help                          : Displays this help message." NL
+      "\tc, clean                          : Cleans the cache dir and removes the output." NL
+      "\tn, new <project-name>             : Creates a new subdir with name <project-name>, "
       "creating a default luamake build script." NL
-      "\tb, build              : Builds the project based on the `Build` function "
+      "\ti, init <project-name> [init-args]:" NL
+      "\tb, build                          : Builds the project based on the `Build` function "
       "defined in the `luamake.lua` file in the current dir." NL
-      "\tt, test               : Builds the project based on the `Build` function "
+      "\tt, test                           : Builds the project based on the `Build` function "
       "in the `luamake.lua` file in the current dir, with the additional macro "
       "`LUAMAKE_TESTS` defined. Then runs the tests defined in the `Test` "
       "function "
       "defined in the `luamake.lua` file in the current dir, displaying the "
       "number of tests that succeeded." NL
-      "\tr, run                : Builds the project based on the `Build` function "
+      "\tr, run                            : Builds the project based on the `Build` function "
       "defined in the `luamake.lua` file in the current dir. Then runs the "
       "program, based on the `Run` function defined in the current dirs "
       "`luamake.lua` file." NL
