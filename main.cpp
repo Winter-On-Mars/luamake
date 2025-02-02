@@ -231,6 +231,10 @@ auto Type::run() const noexcept -> exit_t {
   return res;
 }
 
+// TODO: do things with builder.deps for dependency management
+// and do things with builder.type to actually fuckin compile
+// static and dynamic libs
+// TODO: another issue with luavm indexing a nil value :)
 static auto build(lua_State *state) noexcept -> exit_t {
   fn_print();
 
@@ -310,7 +314,15 @@ static auto build(lua_State *state) noexcept -> exit_t {
   }
   lua_pop(state, 1); // remove the pre_exec stuff
 
-  auto const builder_root_t = lua_getfield(state, -1, "root");
+  auto const output_name_t = lua_getfield(state, -2, "name");
+  if (output_name_t != LUA_TSTRING) {
+    error_message("Expected `build.name` to be of type string");
+    return exit_t::config_error;
+  }
+
+  auto const *output_name = lua_tostring(state, -1);
+
+  auto const builder_root_t = lua_getfield(state, -2, "root");
   if (builder_root_t != LUA_TSTRING) {
     error_message("fucked up root path to the main file");
     return exit_t::config_error;
@@ -356,7 +368,7 @@ static auto build(lua_State *state) noexcept -> exit_t {
   }
   std::cout << std::flush;
 
-  auto const builder_compiler_t = lua_getfield(state, -2, "compiler");
+  auto const builder_compiler_t = lua_getfield(state, -3, "compiler");
   if (builder_compiler_t != LUA_TTABLE) {
     error_message("Expected `builder.compiler` field to be of type table");
     return exit_t::config_error;
@@ -464,24 +476,16 @@ static auto build(lua_State *state) noexcept -> exit_t {
 
   envoked_command += cc_flags;
 
-  auto const output_name_t = lua_getfield(state, -warnings_len - 6, "name");
-  if (output_name_t != LUA_TSTRING) {
-    error_message("Expected `build.name` to be of type string");
-    return exit_t::config_error;
-  }
-
   for (auto const &f : fs::directory_iterator(fs::current_path() / "build")) {
-    expr_dbg(fs::relative(f));
-    expr_dbg(fs::relative(f).extension());
     if (fs::relative(f).extension() == fs::path(".o")) {
       envoked_command += fs::relative(f);
       envoked_command += ' ';
     }
   }
 
-  auto const output_name = lua_tostring(state, -1);
-
   envoked_command += "-o build/";
+  // TODO: switch on the type to change the name of the output executable and
+  // it's file extension
   envoked_command += output_name;
 
   expr_dbg(envoked_command);
@@ -705,7 +709,8 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
   }
 
   fclose(luamake_lua);
-  fclose(header);
+  if (header != nullptr)
+    fclose(header);
   fclose(impl);
 
   return exit_t::ok;
