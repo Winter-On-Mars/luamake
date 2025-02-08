@@ -95,7 +95,7 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
     return {Type::RUN, argc, argv};
   } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
     return {Type::HELP, 0, nullptr};
-  } else if (strcmp(argv[1], "init") == 0) {
+  } else if (strcmp(argv[1], "i") == 0 || strcmp(argv[1], "init") == 0) {
     return {Type::INIT, argc, argv};
   } else {
     fwarning_message("Unknown argument [%s]" NL
