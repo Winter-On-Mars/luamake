@@ -247,7 +247,6 @@ auto Type::run() const noexcept -> exit_t {
 // TODO: do things with builder.deps for dependency management
 // and do things with builder.type to actually fuckin compile
 // static and dynamic libs
-// TODO: another issue with luavm indexing a nil value :)
 static auto build(user_func_config const *const c) noexcept -> exit_t {
   fn_print();
 
@@ -310,13 +309,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  struct Builder final {
-    string cc;
-    vector<string> cc_flags;
-  };
-
-  Builder builder_cfg;
-
   auto pre_exec_t = lua_getfield(c->state, -1, "pre_exec");
   if (pre_exec_t == LUA_TTABLE) {
     // TODO: run the pre_exec stuff
@@ -327,7 +319,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   }
   lua_pop(c->state, 1); // remove the pre_exec stuff
 
-  auto const output_name_t = lua_getfield(c->state, -2, "name");
+  auto const output_name_t = lua_getfield(c->state, -1, "name");
   if (output_name_t != LUA_TSTRING) {
     error_message("Expected `build.name` to be of type string");
     return exit_t::config_error;
