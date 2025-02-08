@@ -1,4 +1,5 @@
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +17,8 @@
 #include "luamake_builtins.hpp"
 
 using std::array, std::pair, std::vector, std::string, std::string_view;
+
+using u8 = std::uint8_t;
 
 #define BUILDER_OBJ "__luamake_builder"
 #define RUNNER_OBJ "__luamake_runner"
@@ -36,16 +39,20 @@ enum class proj_t : unsigned char {
   Static,
 };
 
-static auto build(lua_State *) noexcept -> exit_t;
+struct user_func_config final {
+  lua_State *state;
+  bool release;
+};
+
+static auto build(user_func_config const *const) noexcept -> exit_t;
 static auto new_proj(char const *, proj_t const) noexcept -> exit_t;
 static auto init_proj(char const *, proj_t const) noexcept -> exit_t;
 static auto clean() noexcept -> exit_t;
-static auto test(lua_State *) noexcept -> exit_t;
-static auto run(lua_State *) noexcept -> exit_t;
+static auto test(user_func_config const *const) noexcept -> exit_t;
+static auto run(user_func_config const *const) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
 struct Type final {
-  // TODO: add --release flag for O3 optimizations
   enum {
     UNKNOWN_ARG,
     BUILD,
@@ -73,8 +80,6 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
   if (strcmp(argv[1], "b") == 0 || strcmp(argv[1], "build") == 0) {
     return {Type::BUILD, 0, nullptr};
   } else if (strcmp(argv[1], "n") == 0 || strcmp(argv[1], "new") == 0) {
-    // TODO: make sure to see there's no potential security
-    // issues with this command
     if (argc < 3) {
       error_message("Expected string for the name of the "
                     "project, found nothing" NL
@@ -182,9 +187,6 @@ auto Type::run() const noexcept -> exit_t {
     return exit_t::lua_vm_error; // internal service error
   }
 
-  // TODO: remove this and make it a bit safer
-  luaL_openlibs(state);
-
   auto *lm_lua = fopen((fs::current_path() / "luamake.lua").c_str(), "r");
   if (lm_lua == nullptr) {
     ferror_message("unable to discover `luamake.lua` in current dir at [%s]" NL
@@ -205,16 +207,27 @@ auto Type::run() const noexcept -> exit_t {
   (void)lua_gc(state, LUA_GCSTOP);
 
   auto res = exit_t::ok;
+  auto cfg = user_func_config{
+      state,
+      false,
+  };
+
+  for (int i = 0; i < argc; ++i) {
+    if (strcmp(argv[i], "-r") == 0) {
+      cfg.release = true;
+    }
+  }
+
   switch (type_t) {
-  case BUILD:
-    res = build(state);
-    break;
-  case TEST:
-    res = test(state);
-    break;
-  case RUN:
-    res = MakeTypes::run(state);
-    break;
+  case BUILD: {
+    res = build(&cfg);
+  } break;
+  case TEST: {
+    res = test(&cfg);
+  } break;
+  case RUN: {
+    res = MakeTypes::run(&cfg);
+  } break;
   case UNKNOWN_ARG:
     [[fallthrough]];
   case NEW:
@@ -235,13 +248,13 @@ auto Type::run() const noexcept -> exit_t {
 // and do things with builder.type to actually fuckin compile
 // static and dynamic libs
 // TODO: another issue with luavm indexing a nil value :)
-static auto build(lua_State *state) noexcept -> exit_t {
+static auto build(user_func_config const *const c) noexcept -> exit_t {
   fn_print();
 
-  lua_pushcfunction(state, luamake_builtins::clang);
-  lua_setglobal(state, "Clang");
+  lua_pushcfunction(c->state, luamake_builtins::clang);
+  lua_setglobal(c->state, "Clang");
 
-  auto build_lua_fn = lua_getglobal(state, "Build");
+  auto build_lua_fn = lua_getglobal(c->state, "Build");
   // function undefined in `luamake.lua`
   if (build_lua_fn == LUA_TNIL) {
     error_message(
@@ -259,15 +272,15 @@ static auto build(lua_State *state) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  auto builder = lua_getglobal(state, BUILDER_OBJ);
+  auto builder = lua_getglobal(c->state, BUILDER_OBJ);
   switch (builder) {
-  case LUA_TNIL:       // builder is undefined
-    lua_pop(state, 1); // remove the nil from the stack otherwise things fuck
-                       // up when we call the Build function
-    lua_createtable(state, 0, 0);
-    lua_setglobal(state, BUILDER_OBJ);
+  case LUA_TNIL:          // builder is undefined
+    lua_pop(c->state, 1); // remove the nil from the stack otherwise things fuck
+                          // up when we call the Build function
+    lua_createtable(c->state, 0, 0);
+    lua_setglobal(c->state, BUILDER_OBJ);
     lua_getglobal(
-        state,
+        c->state,
         BUILDER_OBJ); // there's definately a better way to go about this, but
                       // i can't think of one rn, basically it's because the
                       // setglobal function pops the value from the stack, but
@@ -280,16 +293,16 @@ static auto build(lua_State *state) noexcept -> exit_t {
   default:
     ferror_message("`builder` object was defined, but it's type was expected "
                    "to be table, got [%s]",
-                   lua_typename(state, lua_type(state, -1)));
+                   lua_typename(c->state, lua_type(c->state, -1)));
     return exit_t::config_error;
   }
 
   // TODO: switch this to pcall
-  lua_call(state, 1, 0);
-  (void)lua_gc(state, LUA_GCSTOP);
+  lua_call(c->state, 1, 0);
+  (void)lua_gc(c->state, LUA_GCSTOP);
 
   // TODO: pre_exec
-  builder = lua_getglobal(state, BUILDER_OBJ);
+  builder = lua_getglobal(c->state, BUILDER_OBJ);
   if (builder != LUA_TTABLE) {
     error_message(" You ended up changing the type of the `builder` "
                   "object that was passed into your `Build` "
@@ -304,7 +317,7 @@ static auto build(lua_State *state) noexcept -> exit_t {
 
   Builder builder_cfg;
 
-  auto pre_exec_t = lua_getfield(state, -1, "pre_exec");
+  auto pre_exec_t = lua_getfield(c->state, -1, "pre_exec");
   if (pre_exec_t == LUA_TTABLE) {
     // TODO: run the pre_exec stuff
     warning_message("pre_exec table things are not currently implimented, and "
@@ -312,17 +325,17 @@ static auto build(lua_State *state) noexcept -> exit_t {
                     "\tConsider adding this section to "
                     "the gh by opening an issue or however github works idk.");
   }
-  lua_pop(state, 1); // remove the pre_exec stuff
+  lua_pop(c->state, 1); // remove the pre_exec stuff
 
-  auto const output_name_t = lua_getfield(state, -2, "name");
+  auto const output_name_t = lua_getfield(c->state, -2, "name");
   if (output_name_t != LUA_TSTRING) {
     error_message("Expected `build.name` to be of type string");
     return exit_t::config_error;
   }
 
-  auto const *output_name = lua_tostring(state, -1);
+  auto const *output_name = lua_tostring(c->state, -1);
 
-  auto const builder_root_t = lua_getfield(state, -2, "root");
+  auto const builder_root_t = lua_getfield(c->state, -2, "root");
   if (builder_root_t != LUA_TSTRING) {
     error_message("fucked up root path to the main file");
     return exit_t::config_error;
@@ -334,7 +347,7 @@ static auto build(lua_State *state) noexcept -> exit_t {
     auto const path_split = builder_root.find('/');
     return std::make_pair(fs::path(builder_root.substr(0, path_split)),
                           builder_root.substr(path_split + 1));
-  }(state);
+  }(c->state);
   expr_dbg(rel_path);
   expr_dbg(froot);
 
@@ -368,47 +381,48 @@ static auto build(lua_State *state) noexcept -> exit_t {
   }
   std::cout << std::flush;
 
-  auto const builder_compiler_t = lua_getfield(state, -3, "compiler");
+  auto const builder_compiler_t = lua_getfield(c->state, -3, "compiler");
   if (builder_compiler_t != LUA_TTABLE) {
     error_message("Expected `builder.compiler` field to be of type table");
     return exit_t::config_error;
   }
 
   auto envoked_command = string();
-  auto const compiler_field_name_t = lua_getfield(state, -1, "compiler");
+  auto const compiler_field_name_t = lua_getfield(c->state, -1, "compiler");
   if (compiler_field_name_t != LUA_TSTRING) {
     error_message(
         "Expected `builder.compiler.compiler` field to be of type string.");
     return exit_t::config_error;
   }
-  auto const *compiler = lua_tostring(state, -1);
+  auto const *compiler = lua_tostring(c->state, -1);
 
-  auto const compiler_opt_level_t = lua_getfield(state, -2, "optimize");
+  auto const compiler_opt_level_t = lua_getfield(c->state, -2, "optimize");
   if (compiler_opt_level_t != LUA_TSTRING) {
     error_message("Expected `builder.compiler.optimize` to be of type string.");
     return exit_t::config_error;
   }
-  auto const *compiler_opt_level = lua_tostring(state, -1);
+  auto const *compiler_opt_level =
+      c->release ? "O3" : lua_tostring(c->state, -1);
 
-  auto const compiler_warnings_t = lua_getfield(state, -3, "warnings");
+  auto const compiler_warnings_t = lua_getfield(c->state, -3, "warnings");
   if (compiler_warnings_t != LUA_TTABLE) {
     error_message(
         "Expected `builder.compiler.warnings` to be of type array (table).");
     return exit_t::config_error;
   }
 
-  auto const warnings_len = lua_rawlen(state, -1);
+  auto const warnings_len = lua_rawlen(c->state, -1);
   auto cc_flags = string();
   for (auto [i, warnings_tbl] = std::make_pair(lua_Unsigned{1}, int{-1});
        i <= warnings_len; ++i, --warnings_tbl) {
     cc_flags += '-';
     auto const warnings_i_t =
-        lua_geti(state, warnings_tbl, static_cast<lua_Integer>(i));
+        lua_geti(c->state, warnings_tbl, static_cast<lua_Integer>(i));
     if (warnings_i_t != LUA_TSTRING) {
       error_message("TODO: expected string found something else.");
       return exit_t::config_error;
     }
-    cc_flags += lua_tostring(state, -1);
+    cc_flags += lua_tostring(c->state, -1);
     cc_flags += ' ';
   }
 
@@ -853,14 +867,14 @@ static auto clean() noexcept -> exit_t {
   return exit_t::ok;
 }
 
-static auto test(lua_State *state) noexcept -> exit_t {
+static auto test(user_func_config const *const c) noexcept -> exit_t {
   fn_print();
-  lua_createtable(state, 0, 1); // builder object
-  lua_pushboolean(state, true);
-  lua_setfield(state, -2, TESTING_MACRO);
-  lua_setglobal(state, BUILDER_OBJ);
+  lua_createtable(c->state, 0, 1); // builder object
+  lua_pushboolean(c->state, true);
+  lua_setfield(c->state, -2, TESTING_MACRO);
+  lua_setglobal(c->state, BUILDER_OBJ);
 
-  auto const build_res = build(state);
+  auto const build_res = build(c);
   if (build_res != exit_t::ok) {
     error_message("Occurred during build phase of test");
     return build_res;
@@ -870,16 +884,16 @@ static auto test(lua_State *state) noexcept -> exit_t {
   return exit_t::internal_error;
 }
 
-static auto run(lua_State *state) noexcept -> exit_t {
+static auto run(user_func_config const *const c) noexcept -> exit_t {
   fn_print();
 
-  auto build_res = build(state);
+  auto build_res = build(c);
   if (build_res != exit_t::ok) {
     error_message("Occurred during build phase of run");
     return build_res;
   }
 
-  auto run_fn = lua_getglobal(state, "Run");
+  auto run_fn = lua_getglobal(c->state, "Run");
   if (run_fn == LUA_TNIL) {
     error_message("Function `Run` is undefined in the "
                   "discovered `luamake.lua`." NL
