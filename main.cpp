@@ -78,7 +78,7 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
   }
 
   if (strcmp(argv[1], "b") == 0 || strcmp(argv[1], "build") == 0) {
-    return {Type::BUILD, 0, nullptr};
+    return {Type::BUILD, argc, argv};
   } else if (strcmp(argv[1], "n") == 0 || strcmp(argv[1], "new") == 0) {
     if (argc < 3) {
       error_message("Expected string for the name of the "
@@ -90,9 +90,9 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
   } else if (strcmp(argv[1], "c") == 0 || strcmp(argv[1], "clean") == 0) {
     return {Type::CLEAN, 0, nullptr};
   } else if (strcmp(argv[1], "t") == 0 || strcmp(argv[1], "test") == 0) {
-    return {Type::TEST, 0, nullptr};
+    return {Type::TEST, argc, argv};
   } else if (strcmp(argv[1], "run") == 0) {
-    return {Type::RUN, 0, nullptr};
+    return {Type::RUN, argc, argv};
   } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
     return {Type::HELP, 0, nullptr};
   } else if (strcmp(argv[1], "init") == 0) {
