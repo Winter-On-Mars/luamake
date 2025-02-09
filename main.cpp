@@ -138,7 +138,7 @@ auto Type::run() const noexcept -> exit_t {
         continue;
       }
 
-      if (strncmp(argv[i], "-type", 5) == 0) {
+      if (strncmp(argv[i], "-type", 4) == 0) {
         ++i;
         if (strcmp(argv[i], "executable") == 0) {
         } else if (strcmp(argv[i], "dynamic") == 0) {
@@ -152,7 +152,7 @@ auto Type::run() const noexcept -> exit_t {
               argv[i]);
           return exit_t::useage_error;
         }
-      } else if (strncmp(argv[i], "-root", 5) == 0) {
+      } else if (strncmp(argv[i], "-root", 4) == 0) {
         ++i;
         project_root = argv[i];
       }
@@ -748,16 +748,17 @@ static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
       // clang-format off
     string_view{
       "function Build(builder)" NL
-           "    builder.type = \"" NL
+           "    builder.type = \""
     };
   // clang-format on
   luamake_content += project_type_string;
   luamake_content +=
       // clang-format off
     string_view{"\"" NL
-        "    builder.root = \"" NL
+        "    builder.root = \""
     };
   // clang-format on
+  luamake_content += root;
   luamake_content +=
       // clang-format off
     string_view{"\"" NL
@@ -812,7 +813,7 @@ static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
 
   fclose(luamake_file);
 
-  return exit_t::internal_error;
+  return exit_t::ok;
 }
 
 static auto clean() noexcept -> exit_t {
