@@ -340,8 +340,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     return std::make_pair(fs::path(builder_root.substr(0, path_split)),
                           builder_root.substr(path_split + 1));
   }(c->state);
-  expr_dbg(rel_path);
-  expr_dbg(froot);
 
   auto *root_file = fopen((fs::current_path() / rel_path / froot).c_str(), "r");
   if (root_file == nullptr) {
@@ -350,6 +348,21 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
                    (rel_path / froot).c_str(),
                    (fs::current_path() / rel_path / froot).c_str());
     return exit_t::config_error;
+  }
+
+  // TODO: get the project info passed to dependency_graph::generate, so that
+  // you can include packages headers without things blowing up :)
+  // TODO: update the rest of the lua_getfield calls to be at --n
+  // should probably have a value to keep track of it's position in this
+  // funciton :)
+  auto const packages_t = lua_getfield(c->state, -3, "packages");
+  switch (packages_t) {
+  case LUA_TNIL:
+    break;
+  case LUA_TTABLE:
+    break;
+  default:
+    error_message("Found builder.packages, but was not of type table");
   }
 
   // TODO: check that there's no cycles in the dep graph
