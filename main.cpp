@@ -309,7 +309,10 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
+  auto builder_obj_pos = -1;
+
   auto pre_exec_t = lua_getfield(c->state, -1, "pre_exec");
+  --builder_obj_pos;
   if (pre_exec_t == LUA_TTABLE) {
     // TODO: run the pre_exec stuff
     warning_message("pre_exec table things are not currently implimented, and "
@@ -318,6 +321,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
                     "the gh by opening an issue or however github works idk.");
   }
   lua_pop(c->state, 1); // remove the pre_exec stuff
+  ++builder_obj_pos;
 
   auto const output_name_t = lua_getfield(c->state, -1, "name");
   if (output_name_t != LUA_TSTRING) {
@@ -363,6 +367,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     break;
   default:
     error_message("Found builder.packages, but was not of type table");
+    return exit_t::config_error;
   }
 
   // TODO: check that there's no cycles in the dep graph
