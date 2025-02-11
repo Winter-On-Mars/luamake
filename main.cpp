@@ -311,7 +311,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   auto builder_obj_pos = -1;
 
-  auto pre_exec_t = lua_getfield(c->state, -1, "pre_exec");
+  auto pre_exec_t = lua_getfield(c->state, builder_obj_pos, "pre_exec");
   --builder_obj_pos;
   if (pre_exec_t == LUA_TTABLE) {
     // TODO: run the pre_exec stuff
@@ -323,7 +323,8 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   lua_pop(c->state, 1); // remove the pre_exec stuff
   ++builder_obj_pos;
 
-  auto const output_name_t = lua_getfield(c->state, -1, "name");
+  auto const output_name_t = lua_getfield(c->state, builder_obj_pos, "name");
+  --builder_obj_pos;
   if (output_name_t != LUA_TSTRING) {
     error_message("Expected `build.name` to be of type string");
     return exit_t::config_error;
@@ -331,7 +332,8 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   auto const *output_name = lua_tostring(c->state, -1);
 
-  auto const builder_root_t = lua_getfield(c->state, -2, "root");
+  auto const builder_root_t = lua_getfield(c->state, builder_obj_pos, "root");
+  --builder_obj_pos;
   if (builder_root_t != LUA_TSTRING) {
     error_message("fucked up root path to the main file");
     return exit_t::config_error;
@@ -356,10 +358,8 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   // TODO: get the project info passed to dependency_graph::generate, so that
   // you can include packages headers without things blowing up :)
-  // TODO: update the rest of the lua_getfield calls to be at --n
-  // should probably have a value to keep track of it's position in this
-  // funciton :)
-  auto const packages_t = lua_getfield(c->state, -3, "packages");
+  auto const packages_t = lua_getfield(c->state, builder_obj_pos, "packages");
+  --builder_obj_pos;
   switch (packages_t) {
   case LUA_TNIL:
     break;
@@ -382,23 +382,26 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   std::cout << "dep_graph size = " << dep_graph->size() << '\n';
   for (auto const &[k, v] : dep_graph.value()) {
     std::cout << "\t(" << k << ", [";
-
     for (auto const &str : v) {
       std::cout << str.name << ", ";
     }
-
     std::cout << "])\n";
   }
   std::cout << std::flush;
 
-  auto const builder_compiler_t = lua_getfield(c->state, -3, "compiler");
+  auto const builder_compiler_t =
+      lua_getfield(c->state, builder_obj_pos, "compiler");
+  --builder_obj_pos;
+  auto compiler_obj_pos = -1;
   if (builder_compiler_t != LUA_TTABLE) {
     error_message("Expected `builder.compiler` field to be of type table");
     return exit_t::config_error;
   }
 
   auto envoked_command = string();
-  auto const compiler_field_name_t = lua_getfield(c->state, -1, "compiler");
+  auto const compiler_field_name_t =
+      lua_getfield(c->state, compiler_obj_pos, "compiler");
+  --builder_obj_pos, --compiler_obj_pos;
   if (compiler_field_name_t != LUA_TSTRING) {
     error_message(
         "Expected `builder.compiler.compiler` field to be of type string.");
@@ -406,7 +409,9 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   }
   auto const *compiler = lua_tostring(c->state, -1);
 
-  auto const compiler_opt_level_t = lua_getfield(c->state, -2, "optimize");
+  auto const compiler_opt_level_t =
+      lua_getfield(c->state, compiler_obj_pos, "optimize");
+  --builder_obj_pos, --compiler_obj_pos;
   if (compiler_opt_level_t != LUA_TSTRING) {
     error_message("Expected `builder.compiler.optimize` to be of type string.");
     return exit_t::config_error;
@@ -414,7 +419,9 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   auto const *compiler_opt_level =
       c->release ? "O3" : lua_tostring(c->state, -1);
 
-  auto const compiler_warnings_t = lua_getfield(c->state, -3, "warnings");
+  auto const compiler_warnings_t =
+      lua_getfield(c->state, compiler_obj_pos, "warnings");
+  --builder_obj_pos, --compiler_obj_pos;
   if (compiler_warnings_t != LUA_TTABLE) {
     error_message(
         "Expected `builder.compiler.warnings` to be of type array (table).");
@@ -428,6 +435,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     cc_flags += '-';
     auto const warnings_i_t =
         lua_geti(c->state, warnings_tbl, static_cast<lua_Integer>(i));
+    --builder_obj_pos, --compiler_obj_pos;
     if (warnings_i_t != LUA_TSTRING) {
       error_message("TODO: expected string found something else.");
       return exit_t::config_error;
