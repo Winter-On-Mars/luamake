@@ -10,7 +10,9 @@
 #include <type_traits>
 #include <vector>
 
-#include <lua.hpp>
+extern "C" {
+#include <lua.h>
+}
 
 #include "common.hpp"
 #include "dependency_graph.hpp"
@@ -300,7 +302,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   lua_call(c->state, 1, 0);
   (void)lua_gc(c->state, LUA_GCSTOP);
 
-  // TODO: pre_exec
   builder = lua_getglobal(c->state, BUILDER_OBJ);
   if (builder != LUA_TTABLE) {
     error_message(" You ended up changing the type of the `builder` "
@@ -528,6 +529,16 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   }
 
   // TODO: post_exec
+  auto post_exec_t = lua_getfield(c->state, builder_obj_pos, "post_exec");
+  --builder_obj_pos;
+  if (post_exec_t == LUA_TTABLE) {
+    warning_message(
+        "`builder.post_exec` was found, but support is currently not "
+        "implimented" NL
+        "\tConsider adding support for it by opening an issue on the GH");
+  }
+  lua_pop(c->state, 1);
+  ++builder_obj_pos;
 
   return exit_t::ok;
 }
