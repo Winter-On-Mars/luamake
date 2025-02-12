@@ -11,6 +11,7 @@
 #include <vector>
 
 extern "C" {
+#include <lauxlib.h>
 #include <lua.h>
 }
 
@@ -18,7 +19,8 @@ extern "C" {
 #include "dependency_graph.hpp"
 #include "luamake_builtins.hpp"
 
-using std::array, std::pair, std::vector, std::string, std::string_view;
+using std::array, std::pair, std::make_pair, std::vector, std::string,
+    std::string_view;
 
 using u8 = std::uint8_t;
 
@@ -27,6 +29,13 @@ using u8 = std::uint8_t;
 #define TESTING_MACRO "__define_testing_macro"
 
 namespace MakeTypes {
+struct Package final {
+  string_view name;
+  fs::path headers; // relative paths to the headers + archive
+  fs::path archive;
+  enum Style { c, cpp } style;
+};
+
 enum class exit_t : unsigned char {
   ok,
   internal_error,
@@ -348,26 +357,37 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
                           builder_root.substr(path_split + 1));
   }(c->state);
 
+  // TODO: get the project info passed to dependency_graph::generate, so that
+  // you can include packages headers without things blowing up :)
+  auto const packages_t = lua_getfield(c->state, builder_obj_pos, "packages");
+  auto packages = vector<Package>();
+  --builder_obj_pos;
+  switch (packages_t) {
+  case LUA_TNIL:
+    break;
+  case LUA_TTABLE: {
+    // this is causing some memory issue with accessing values out of bound :)
+    lua_pushnil(c->state);
+    for (auto pkg_idx = -1; lua_next(c->state, pkg_idx) != 0; --pkg_idx) {
+      std::cout << "(value_t, res_t) = ("
+                << lua_typename(c->state, lua_type(c->state, -2)) << ", "
+                << lua_typename(c->state, lua_type(c->state, -1));
+      ;
+
+      lua_pop(c->state, 1); /* remove value, need key for next iteration call */
+    }
+  } break;
+  default:
+    error_message("Found builder.packages, but was not of type table");
+    return exit_t::config_error;
+  }
+
   auto *root_file = fopen((fs::current_path() / rel_path / froot).c_str(), "r");
   if (root_file == nullptr) {
     ferror_message("The file specified as the root of the project [%s] does "
                    "not exist at [%s]",
                    (rel_path / froot).c_str(),
                    (fs::current_path() / rel_path / froot).c_str());
-    return exit_t::config_error;
-  }
-
-  // TODO: get the project info passed to dependency_graph::generate, so that
-  // you can include packages headers without things blowing up :)
-  auto const packages_t = lua_getfield(c->state, builder_obj_pos, "packages");
-  --builder_obj_pos;
-  switch (packages_t) {
-  case LUA_TNIL:
-    break;
-  case LUA_TTABLE:
-    break;
-  default:
-    error_message("Found builder.packages, but was not of type table");
     return exit_t::config_error;
   }
 
@@ -431,7 +451,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   auto const warnings_len = lua_rawlen(c->state, -1);
   auto cc_flags = string();
-  for (auto [i, warnings_tbl] = std::make_pair(lua_Unsigned{1}, int{-1});
+  for (auto [i, warnings_tbl] = make_pair(lua_Unsigned{1}, int{-1});
        i <= warnings_len; ++i, --warnings_tbl) {
     cc_flags += '-';
     auto const warnings_i_t =
