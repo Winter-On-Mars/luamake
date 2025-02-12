@@ -104,6 +104,10 @@ static auto generate_files_deps(graph &graph, std::string_view const f_name,
         continue;
       }
 
+      std::cout << "{start..end} = ["
+                << string(include_line.substr(start + 1, end - start - 1))
+                << "]\n";
+
       auto const name_len = end - start - 1; // end includes the '"'
       if (name_len <= string_view{".xpp"}.length()) {
         error_message("While parsing inclued directives, space between the "
@@ -199,6 +203,9 @@ auto generate(FILE *root, string_view const root_name,
       if (start == end) {
         continue;
       }
+
+      std::cout << "{start..end} = ["
+                << string(include_line.substr(start + 1, end - start)) << "]\n";
 
       auto const name_len = end - start - 1; // end includes the '"'
       if (name_len <= string_view{".xpp"}.length()) {
