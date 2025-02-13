@@ -367,6 +367,8 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     break;
   case LUA_TTABLE: {
     // this is causing some memory issue with accessing values out of bound :)
+    // TODO: fix using lua_absindex, which should allow for loop iteration bc i
+    // can't figure out how to manage where pkg_idx is on the stack :)
     lua_pushnil(c->state);
     for (auto pkg_idx = -1; lua_next(c->state, pkg_idx) != 0; --pkg_idx) {
       std::cout << "(value_t, res_t) = ("
