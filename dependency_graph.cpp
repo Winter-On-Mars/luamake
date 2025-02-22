@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -62,9 +63,18 @@ static auto skip_ws(char const *current, char const *const end) noexcept
 }
 */
 
+enum class return_t {
+  ok,
+  err,
+};
+
+// TODO: extract the large bits of logic from this function and the other
+// generate function
+[[nodiscard]]
 static auto generate_files_deps(graph &graph, std::string_view const f_name,
                                 fs::path rel_path, char *line) noexcept
-    -> void /* return code(?)*/ {
+    -> return_t {
+  using enum return_t;
   std::cerr << "Calling [generate_files_deps] with [" << f_name << "]\n";
 
   // if header file, also check the .cpp impl
@@ -74,7 +84,9 @@ static auto generate_files_deps(graph &graph, std::string_view const f_name,
     if (impl_file_check.handle != nullptr) {
       impl_file_check.~File();
       graph.insert(string(f_name), src_file(string(impl_file)));
-      generate_files_deps(graph, impl_file, rel_path, line);
+      if (generate_files_deps(graph, impl_file, rel_path, line) == err) {
+        return err;
+      }
     }
   }
 
@@ -83,7 +95,7 @@ static auto generate_files_deps(graph &graph, std::string_view const f_name,
     ferror_message(
         "While parsing include directives, unable to open file at [%s]",
         f_name.data());
-    return;
+    return err;
   }
 
   size_t len = 0;
@@ -112,7 +124,7 @@ static auto generate_files_deps(graph &graph, std::string_view const f_name,
       if (name_len <= string_view{".xpp"}.length()) {
         error_message("While parsing inclued directives, space between the "
                       "includes is not large enough to include a .cpp or .hpp");
-        return;
+        return err;
       }
 
       auto const name = include_line.substr(start + 1, name_len);
@@ -122,14 +134,14 @@ static auto generate_files_deps(graph &graph, std::string_view const f_name,
       if (hpp_pos == string_view::npos && cpp_pos == string_view::npos) {
         error_message("While parsing include directives, unable to find '.hpp' "
                       "or '.cpp' in files name");
-        return;
+        return err;
       }
 
       if (hpp_pos != string_view::npos && cpp_pos != string_view::npos) {
         ferror_message("While parsing include directives, found multiple valid "
                        "file extensions on line [%s]",
                        line);
-        return;
+        return err;
       }
 
       if (hpp_pos != string_view::npos) {
@@ -141,13 +153,15 @@ static auto generate_files_deps(graph &graph, std::string_view const f_name,
               "\tIf this is intentional, maybe as a part of some code "
               "generation, open an issue on gh and we can work to resolve it",
               line);
-          return;
+          return err;
         }
         if (name.substr(0, last_hpp_pos) !=
             f_name.substr(0, f_name.rfind(".cpp"))) {
           // graph.insert(string(f_name), src_file(string(name)));
           graph.insert(string(name), src_file(string(f_name)));
-          generate_files_deps(graph, name, rel_path, line);
+          if (generate_files_deps(graph, name, rel_path, line) == err) {
+            return err;
+          }
         }
       } else {
         auto const last_cpp_pos = name.rfind(".cpp");
@@ -158,11 +172,13 @@ static auto generate_files_deps(graph &graph, std::string_view const f_name,
               "\tIf this is intentional, maybe as a part of some code "
               "generation, open an issue on gh and we can work to resolve it",
               line);
-          return;
+          return err;
         }
         graph.insert(string(f_name), src_file(string(name)));
         // graph.insert(string(name), src_file(string(f_name)));
-        generate_files_deps(graph, name, rel_path, line);
+        if (generate_files_deps(graph, name, rel_path, line) == err) {
+          return err;
+        }
       }
     }
   } catch (...) {
@@ -171,6 +187,7 @@ static auto generate_files_deps(graph &graph, std::string_view const f_name,
                    f_name.data());
   }
   std::memset(line, 0, len * sizeof(char));
+  return ok;
 }
 
 auto generate(FILE *root, string_view const root_name,
@@ -244,7 +261,9 @@ auto generate(FILE *root, string_view const root_name,
           return std::nullopt;
         }
         graph.insert(string(name), src_file(string(root_name)));
-        generate_files_deps(graph, name, rel_path, line);
+        if (generate_files_deps(graph, name, rel_path, line) == return_t::err) {
+          return std::nullopt;
+        }
       } else {
         auto const last_cpp_pos = name.rfind(".cpp");
         if (last_cpp_pos != cpp_pos) {
@@ -257,7 +276,9 @@ auto generate(FILE *root, string_view const root_name,
           return std::nullopt;
         }
         graph.insert(string(name), src_file(string(root_name)));
-        generate_files_deps(graph, name, rel_path, line);
+        if (generate_files_deps(graph, name, rel_path, line) == return_t::err) {
+          return std::nullopt;
+        }
       }
     }
   } catch (...) {
