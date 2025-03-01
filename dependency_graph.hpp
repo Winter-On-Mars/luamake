@@ -44,8 +44,8 @@ public:
   }
 };
 
-auto generate(FILE *, std::string_view const, std::filesystem::path) noexcept
-    -> std::optional<graph>;
+auto generate(FILE *, std::string_view const,
+              std::filesystem::path const &) noexcept -> std::optional<graph>;
 
 } // namespace dependency_graph
 #endif
