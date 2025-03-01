@@ -19,6 +19,7 @@ git clone https://github.com/Winter-On-Mars/luamake
 
 cd luamake
 git submodule init
+git submodule update
 make
 ```
 Then just add it to your path however you want to
