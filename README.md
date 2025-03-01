@@ -10,10 +10,7 @@ A programmable, (semi)-simple build system for C++ projects, configured with lua
 * `luamake` uses lua script files to program the build system. Make sure to read the script before running it, the usual warning about running scripts that other people make.
 
 # Installation
-## Dependencies
-* lua-devel
-  * Version >= 5.4 (could probably work with 5.3, we just need integers and bitwise operations for the hashing)
-  * I'll probably do a git sub-module or something to have the lua vm be included in the project so that you can build the project from a single `make` file, but as of now we depend on system libs.
+You should only have to `init` the git submodules as pointed out in the build script, as lua is treated as a submodule of this project.
 
 ## Script
 In whatever dir you'll want to add this command in, run
@@ -21,6 +18,7 @@ In whatever dir you'll want to add this command in, run
 git clone https://github.com/Winter-On-Mars/luamake
 
 cd luamake
+git submodule init
 make
 ```
 Then just add it to your path however you want to
@@ -62,7 +60,7 @@ Type = `function(runner: Runner): nil`
 
 ## `Test`
 A global array of objects that look like
-```
+```lua
 {
   fun: function(tester: Tester): nil;
   output?: {
