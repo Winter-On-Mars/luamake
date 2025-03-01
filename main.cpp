@@ -29,6 +29,11 @@ using u8 = std::uint8_t;
 #define TESTING_MACRO "__define_testing_macro"
 
 namespace MakeTypes {
+// TODO: optimize this struct
+// potentially remove name, switch to a struct of arrays
+// remove the style tag
+// pack archive strings into single buffer
+// non-lazily grab the needed headers
 struct Package final {
   string_view name;
   fs::path headers; // relative paths to the headers + archive
@@ -259,6 +264,7 @@ auto Type::run() const noexcept -> exit_t {
 // and do things with builder.type to actually fuckin compile
 // static and dynamic libs
 static auto build(user_func_config const *const c) noexcept -> exit_t {
+  using enum exit_t;
   fn_print();
 
   lua_pushcfunction(c->state, luamake_builtins::clang);
@@ -319,10 +325,9 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  auto builder_obj_pos = -1;
+  auto const builder_obj_pos = lua_absindex(c->state, -1);
 
   auto pre_exec_t = lua_getfield(c->state, builder_obj_pos, "pre_exec");
-  --builder_obj_pos;
   if (pre_exec_t == LUA_TTABLE) {
     // TODO: run the pre_exec stuff
     warning_message("pre_exec table things are not currently implimented, and "
@@ -331,10 +336,8 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
                     "the gh by opening an issue or however github works idk.");
   }
   lua_pop(c->state, 1); // remove the pre_exec stuff
-  ++builder_obj_pos;
 
   auto const output_name_t = lua_getfield(c->state, builder_obj_pos, "name");
-  --builder_obj_pos;
   if (output_name_t != LUA_TSTRING) {
     error_message("Expected `build.name` to be of type string");
     return exit_t::config_error;
@@ -343,7 +346,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   auto const *output_name = lua_tostring(c->state, -1);
 
   auto const builder_root_t = lua_getfield(c->state, builder_obj_pos, "root");
-  --builder_obj_pos;
   if (builder_root_t != LUA_TSTRING) {
     error_message("fucked up root path to the main file");
     return exit_t::config_error;
@@ -361,28 +363,84 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   // you can include packages headers without things blowing up :)
   auto const packages_t = lua_getfield(c->state, builder_obj_pos, "packages");
   auto packages = vector<Package>();
-  --builder_obj_pos;
   switch (packages_t) {
   case LUA_TNIL:
     break;
   case LUA_TTABLE: {
-    // this is causing some memory issue with accessing values out of bound :)
-    // TODO: fix using lua_absindex, which should allow for loop iteration bc i
-    // can't figure out how to manage where pkg_idx is on the stack :)
-    lua_pushnil(c->state);
-    for (auto pkg_idx = -1; lua_next(c->state, pkg_idx) != 0; --pkg_idx) {
-      std::cout << "(value_t, res_t) = ("
-                << lua_typename(c->state, lua_type(c->state, -2)) << ", "
-                << lua_typename(c->state, lua_type(c->state, -1));
-      ;
+    auto const pkg_idx = lua_absindex(c->state, -1);
+    packages.reserve(lua_rawlen(c->state, pkg_idx));
 
-      lua_pop(c->state, 1); /* remove value, need key for next iteration call */
+    lua_pushnil(c->state);
+    while (lua_next(c->state, pkg_idx) != 0) {
+      if (lua_type(c->state, -2) != LUA_TSTRING) {
+        error_message(
+            "Expected key type of builder.packages to be of type string");
+        return config_error;
+      }
+      if (lua_type(c->state, -1) != LUA_TTABLE) {
+        error_message("Expected builder.packages to be a table of tables");
+        return config_error;
+      }
+
+      auto const name = string_view{lua_tolstring(c->state, -2, nullptr)};
+
+      auto const header_t = lua_getfield(c->state, -1, "headers");
+      if (header_t != LUA_TSTRING) {
+        error_message("Package header type incorrect");
+        return config_error;
+      }
+      auto const header_path = fs::path(lua_tolstring(c->state, -1, nullptr));
+
+      auto const header_style_t = lua_getfield(c->state, -2, "header_style");
+      if (header_style_t != LUA_TSTRING) {
+        error_message("Package header_style type incorrect");
+        return config_error;
+      }
+
+      auto const header_style = lua_tolstring(c->state, -1, nullptr);
+      auto style = Package::c;
+      if (strcmp(header_style, "c") == 0) {
+        // do nothing
+      } else if (strcmp(header_style, "cpp") == 0) {
+        style = Package::cpp;
+      } else {
+        error_message("Package header_style can only be of type 'c' or 'cpp'");
+        return config_error;
+      }
+
+      auto const lib_t = lua_getfield(c->state, -3, "lib");
+      if (lib_t != LUA_TSTRING) {
+        error_message("Package lib type incorrect");
+        return config_error;
+      }
+      auto const archive = fs::path(lua_tolstring(c->state, -1, nullptr));
+
+      packages.emplace_back(name, header_path, archive, style);
+
+      lua_pop(c->state, 4); /* remove value, need key for next iteration call */
     }
   } break;
   default:
     error_message("Found builder.packages, but was not of type table");
     return exit_t::config_error;
   }
+
+  for (auto const &package : packages) {
+    std::cout << '{' << '\n';
+    std::cout << "\tname: " << package.name << '\n';
+    std::cout << "\theaders: " << package.headers << '\n';
+    std::cout << "\theader_style: "
+              << (package.style == Package::c ? "c" : "cpp") << '\n';
+    std::cout << "\tarchive: " << package.archive << '\n';
+    std::cout << '}' << '\n';
+  }
+
+  auto needed_includes = [&packages]() -> vector<string> {
+    auto res = vector<string>();
+    for (auto &&[_, h_dir, _, style] : packages) {
+    }
+    return res;
+  }();
 
   auto *root_file = fopen((fs::current_path() / rel_path / froot).c_str(), "r");
   if (root_file == nullptr) {
@@ -398,7 +456,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   fclose(root_file);
 
   if (!dep_graph.has_value()) {
-    error_message("fucky wucky :3");
+    error_message("Generating dependency graph");
     return exit_t::internal_error;
   }
 
@@ -414,8 +472,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   auto const builder_compiler_t =
       lua_getfield(c->state, builder_obj_pos, "compiler");
-  --builder_obj_pos;
-  auto compiler_obj_pos = -1;
+  auto const compiler_obj_pos = lua_absindex(c->state, -1);
   if (builder_compiler_t != LUA_TTABLE) {
     error_message("Expected `builder.compiler` field to be of type table");
     return exit_t::config_error;
@@ -424,7 +481,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   auto envoked_command = string();
   auto const compiler_field_name_t =
       lua_getfield(c->state, compiler_obj_pos, "compiler");
-  --builder_obj_pos, --compiler_obj_pos;
   if (compiler_field_name_t != LUA_TSTRING) {
     error_message(
         "Expected `builder.compiler.compiler` field to be of type string.");
@@ -434,7 +490,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   auto const compiler_opt_level_t =
       lua_getfield(c->state, compiler_obj_pos, "optimize");
-  --builder_obj_pos, --compiler_obj_pos;
   if (compiler_opt_level_t != LUA_TSTRING) {
     error_message("Expected `builder.compiler.optimize` to be of type string.");
     return exit_t::config_error;
@@ -444,7 +499,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   auto const compiler_warnings_t =
       lua_getfield(c->state, compiler_obj_pos, "warnings");
-  --builder_obj_pos, --compiler_obj_pos;
   if (compiler_warnings_t != LUA_TTABLE) {
     error_message(
         "Expected `builder.compiler.warnings` to be of type array (table).");
@@ -458,7 +512,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     cc_flags += '-';
     auto const warnings_i_t =
         lua_geti(c->state, warnings_tbl, static_cast<lua_Integer>(i));
-    --builder_obj_pos, --compiler_obj_pos;
     if (warnings_i_t != LUA_TSTRING) {
       error_message("TODO: expected string found something else.");
       return exit_t::config_error;
@@ -552,7 +605,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   // TODO: post_exec
   auto post_exec_t = lua_getfield(c->state, builder_obj_pos, "post_exec");
-  --builder_obj_pos;
   if (post_exec_t == LUA_TTABLE) {
     warning_message(
         "`builder.post_exec` was found, but support is currently not "
@@ -560,7 +612,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
         "\tConsider adding support for it by opening an issue on the GH");
   }
   lua_pop(c->state, 1);
-  ++builder_obj_pos;
 
   return exit_t::ok;
 }
