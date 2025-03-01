@@ -5,7 +5,10 @@
 #include <string>
 #include <string_view>
 
-#include <lua.hpp>
+extern "C" {
+#include "lua/lauxlib.h"
+#include "lua/lua.h"
+}
 
 #include "common.hpp"
 
