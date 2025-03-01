@@ -8,15 +8,15 @@ linker:=mold
 files:=common.o luamake_builtins.o dependency_graph.o main.o
 
 all: $(files)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) -llua
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) lua/liblua.a
 
 dbg: cc_flags+=-g
 dbg: $(files)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) -llua
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker)
 
 ncolor: cc_flags+=-DNO_TERM_COLOR
 ncolor: $(files)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) -llua
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker)
 
 %.o: %.cpp
 	$(cc) $(cc_flags) -o $@ -c $^
