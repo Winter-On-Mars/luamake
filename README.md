@@ -18,7 +18,6 @@ In whatever dir you'll want to add this command in, run
 git clone https://github.com/Winter-On-Mars/luamake
 
 cd luamake
-git submodule init
 git submodule update
 make
 ```
