@@ -13,11 +13,11 @@ all: $(files) $(lua_a)
 
 dbg: cc_flags+=-g
 dbg: $(files)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker)
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
 ncolor: cc_flags+=-DNO_TERM_COLOR
 ncolor: $(files)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker)
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
 %.o: %.cpp
 	$(cc) $(cc_flags) -o $@ -c $^
