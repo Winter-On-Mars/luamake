@@ -3,8 +3,6 @@
 
 #include <filesystem>
 #include <optional>
-#include <string>
-#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -12,15 +10,16 @@ namespace dependency_graph {
 
 struct src_file final {
   // std::size_t hash;
-  std::string name;
+  std::filesystem::path name;
 
-  auto constexpr is_cpp_file() const noexcept -> bool {
-    return name.rfind(".cpp") != std::string::npos;
+  auto is_cpp_file() const noexcept -> bool {
+    return name.extension() == ".cpp";
   }
 };
 
 class graph final {
-  using graph_t = std::unordered_map<std::string, std::vector<src_file>>;
+  using graph_t =
+      std::unordered_map<std::filesystem::path, std::vector<src_file>>;
   graph_t dep_graph;
 
 public:
@@ -33,7 +32,9 @@ public:
   graph(graph const &) = delete;
   auto operator=(graph const &) = delete;
 
-  auto insert(std::string &&, src_file &&) noexcept -> void;
+  auto insert(std::filesystem::path const &, src_file &&) noexcept -> void;
+
+  auto seen(std::filesystem::path const &fpath) const noexcept -> bool;
 
   auto constexpr size() const noexcept -> size_t { return dep_graph.size(); }
   auto begin() const noexcept -> graph_t::const_iterator {
@@ -44,8 +45,8 @@ public:
   }
 };
 
-auto generate(FILE *, std::string_view const,
-              std::filesystem::path const &) noexcept -> std::optional<graph>;
+auto generate(FILE *, std::filesystem::path const &) noexcept
+    -> std::optional<graph>;
 
 } // namespace dependency_graph
 #endif

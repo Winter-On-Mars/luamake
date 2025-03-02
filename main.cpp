@@ -351,13 +351,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  auto const [rel_path, froot] =
-      [](lua_State *state) -> std::pair<fs::path, string_view> {
-    auto const builder_root = string_view(lua_tostring(state, -1));
-    auto const path_split = builder_root.find('/');
-    return std::make_pair(fs::path(builder_root.substr(0, path_split)),
-                          builder_root.substr(path_split + 1));
-  }(c->state);
+  auto const fpath = fs::path(lua_tostring(c->state, -1));
 
   // TODO: get the project info passed to dependency_graph::generate, so that
   // you can include packages headers without things blowing up :)
@@ -442,17 +436,16 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     return res;
   }();
 
-  auto *root_file = fopen((fs::current_path() / rel_path / froot).c_str(), "r");
+  auto *root_file = fopen(fpath.c_str(), "r");
   if (root_file == nullptr) {
     ferror_message("The file specified as the root of the project [%s] does "
                    "not exist at [%s]",
-                   (rel_path / froot).c_str(),
-                   (fs::current_path() / rel_path / froot).c_str());
+                   fpath.c_str(), (fs::current_path() / fpath).c_str());
     return exit_t::config_error;
   }
 
   // TODO: check that there's no cycles in the dep graph
-  auto dep_graph = dependency_graph::generate(root_file, froot, rel_path);
+  auto dep_graph = dependency_graph::generate(root_file, fpath);
   fclose(root_file);
 
   if (!dep_graph.has_value()) {
@@ -520,59 +513,34 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     cc_flags += ' ';
   }
 
-  if (dep_graph->size() != 0) {
-    for (auto const &[_, dependers] : dep_graph.value()) {
-      for (auto const &dep : dependers) {
-        if (!dep.is_cpp_file()) {
-          continue;
-        }
-        envoked_command += compiler;
-        envoked_command += ' ';
-
-        envoked_command += '-';
-        envoked_command += compiler_opt_level;
-        envoked_command += ' ';
-
-        envoked_command += cc_flags;
-
-        envoked_command += "-o build/";
-        envoked_command += dep.name;
-        envoked_command += ".o ";
-
-        envoked_command += "-c ";
-        envoked_command += rel_path / dep.name;
-
-        expr_dbg(envoked_command);
-        if (0 != system(envoked_command.c_str())) {
-          error_message("When compiling the above command");
-          return exit_t::internal_error;
-        }
-        envoked_command.clear();
+  for (auto const &[_, dependers] : dep_graph.value()) {
+    for (auto const &dep : dependers) {
+      if (!dep.is_cpp_file()) {
+        continue;
       }
+      envoked_command += compiler;
+      envoked_command += ' ';
+
+      envoked_command += '-';
+      envoked_command += compiler_opt_level;
+      envoked_command += ' ';
+
+      envoked_command += cc_flags;
+
+      envoked_command += "-o build/";
+      envoked_command += dep.name.stem();
+      envoked_command += ".o ";
+
+      envoked_command += "-c ";
+      envoked_command += dep.name;
+
+      expr_dbg(envoked_command);
+      if (0 != system(envoked_command.c_str())) {
+        error_message("When compiling the above command");
+        return exit_t::internal_error;
+      }
+      envoked_command.clear();
     }
-  } else {
-    envoked_command += compiler;
-    envoked_command += ' ';
-
-    envoked_command += '-';
-    envoked_command += compiler_opt_level;
-    envoked_command += ' ';
-
-    envoked_command += cc_flags;
-
-    envoked_command += "-o build/";
-    envoked_command += froot;
-    envoked_command += ".o ";
-
-    envoked_command += "-c ";
-    envoked_command += rel_path / froot;
-
-    expr_dbg(envoked_command);
-    if (0 != system(envoked_command.c_str())) {
-      error_message("When compiling the above command");
-      return exit_t::internal_error;
-    }
-    envoked_command.clear();
   }
 
   envoked_command += compiler;

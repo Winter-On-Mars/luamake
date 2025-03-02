@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -15,7 +16,12 @@ using std::string, std::string_view;
 namespace fs = std::filesystem;
 
 namespace dependency_graph {
-auto graph::insert(string &&f_name, src_file &&src_file) noexcept -> void {
+auto graph::seen(fs::path const &fpath) const noexcept -> bool {
+  return dep_graph.contains(fpath);
+}
+
+auto graph::insert(fs::path const &f_name, src_file &&src_file) noexcept
+    -> void {
   auto const vec_it = dep_graph.find(f_name);
   if (vec_it == dep_graph.end()) {
     dep_graph.insert(std::make_pair(f_name, std::vector{src_file}));
@@ -52,16 +58,15 @@ enum class return_t {
 };
 
 [[nodiscard]]
-static auto generate_files_deps(graph &graph, string_view const f_name,
-                                fs::path const &rel_path, char *line) noexcept
-    -> return_t;
+static auto generate_files_deps(graph &graph, fs::path const &fpath,
+                                char *line) noexcept -> return_t;
 
 [[nodiscard]]
-static auto generate_impl(graph &graph, size_t len, char *line,
-                          fs::path const &rel_path,
-                          string_view const f_name) noexcept -> return_t {
+static auto generate_impl(graph &graph, fs::path const &fpath, size_t len,
+                          char *line) noexcept -> return_t {
   using enum return_t;
-  auto include_line = std::string_view(line, len);
+  std::cerr << "Calling [generate_impl] with [" << fpath << "]\n";
+  auto const include_line = std::string_view(line, len);
   if (include_line.find("#include") == std::string_view::npos) {
     return cont;
   }
@@ -76,103 +81,59 @@ static auto generate_impl(graph &graph, size_t len, char *line,
   std::cout << "{start..end} = ["
             << string(include_line.substr(start + 1, end - start - 1)) << "]\n";
 
-  auto const name_len = end - start - 1; // end includes the '"'
-  if (name_len <= string_view{".xpp"}.length()) {
-    error_message("While parsing inclued directives, space between the "
-                  "includes is not large enough to include a .cpp or .hpp");
+  auto const next_fpath =
+      fpath.parent_path() /
+      fs::path(include_line.substr(start + 1, end - start - 1));
+
+  if (!next_fpath.has_extension()) {
+    error_message(
+        "While parsing include directives, unable to find file extension");
     return err;
   }
 
-  auto const name = include_line.substr(start + 1, name_len);
-  auto const hpp_pos = name.find(".hpp");
-  auto const cpp_pos = name.find(".cpp");
-
-  if (hpp_pos == string_view::npos && cpp_pos == string_view::npos) {
-    error_message("While parsing include directives, unable to find '.hpp' "
-                  "or '.cpp' in files name");
-    return err;
+  if (fpath.extension() == ".cpp" && next_fpath.stem() == fpath.stem()) {
+    // guard for recursive includes
+    return ok;
   }
 
-  if (hpp_pos != string_view::npos && cpp_pos != string_view::npos) {
-    ferror_message("While parsing include directives, found multiple valid "
-                   "file extensions on line [%s]",
-                   line);
-    return err;
-  }
-
-  if (hpp_pos != string_view::npos) {
-    auto const last_hpp_pos = name.rfind(".hpp");
-    if (last_hpp_pos != hpp_pos) {
-      ferror_message(
-          "While parsing include directives, found multiple instances of "
-          "'.hpp' file extension in line [%s]" NL
-          "\tIf this is intentional, maybe as a part of some code "
-          "generation, open an issue on gh and we can work to resolve it",
-          line);
-      return err;
-    }
-    if (name.substr(0, last_hpp_pos) !=
-        f_name.substr(0, f_name.rfind(".cpp"))) {
-      // graph.insert(string(f_name), src_file(string(name)));
-      graph.insert(string(name), src_file(string(f_name)));
-      if (generate_files_deps(graph, name, rel_path, line) == err) {
-        return err;
-      }
-    }
-  } else {
-    auto const last_cpp_pos = name.rfind(".cpp");
-    if (last_cpp_pos != cpp_pos) {
-      ferror_message(
-          "While parsing include directives, found multiple instances of "
-          "'.hpp' file extension in line [%s]" NL
-          "\tIf this is intentional, maybe as a part of some code "
-          "generation, open an issue on gh and we can work to resolve it",
-          line);
-      return err;
-    }
-    graph.insert(string(f_name), src_file(string(name)));
-    // graph.insert(string(name), src_file(string(f_name)));
-    if (generate_files_deps(graph, name, rel_path, line) == err) {
-      return err;
-    }
-  }
-  return err;
+  graph.insert(fpath, src_file(next_fpath));
+  return generate_files_deps(graph, next_fpath, line);
 }
 
-// TODO: extract the large bits of logic from this function and the other
-// generate function
 [[nodiscard]]
-static auto generate_files_deps(graph &graph, string_view const f_name,
-                                fs::path const &rel_path, char *line) noexcept
-    -> return_t {
+static auto generate_files_deps(graph &graph, fs::path const &fpath,
+                                char *line) noexcept -> return_t {
   using enum return_t;
-  std::cerr << "Calling [generate_files_deps] with [" << f_name << "]\n";
+  std::cerr << "Calling [generate_files_deps] with [" << fpath << "]\n";
 
   // if header file, also check the .cpp impl
-  if (auto const hpp_pos = f_name.find(".hpp"); hpp_pos != string_view::npos) {
-    auto const impl_file = string(f_name.substr(0, hpp_pos)) + ".cpp";
-    auto impl_file_check = File(rel_path / impl_file);
-    if (impl_file_check != nullptr) {
-      impl_file_check.~File();
-      graph.insert(string(f_name), src_file(string(impl_file)));
-      if (generate_files_deps(graph, impl_file, rel_path, line) == err) {
-        return err;
+  if (fpath.extension() == ".hpp") {
+    auto const impl_fpath =
+        fs::path((fpath.parent_path() / fpath.stem()).string() + ".cpp");
+    if (!graph.seen(impl_fpath)) {
+      auto impl_file = File(impl_fpath);
+      if (impl_file != nullptr) { // checking if header is a hol
+        impl_file.~File();
+        graph.insert(fpath, src_file(impl_fpath));
+        if (generate_files_deps(graph, impl_fpath, line) == err) {
+          return err;
+        }
       }
     }
   }
 
-  auto file = File(rel_path / f_name);
+  auto file = File(fpath);
   if (file == nullptr) {
     ferror_message(
         "While parsing include directives, unable to open file at [%s]",
-        f_name.data());
+        fpath.c_str());
     return err;
   }
 
   size_t len = 0;
   for (auto amount_read = getline(&line, &len, file.handle); amount_read != -1;
        amount_read = getline(&line, &len, file.handle)) {
-    switch (generate_impl(graph, len, line, rel_path, f_name)) {
+    switch (generate_impl(graph, fpath, len, line)) {
     case return_t::ok:
       [[fallthrough]];
     case return_t::cont:
@@ -187,9 +148,10 @@ static auto generate_files_deps(graph &graph, string_view const f_name,
   return ok;
 }
 
-auto generate(FILE *root, string_view const root_name,
-              fs::path const &rel_path) noexcept -> std::optional<graph> {
+auto generate(FILE *root, fs::path const &fpath) noexcept
+    -> std::optional<graph> {
   fn_print();
+  std::cerr << "Calling [generate] with [" << fpath << "]\n";
   auto graph = dependency_graph::graph();
 
   auto *line = static_cast<char *>(std::malloc(128 * sizeof(char)));
@@ -199,86 +161,24 @@ auto generate(FILE *root, string_view const root_name,
     return std::nullopt;
   }
 
-  size_t len = 0;
+  line[128 * sizeof(char) - 1] = 0;
 
+  size_t len = 0;
   for (auto amount_read = getline(&line, &len, root); amount_read != -1;
        amount_read = getline(&line, &len, root)) {
-
-    auto const include_line = string_view(line, len);
-
-    if (include_line.find("#include") == string_view::npos) {
+    switch (generate_impl(graph, fpath, len, line)) {
+    case return_t::ok:
+      [[fallthrough]];
+    case return_t::cont:
       continue;
-    }
-
-    auto const start = include_line.find('"');
-    auto const end = include_line.rfind('"');
-
-    if (start == end) {
-      continue;
-    }
-
-    std::cout << "{start..end} = ["
-              << string(include_line.substr(start + 1, end - start)) << "]\n";
-
-    auto const name_len = end - start - 1; // end includes the '"'
-    if (name_len <= string_view{".xpp"}.length()) {
-      error_message("While parsing include directives, space between the "
-                    "includes is not large enough to include a .cpp or .hpp");
+    case return_t::err:
       return std::nullopt;
-    }
-
-    auto const name = include_line.substr(start + 1, name_len);
-    auto const hpp_pos = name.find(".hpp");
-    auto const cpp_pos = name.find(".cpp");
-    if (hpp_pos == string_view::npos && cpp_pos == string_view::npos) {
-      error_message("While parsing include directives, unable to find .hpp "
-                    "or .cpp in the files name");
-      return std::nullopt;
-    }
-
-    if (hpp_pos != string_view::npos && cpp_pos != string_view::npos) {
-      // TODO: remove the NL char from the line buf bc it kinda fucks error
-      // messages up :(
-      ferror_message("While parsing include directives, found multiple valid "
-                     "file extensions on line [%s]",
-                     name.data());
-      return std::nullopt;
-    }
-
-    if (hpp_pos != string_view::npos) {
-      auto const last_hpp_pos = name.rfind(".hpp");
-      if (last_hpp_pos != hpp_pos) {
-        ferror_message(
-            "While parsing include directives, found multiple instances of "
-            "'.hpp' file extension in line [%s]" NL
-            "\tIf this is intentional, maybe as a part of some code "
-            "generation, open an issue on gh and we can work to resolve it",
-            line);
-        return std::nullopt;
-      }
-      graph.insert(string(name), src_file(string(root_name)));
-      if (generate_files_deps(graph, name, rel_path, line) == return_t::err) {
-        return std::nullopt;
-      }
-    } else {
-      auto const last_cpp_pos = name.rfind(".cpp");
-      if (last_cpp_pos != cpp_pos) {
-        ferror_message(
-            "While parsing include directives, found multiple instances of "
-            "'.cpp' file extension in line [%s]" NL
-            "\tIf this is intentional, maybe as a part of some code "
-            "generation, open an issue on gh and we can work to resolve it",
-            line);
-        return std::nullopt;
-      }
-      graph.insert(string(name), src_file(string(root_name)));
-      if (generate_files_deps(graph, name, rel_path, line) == return_t::err) {
-        return std::nullopt;
-      }
     }
   }
 
   free(line);
+
+  graph.insert(fpath, src_file(fpath)); // weird work around :)
 
   return graph;
 }
