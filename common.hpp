@@ -10,7 +10,7 @@
 #elif defined(__MACH__)
 #define NL "\n"
 #else
-#warning("new line macro defined, you can help the project by adding another header guard and defining it");
+#warning ("new line macro defined, you can help the project by adding another header guard and defining it");
 #define NL ""
 #endif
 
@@ -40,6 +40,9 @@
 
 #define fn_print()                                                             \
   fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
+
+#define exit_fn_print()                                                        \
+  fprintf(stderr, "\t\t" DBG "exiting" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
 
 #define expr_dbg(expr)                                                         \
   do {                                                                         \
