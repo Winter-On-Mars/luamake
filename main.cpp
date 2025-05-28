@@ -290,21 +290,11 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
   auto builder = lua_getglobal(c->state, BUILDER_OBJ);
   switch (builder) {
-  case LUA_TNIL:          // builder is undefined
-    lua_pop(c->state, 1); // remove the nil from the stack otherwise things fuck
-                          // up when we call the Build function
-    lua_createtable(c->state, 0, 0);
-    lua_setglobal(c->state, BUILDER_OBJ);
-    lua_getglobal(
-        c->state,
-        BUILDER_OBJ); // there's definately a better way to go about this, but
-                      // i can't think of one rn, basically it's because the
-                      // setglobal function pops the value from the stack, but
-                      // we need it on the stack bc we're passing it into the
-                      // funciton being called :)
+  case LUA_TNIL:
+    lua_pop(c->state, 1);
+    luamake_builtins::make_builder_obj(c->state, BUILDER_OBJ);
     break;
-  case LUA_TTABLE: // table already defined, i.e. this function is being
-                   // called from run/test
+  case LUA_TTABLE:
     break;
   default:
     ferror_message("`builder` object was defined, but it's type was expected "
@@ -313,273 +303,13 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  // TODO: switch this to pcall
-  lua_call(c->state, 1, 0);
+  if (lua_pcall(c->state, 1, 1, 0) != LUA_OK) {
+    auto err_message = lua_tolstring(c->state, -1, nullptr);
+    std::cerr << "error message = " << err_message << '\n';
+    return exit_t::internal_error; // ?
+  }
+
   (void)lua_gc(c->state, LUA_GCSTOP);
-
-  builder = lua_getglobal(c->state, BUILDER_OBJ);
-  if (builder != LUA_TTABLE) {
-    error_message(" You ended up changing the type of the `builder` "
-                  "object that was passed into your `Build` "
-                  "function." NL "\tIdk just fuck'in don't do that?");
-    return exit_t::config_error;
-  }
-
-  auto const builder_obj_pos = lua_absindex(c->state, -1);
-
-  auto pre_exec_t = lua_getfield(c->state, builder_obj_pos, "pre_exec");
-  if (pre_exec_t == LUA_TTABLE) {
-    // TODO: run the pre_exec stuff
-    warning_message("pre_exec table things are not currently implimented, and "
-                    "thus will not be run" NL
-                    "\tConsider adding this section to "
-                    "the gh by opening an issue or however github works idk.");
-  }
-  lua_pop(c->state, 1); // remove the pre_exec stuff
-
-  auto const output_name_t = lua_getfield(c->state, builder_obj_pos, "name");
-  if (output_name_t != LUA_TSTRING) {
-    error_message("Expected `build.name` to be of type string");
-    return exit_t::config_error;
-  }
-
-  auto const *output_name = lua_tostring(c->state, -1);
-
-  auto const builder_root_t = lua_getfield(c->state, builder_obj_pos, "root");
-  if (builder_root_t != LUA_TSTRING) {
-    error_message("fucked up root path to the main file");
-    return exit_t::config_error;
-  }
-
-  auto const fpath = fs::path(lua_tostring(c->state, -1));
-
-  // TODO: get the project info passed to dependency_graph::generate, so that
-  // you can include packages headers without things blowing up :)
-  auto const packages_t = lua_getfield(c->state, builder_obj_pos, "packages");
-  auto packages = vector<Package>();
-  switch (packages_t) {
-  case LUA_TNIL:
-    break;
-  case LUA_TTABLE: {
-    auto const pkg_idx = lua_absindex(c->state, -1);
-    packages.reserve(lua_rawlen(c->state, pkg_idx));
-
-    lua_pushnil(c->state);
-    while (lua_next(c->state, pkg_idx) != 0) {
-      if (lua_type(c->state, -2) != LUA_TSTRING) {
-        error_message(
-            "Expected key type of builder.packages to be of type string");
-        return config_error;
-      }
-      if (lua_type(c->state, -1) != LUA_TTABLE) {
-        error_message("Expected builder.packages to be a table of tables");
-        return config_error;
-      }
-
-      auto const name = string_view{lua_tolstring(c->state, -2, nullptr)};
-
-      auto const header_t = lua_getfield(c->state, -1, "headers");
-      if (header_t != LUA_TSTRING) {
-        error_message("Package header type incorrect");
-        return config_error;
-      }
-      auto const header_path = fs::path(lua_tolstring(c->state, -1, nullptr));
-
-      auto const header_style_t = lua_getfield(c->state, -2, "header_style");
-      if (header_style_t != LUA_TSTRING) {
-        error_message("Package header_style type incorrect");
-        return config_error;
-      }
-
-      auto const header_style = lua_tolstring(c->state, -1, nullptr);
-      auto style = Package::c;
-      if (strcmp(header_style, "c") == 0) {
-        // do nothing
-      } else if (strcmp(header_style, "cpp") == 0) {
-        style = Package::cpp;
-      } else {
-        error_message("Package header_style can only be of type 'c' or 'cpp'");
-        return config_error;
-      }
-
-      auto const lib_t = lua_getfield(c->state, -3, "lib");
-      if (lib_t != LUA_TSTRING) {
-        error_message("Package lib type incorrect");
-        return config_error;
-      }
-      auto const archive = fs::path(lua_tolstring(c->state, -1, nullptr));
-
-      packages.emplace_back(name, header_path, archive, style);
-
-      lua_pop(c->state, 4); /* remove value, need key for next iteration call */
-    }
-  } break;
-  default:
-    error_message("Found builder.packages, but was not of type table");
-    return exit_t::config_error;
-  }
-
-  for (auto const &package : packages) {
-    std::cout << '{' << '\n';
-    std::cout << "\tname: " << package.name << '\n';
-    std::cout << "\theaders: " << package.headers << '\n';
-    std::cout << "\theader_style: "
-              << (package.style == Package::c ? "c" : "cpp") << '\n';
-    std::cout << "\tarchive: " << package.archive << '\n';
-    std::cout << '}' << '\n';
-  }
-
-  auto needed_includes = [&packages]() -> vector<string> {
-    auto res = vector<string>();
-    for (auto &&[_, h_dir, _, style] : packages) {
-    }
-    return res;
-  }();
-
-  auto *root_file = fopen(fpath.c_str(), "r");
-  if (root_file == nullptr) {
-    ferror_message("The file specified as the root of the project [%s] does "
-                   "not exist at [%s]",
-                   fpath.c_str(), (fs::current_path() / fpath).c_str());
-    return exit_t::config_error;
-  }
-
-  // TODO: check that there's no cycles in the dep graph
-  auto dep_graph = dependency_graph::generate(root_file, fpath);
-  fclose(root_file);
-
-  if (!dep_graph.has_value()) {
-    error_message("Generating dependency graph");
-    return exit_t::internal_error;
-  }
-
-  std::cout << "dep_graph size = " << dep_graph->size() << '\n';
-  for (auto const &[k, v] : dep_graph.value()) {
-    std::cout << "\t(" << k << ", [";
-    for (auto const &str : v) {
-      std::cout << str.name << ", ";
-    }
-    std::cout << "])\n";
-  }
-  std::cout << std::flush;
-
-  auto const builder_compiler_t =
-      lua_getfield(c->state, builder_obj_pos, "compiler");
-  auto const compiler_obj_pos = lua_absindex(c->state, -1);
-  if (builder_compiler_t != LUA_TTABLE) {
-    error_message("Expected `builder.compiler` field to be of type table");
-    return exit_t::config_error;
-  }
-
-  auto envoked_command = string();
-  auto const compiler_field_name_t =
-      lua_getfield(c->state, compiler_obj_pos, "compiler");
-  if (compiler_field_name_t != LUA_TSTRING) {
-    error_message(
-        "Expected `builder.compiler.compiler` field to be of type string.");
-    return exit_t::config_error;
-  }
-  auto const *compiler = lua_tostring(c->state, -1);
-
-  auto const compiler_opt_level_t =
-      lua_getfield(c->state, compiler_obj_pos, "optimize");
-  if (compiler_opt_level_t != LUA_TSTRING) {
-    error_message("Expected `builder.compiler.optimize` to be of type string.");
-    return exit_t::config_error;
-  }
-  auto const *compiler_opt_level =
-      c->release ? "O3" : lua_tostring(c->state, -1);
-
-  auto const compiler_warnings_t =
-      lua_getfield(c->state, compiler_obj_pos, "warnings");
-  if (compiler_warnings_t != LUA_TTABLE) {
-    error_message(
-        "Expected `builder.compiler.warnings` to be of type array (table).");
-    return exit_t::config_error;
-  }
-
-  auto const warnings_len = lua_rawlen(c->state, -1);
-  auto cc_flags = string();
-  for (auto [i, warnings_tbl] = make_pair(lua_Unsigned{1}, int{-1});
-       i <= warnings_len; ++i, --warnings_tbl) {
-    cc_flags += '-';
-    auto const warnings_i_t =
-        lua_geti(c->state, warnings_tbl, static_cast<lua_Integer>(i));
-    if (warnings_i_t != LUA_TSTRING) {
-      error_message("TODO: expected string found something else.");
-      return exit_t::config_error;
-    }
-    cc_flags += lua_tostring(c->state, -1);
-    cc_flags += ' ';
-  }
-
-  for (auto const &[_, dependers] : dep_graph.value()) {
-    for (auto const &dep : dependers) {
-      if (!dep.is_cpp_file()) {
-        continue;
-      }
-      envoked_command += compiler;
-      envoked_command += ' ';
-
-      envoked_command += '-';
-      envoked_command += compiler_opt_level;
-      envoked_command += ' ';
-
-      envoked_command += cc_flags;
-
-      envoked_command += "-o build/";
-      envoked_command += dep.name.stem();
-      envoked_command += ".o ";
-
-      envoked_command += "-c ";
-      envoked_command += dep.name;
-
-      expr_dbg(envoked_command);
-      if (0 != system(envoked_command.c_str())) {
-        error_message("When compiling the above command");
-        return exit_t::internal_error;
-      }
-      envoked_command.clear();
-    }
-  }
-
-  envoked_command += compiler;
-  envoked_command += ' ';
-
-  envoked_command += '-';
-  envoked_command += compiler_opt_level;
-  envoked_command += ' ';
-
-  envoked_command += cc_flags;
-
-  for (auto const &f : fs::directory_iterator(fs::current_path() / "build")) {
-    if (fs::relative(f).extension() == fs::path(".o")) {
-      envoked_command += fs::relative(f);
-      envoked_command += ' ';
-    }
-  }
-
-  envoked_command += "-o build/";
-  // TODO: switch on the type to change the name of the output executable and
-  // it's file extension
-  envoked_command += output_name;
-
-  expr_dbg(envoked_command);
-
-  if (0 != system(envoked_command.c_str())) {
-    error_message("When compiling the output binary");
-    return exit_t::internal_error;
-  }
-
-  // TODO: post_exec
-  auto post_exec_t = lua_getfield(c->state, builder_obj_pos, "post_exec");
-  if (post_exec_t == LUA_TTABLE) {
-    warning_message(
-        "`builder.post_exec` was found, but support is currently not "
-        "implimented" NL
-        "\tConsider adding support for it by opening an issue on the GH");
-  }
-  lua_pop(c->state, 1);
 
   return exit_t::ok;
 }
@@ -616,13 +346,16 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
   auto constexpr lua_f_content = std::array<string_view, 3>{
       // clang-format off
       string_view{"function Build(builder)" NL
-                  "    builder.type = \"exe\"" NL
-                  "    builder.root = \"src/main.cpp\"" NL
-                  "    builder.compiler = Clang({})" NL
-                  "    builder.name = \"a\"" NL
+                  "    builder.install_dir = \"build\"" NL
                   NL
-                  "    builder.version = \"0.0.1\"" NL
-                  "    builder.description = \"TODO change me :)\"" NL
+                  "    local exe = {" NL
+                  "        name = \"a\"," NL
+                  "        root = \"src/main.cpp\"," NL
+                  "        compiler = Clang({})," NL
+                  "        version = \"0.0.1\"," NL
+                  "    }" NL
+                  NL
+                  "    builder:install_exe(exe)" NL
                   "end" NL
                   NL
                   "function Run(runner)" NL
@@ -642,23 +375,25 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
                   "    }" NL
                   "}" NL},
       string_view{"function Build(builder)" NL
-                  "    builder.type = \"dlib\"" NL
-                  "    builder.root = \"src/dyn.cpp\"" NL
-                  "    builder.compiler = Clang({})" NL
-                  "    builder.name = \"a\"" NL
-                  NL
-                  "    builder.version = \"0.0.1\"" NL
-                  "    builder.description = \"TODO change me :)\"" NL
+                  "    builder.install_dir = \"build\"" NL
+                  "    local dlib = {" NL
+                  "        root = \"src/dyn.cpp\"," NL
+                  "        compiler = Clang({})," NL
+                  "        name = \"a\"," NL
+                  "        version = \"0.0.1\"," NL
+                  "    }" NL
+                  "    builder.install_dynamic(dlib)" NL
                   "end" NL
                   },
       string_view{"function Build(builder)" NL
-                  "    builder.type = \"slib\"" NL
-                  "    builder.root = \"src/static.cpp\"" NL
-                  "    builder.compiler = Clang({})" NL
-                  "    builder.name = \"a\"" NL
-                  NL
-                  "    builder.version = \"0.0.1\"" NL
-                  "    builder.description = \"TODO change me :)\"" NL
+                  "    builder.install_dir = \"build\"" NL
+                  "    local slib = {" NL
+                  "        root = \"src/static.cpp\"," NL
+                  "        compiler = Clang({})," NL
+                  "        name = \"a\"," NL
+                  "        version = \"0.0.1\"," NL
+                  "    }" NL
+                  "    builder.install_static(dlib)" NL
                   "end" NL
                   },
       // clang-format on
@@ -813,6 +548,7 @@ static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
   auto luamake_content = string();
   luamake_content.reserve(256);
 
+  // TODO: rework this to have the separated objects that are constructed
   auto constexpr types = std::array<string_view, 3>{
       string_view{"exe"},
       string_view{"dlib"},
