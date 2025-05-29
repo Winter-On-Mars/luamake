@@ -11,8 +11,11 @@ extern "C" {
 #include <format>
 #include <iostream>
 #include <string>
+#include <string_view>
 
 namespace luamake_builtins {
+using std::array, std::string, std::string_view;
+
 auto clang(lua_State *state) -> int {
   fn_print();
 
@@ -21,12 +24,12 @@ auto clang(lua_State *state) -> int {
     lua_pushstring(state, "Too many arguments");
     return lua_error(state);
   }
-  auto constexpr compiler_field = std::string_view{"clang++"};
-  auto constexpr opt_level = std::string_view{"O2"};
-  auto constexpr warnings = std::array<std::string_view, 3>{{
-      std::string_view{"Wall"},
-      std::string_view{"Wconversion"},
-      std::string_view{"Wpedantic"},
+  auto constexpr compiler_field = string_view{"clang++"};
+  auto constexpr opt_level = string_view{"O2"};
+  auto constexpr warnings = array<string_view, 3>{{
+      string_view{"Wall"},
+      string_view{"Wconversion"},
+      string_view{"Wpedantic"},
   }};
 
   lua_createtable(state, 0, 3); // tbl
@@ -53,7 +56,7 @@ auto clang(lua_State *state) -> int {
   return 1;
 }
 
-static auto parse_compiler_table(lua_State *state) -> std::string {
+static auto parse_compiler_table(lua_State *state) -> string {
   auto str = std::string();
 
   lua_getfield(state, -1, "compiler");
@@ -85,7 +88,6 @@ static auto parse_compiler_table(lua_State *state) -> std::string {
 
 static auto install_exe(lua_State *state) -> int {
   fn_print();
-  using std::string;
 
   auto num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -135,8 +137,23 @@ static auto install_exe(lua_State *state) -> int {
   return 0;
 }
 
-static auto install_static(lua_State *state) -> int {
+static auto install_static(lua_State *L) -> int {
   fn_print();
+
+  auto num_args = lua_gettop(L);
+  if (num_args != 1) {
+    lua_pushstring(L, "Too many arguments");
+    return lua_error(L);
+  }
+
+  lua_getfield(L, -1, "name");
+  auto const name = string(lua_tolstring(L, -1, nullptr));
+
+  lua_getfield(L, -2, "invoke_command");
+  auto const install_command = string(lua_tolstring(L, -1, nullptr));
+
+  expr_dbg(install_command);
+
   exit_fn_print();
   return 0;
 }
