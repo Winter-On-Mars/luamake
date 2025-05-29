@@ -54,7 +54,6 @@ auto clang(lua_State *state) -> int {
 }
 
 static auto parse_compiler_table(lua_State *state) -> std::string {
-  fn_print();
   auto str = std::string();
 
   lua_getfield(state, -1, "compiler");
@@ -80,13 +79,10 @@ static auto parse_compiler_table(lua_State *state) -> std::string {
     }
     --tbl_idx;
   }
-  // TODO: check this is the right number to pop
   lua_pop(state, 3 + static_cast<int>(num_warnings));
-  exit_fn_print();
   return str;
 }
 
-// TODO: finish function
 static auto install_exe(lua_State *state) -> int {
   fn_print();
   using std::string;
@@ -100,6 +96,7 @@ static auto install_exe(lua_State *state) -> int {
   // TODO: turn these into char const * bc lua_gc is off
   lua_getfield(state, -1, "name");
   auto const name = string(lua_tolstring(state, -1, nullptr));
+
   lua_getfield(state, -2, "root");
   auto const root_file = fs::path(lua_tolstring(state, -1, nullptr));
 
@@ -116,24 +113,36 @@ static auto install_exe(lua_State *state) -> int {
       std::format("{} -c {} -o {}/{}.o", command_prefix, root_file.string(),
                   install_dir, root_file.stem().string());
   std::cerr << "Invoking [" << invoked_command << "]\n";
-  system(invoked_command.c_str());
+  if (system(invoked_command.c_str()) != 0) {
+    // this should be fine bc lua will intern the string(?)
+    lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
+    return lua_error(state);
+  }
 
   // compile the program
   invoked_command =
       std::format("{} {}/{}.o -o {}/{}", command_prefix, install_dir,
                   root_file.stem().string(), install_dir, name);
   std::cerr << "Invoking [" << invoked_command << "]\n";
-  system(invoked_command.c_str());
+
+  if (system(invoked_command.c_str()) != 0) {
+    lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
+    return lua_error(state);
+  }
 
   lua_pop(state, 3);
-  lua_pushnil(state);
   exit_fn_print();
-  return 1;
+  return 0;
+}
+
+static auto install_static(lua_State *state) -> int {
+  fn_print();
+  exit_fn_print();
+  return 0;
 }
 
 auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
     -> void {
-  fn_print();
   lua_createtable(state, 0, 2);
 
   lua_pushstring(state, ".");
@@ -142,7 +151,9 @@ auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
   lua_pushcfunction(state, install_exe);
   lua_setfield(state, -2, "install_exe");
 
-  // TODO: add the functions install_dynamic and install_static
-  exit_fn_print();
+  lua_pushcfunction(state, install_static);
+  lua_setfield(state, -2, "install_static");
+
+  // TODO: add the functions install_dynamic
 }
 } // namespace luamake_builtins
