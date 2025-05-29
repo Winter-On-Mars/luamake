@@ -285,9 +285,10 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   }
 
   if (lua_pcall(c->state, 1, 1, 0) != LUA_OK) {
-    auto err_message = lua_tolstring(c->state, -1, nullptr);
-    std::cerr << "error message = " << err_message << '\n';
-    return exit_t::internal_error; // ?
+    auto const err_message = lua_tolstring(c->state, -1, nullptr);
+    ferror_message("While in the lua vm, Build function" NL "\t[%s]",
+                   err_message);
+    return exit_t::lua_vm_error; // ?
   }
 
   (void)lua_gc(c->state, LUA_GCSTOP);
