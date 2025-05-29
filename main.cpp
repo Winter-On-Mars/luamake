@@ -654,10 +654,10 @@ static auto clean() noexcept -> exit_t {
 
 static auto test(user_func_config const *const c) noexcept -> exit_t {
   fn_print();
-  lua_createtable(c->state, 0, 1); // builder object
+
+  luamake_builtins::make_builder_obj(c->state, BUILDER_OBJ);
   lua_pushboolean(c->state, true);
   lua_setfield(c->state, -2, TESTING_MACRO);
-  lua_setglobal(c->state, BUILDER_OBJ);
 
   auto const build_res = build(c);
   if (build_res != exit_t::ok) {
