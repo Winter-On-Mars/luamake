@@ -1,11 +1,16 @@
 #include "luamake_builtins.hpp"
 
 #include "common.hpp"
+
+extern "C" {
 #include "lua/lua.h"
+}
 
 #include <array>
-
+#include <cstdlib>
+#include <format>
 #include <iostream>
+#include <string>
 
 namespace luamake_builtins {
 auto clang(lua_State *state) -> int {
@@ -13,8 +18,8 @@ auto clang(lua_State *state) -> int {
 
   auto num_args = lua_gettop(state);
   if (num_args != 1) {
-    lua_pushnil(state);
-    return 1;
+    lua_pushstring(state, "Too many arguments");
+    return lua_error(state);
   }
   auto constexpr compiler_field = std::string_view{"clang++"};
   auto constexpr opt_level = std::string_view{"O2"};
@@ -48,27 +53,79 @@ auto clang(lua_State *state) -> int {
   return 1;
 }
 
+static auto parse_compiler_table(lua_State *state) -> std::string {
+  fn_print();
+  auto str = std::string();
+
+  lua_getfield(state, -1, "compiler");
+  str += lua_tolstring(state, -1, nullptr);
+
+  lua_getfield(state, -2, "optimize");
+  str += " -";
+  str += lua_tolstring(state, -1, nullptr);
+
+  lua_getfield(state, -3, "warnings");
+  auto tbl_idx = -1;
+  auto num_warnings = lua_rawlen(state, tbl_idx);
+  for (auto i = lua_Unsigned{1}; i <= num_warnings; ++i) {
+    switch (lua_geti(state, tbl_idx, static_cast<lua_Integer>(i))) {
+    case LUA_TSTRING:
+      str += " -";
+      str += lua_tolstring(state, -1, nullptr);
+      break;
+    default: // TODO: propogate error up
+      lua_pushstring(state, "Incorrect type in `warnings` table");
+      lua_error(state);
+      return str;
+    }
+    --tbl_idx;
+  }
+  // TODO: check this is the right number to pop
+  lua_pop(state, 3 + static_cast<int>(num_warnings));
+  exit_fn_print();
+  return str;
+}
+
 // TODO: finish function
 static auto install_exe(lua_State *state) -> int {
   fn_print();
   using std::string;
 
-  // stack: [self] [exe]
   auto num_args = lua_gettop(state);
-  if (num_args != 2) {
+  if (num_args != 1) {
     lua_pushstring(state, "Too many arguments.");
     return lua_error(state);
   }
 
+  // TODO: turn these into char const * bc lua_gc is off
   lua_getfield(state, -1, "name");
-  auto name = string(lua_tolstring(state, -1, nullptr));
-  lua_pop(state, 1);
-  lua_getfield(state, -1, "root");
-  auto root_file = string(lua_tolstring(state, -1, nullptr));
-  lua_pop(state, 1);
+  auto const name = string(lua_tolstring(state, -1, nullptr));
+  lua_getfield(state, -2, "root");
+  auto const root_file = fs::path(lua_tolstring(state, -1, nullptr));
 
-  std::cerr << "name = " << name << ",\nroot = " << root_file << "\n";
+  lua_getfield(state, -3, "compiler");
+  auto const command_prefix = parse_compiler_table(state);
 
+  lua_getfield(state, -4, "install_dir");
+  auto const install_dir = string(lua_tolstring(state, -1, nullptr));
+
+  // TODO: build dep tree
+
+  // compile the objects
+  auto invoked_command =
+      std::format("{} -c {} -o {}/{}.o", command_prefix, root_file.string(),
+                  install_dir, root_file.stem().string());
+  std::cerr << "Invoking [" << invoked_command << "]\n";
+  system(invoked_command.c_str());
+
+  // compile the program
+  invoked_command =
+      std::format("{} {}/{}.o -o {}/{}", command_prefix, install_dir,
+                  root_file.stem().string(), install_dir, name);
+  std::cerr << "Invoking [" << invoked_command << "]\n";
+  system(invoked_command.c_str());
+
+  lua_pop(state, 3);
   lua_pushnil(state);
   exit_fn_print();
   return 1;
