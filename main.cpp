@@ -5,10 +5,8 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <optional>
 #include <string_view>
 #include <type_traits>
-#include <vector>
 
 extern "C" {
 #include "lua/lauxlib.h"
@@ -16,11 +14,9 @@ extern "C" {
 }
 
 #include "common.hpp"
-#include "dependency_graph.hpp"
 #include "luamake_builtins.hpp"
 
-using std::array, std::pair, std::make_pair, std::vector, std::string,
-    std::string_view;
+using std::array, std::pair, std::string, std::string_view;
 
 using u8 = std::uint8_t;
 
