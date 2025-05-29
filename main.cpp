@@ -29,18 +29,6 @@ using u8 = std::uint8_t;
 #define TESTING_MACRO "__define_testing_macro"
 
 namespace MakeTypes {
-// TODO: optimize this struct
-// potentially remove name, switch to a struct of arrays
-// remove the style tag
-// pack archive strings into single buffer
-// non-lazily grab the needed headers
-struct Package final {
-  string_view name;
-  fs::path headers; // relative paths to the headers + archive
-  fs::path archive;
-  enum Style { c, cpp } style;
-};
-
 enum class exit_t : unsigned char {
   ok,
   internal_error,
@@ -260,9 +248,6 @@ auto Type::run() const noexcept -> exit_t {
   return res;
 }
 
-// TODO: do things with builder.deps for dependency management
-// and do things with builder.type to actually fuckin compile
-// static and dynamic libs
 static auto build(user_func_config const *const c) noexcept -> exit_t {
   using enum exit_t;
   fn_print();
@@ -325,8 +310,6 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
     return exit_t::useage_error;
   }
 
-  // TODO: error checking on making these dirs :)
-
   // create the dir
   fs::create_directory(project_root);
 
@@ -346,16 +329,15 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
   auto constexpr lua_f_content = std::array<string_view, 3>{
       // clang-format off
       string_view{"function Build(builder)" NL
-                  "    builder.install_dir = \"build\"" NL
-                  NL
                   "    local exe = {" NL
                   "        name = \"a\"," NL
                   "        root = \"src/main.cpp\"," NL
                   "        compiler = Clang({})," NL
                   "        version = \"0.0.1\"," NL
+                  "        install_dir = \"build\"," NL
                   "    }" NL
                   NL
-                  "    builder:install_exe(exe)" NL
+                  "    builder.install_exe(exe)" NL
                   "end" NL
                   NL
                   "function Run(runner)" NL
