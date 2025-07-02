@@ -1,6 +1,8 @@
 #include "luamake_builtins.hpp"
 
 #include "common.hpp"
+#include <filesystem>
+#include <system_error>
 
 extern "C" {
 #include "lua/lua.h"
@@ -27,7 +29,7 @@ struct Module final {
   Module_t type;
 
   char const *name;
-  char const *root;
+  fs::path root;
   std::string compiler;
   char const *install_dir;
   // other module deps
@@ -135,13 +137,24 @@ static auto install_exe(lua_State *state) -> int {
 
   auto main_mod = Module::make(Module::EXE, state);
 
+  auto ec = std::error_code{};
+  if (fs::create_directories(
+          fs::path(std::format("{}/{}.o", main_mod.install_dir, main_mod.name)),
+          ec);
+      ec) {
+    std::cerr << ec.message() << '\n';
+    lua_pushfstring(state, "Unable to create directory");
+    return lua_error(state);
+  }
+
   // TODO: build dep tree
 
   // compile the objects
-  auto invoked_command =
-      std::format("{} -c {} -o {}/{}.o", main_mod.compiler, main_mod.root,
-                  main_mod.install_dir, main_mod.root);
+  auto invoked_command = std::format(
+      "{} -c {} -o {}/{}.o/{}.o", main_mod.compiler, main_mod.root.c_str(),
+      main_mod.install_dir, main_mod.name, main_mod.root.stem().c_str());
   std::cerr << "Invoking [" << invoked_command << "]\n";
+
   if (system(invoked_command.c_str()) != 0) {
     // this should be fine bc lua will intern the string(?)
     lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
@@ -149,8 +162,9 @@ static auto install_exe(lua_State *state) -> int {
   }
 
   // compile the program
-  invoked_command = std::format("{} {}/{}.o -o {}/{}", main_mod.compiler,
-                                main_mod.install_dir, main_mod.root,
+  invoked_command = std::format("{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler,
+                                main_mod.install_dir, main_mod.name,
+                                main_mod.root.stem().c_str(),
                                 main_mod.install_dir, main_mod.name);
   std::cerr << "Invoking [" << invoked_command << "]\n";
 
