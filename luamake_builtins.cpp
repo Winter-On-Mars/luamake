@@ -14,9 +14,10 @@ extern "C" {
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace luamake_builtins {
-using std::array, std::string, std::string_view;
+using std::array, std::string, std::string_view, std::vector;
 
 static auto parse_compiler_table(lua_State *) -> string;
 
@@ -26,34 +27,70 @@ struct Module final {
     STATIC,
     DYNAMIC,
   };
-  Module_t type;
-
-  char const *name;
-  fs::path root;
-  std::string compiler;
-  char const *install_dir;
-  // other module deps
 
   static auto make(Module_t type, lua_State *state) noexcept -> Module {
     auto ret_t = Module{};
-    ret_t.type = type;
+    ret_t.m.type = type;
 
     lua_getfield(state, -1, "name");
-    ret_t.name = lua_tolstring(state, -1, nullptr);
+    ret_t.m.name = lua_tolstring(state, -1, nullptr);
 
     lua_getfield(state, -2, "root");
-    ret_t.root = lua_tolstring(state, -1, nullptr);
+    ret_t.m.root = lua_tolstring(state, -1, nullptr);
 
     lua_getfield(state, -3, "compiler");
-    ret_t.compiler = parse_compiler_table(state);
+    ret_t.m.compiler = parse_compiler_table(state);
 
     lua_getfield(state, -4, "install_dir");
-    ret_t.install_dir = lua_tolstring(state, -1, nullptr);
+    ret_t.m.install_dir = lua_tolstring(state, -1, nullptr);
 
+    // TODO: update this to record the number of things we push onto the stack
+    // to make sure that this doesn't fuck up the stack
     lua_pop(state, 4); // might cause an issue? just trying to restore the stack
 
     return ret_t;
   }
+
+  auto constexpr install_dir() const noexcept -> char const * {
+    return m.install_dir;
+  }
+
+  auto constexpr name() const noexcept -> char const * { return m.name; }
+
+  auto root() const noexcept -> fs::path { return m.root; }
+
+  auto compiler() const noexcept -> std::string { return m.compiler; }
+
+private:
+  struct M {
+    Module_t type;
+    char const *name;
+    fs::path root;
+    std::string compiler;
+    char const *install_dir;
+    // other module deps
+  };
+  M m;
+};
+
+struct SourceFile final {
+  enum SourceFile_t {
+    IMPL,
+    HEADER,
+    SYSTEM,
+    MISC,
+  };
+
+  static auto make(fs::path const &root) noexcept -> SourceFile {
+    auto res = SourceFile{};
+    return res;
+  }
+
+private:
+  SourceFile_t type;
+  fs::path root;
+  vector<std::shared_ptr<SourceFile>> deps;
+  size_t hash;
 };
 
 auto clang(lua_State *state) -> int {
@@ -139,20 +176,23 @@ static auto install_exe(lua_State *state) -> int {
 
   auto ec = std::error_code{};
   if (fs::create_directories(
-          fs::path(std::format("{}/{}.o", main_mod.install_dir, main_mod.name)),
+          fs::path(
+              std::format("{}/{}.o", main_mod.install_dir(), main_mod.name())),
           ec);
       ec) {
     std::cerr << ec.message() << '\n';
     lua_pushfstring(state, "Unable to create directory");
     return lua_error(state);
   }
+  ec.clear();
 
   // TODO: build dep tree
+  auto root = SourceFile::make(main_mod.root());
 
   // compile the objects
   auto invoked_command = std::format(
-      "{} -c {} -o {}/{}.o/{}.o", main_mod.compiler, main_mod.root.c_str(),
-      main_mod.install_dir, main_mod.name, main_mod.root.stem().c_str());
+      "{} -c {} -o {}/{}.o/{}.o", main_mod.compiler(), main_mod.root().c_str(),
+      main_mod.install_dir(), main_mod.name(), main_mod.root().stem().c_str());
   std::cerr << "Invoking [" << invoked_command << "]\n";
 
   if (system(invoked_command.c_str()) != 0) {
@@ -162,10 +202,10 @@ static auto install_exe(lua_State *state) -> int {
   }
 
   // compile the program
-  invoked_command = std::format("{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler,
-                                main_mod.install_dir, main_mod.name,
-                                main_mod.root.stem().c_str(),
-                                main_mod.install_dir, main_mod.name);
+  invoked_command = std::format("{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(),
+                                main_mod.install_dir(), main_mod.name(),
+                                main_mod.root().stem().c_str(),
+                                main_mod.install_dir(), main_mod.name());
   std::cerr << "Invoking [" << invoked_command << "]\n";
 
   if (system(invoked_command.c_str()) != 0) {
