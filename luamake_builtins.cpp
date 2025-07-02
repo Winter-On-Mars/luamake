@@ -16,6 +16,44 @@ extern "C" {
 namespace luamake_builtins {
 using std::array, std::string, std::string_view;
 
+static auto parse_compiler_table(lua_State *) -> string;
+
+struct Module final {
+  enum Module_t {
+    EXE,
+    STATIC,
+    DYNAMIC,
+  };
+  Module_t type;
+
+  char const *name;
+  char const *root;
+  std::string compiler;
+  char const *install_dir;
+  // other module deps
+
+  static auto make(Module_t type, lua_State *state) noexcept -> Module {
+    auto ret_t = Module{};
+    ret_t.type = type;
+
+    lua_getfield(state, -1, "name");
+    ret_t.name = lua_tolstring(state, -1, nullptr);
+
+    lua_getfield(state, -2, "root");
+    ret_t.root = lua_tolstring(state, -1, nullptr);
+
+    lua_getfield(state, -3, "compiler");
+    ret_t.compiler = parse_compiler_table(state);
+
+    lua_getfield(state, -4, "install_dir");
+    ret_t.install_dir = lua_tolstring(state, -1, nullptr);
+
+    lua_pop(state, 4); // might cause an issue? just trying to restore the stack
+
+    return ret_t;
+  }
+};
+
 auto clang(lua_State *state) -> int {
   fn_print();
 
@@ -57,7 +95,7 @@ auto clang(lua_State *state) -> int {
 }
 
 static auto parse_compiler_table(lua_State *state) -> string {
-  auto str = std::string();
+  auto str = string();
 
   lua_getfield(state, -1, "compiler");
   str += lua_tolstring(state, -1, nullptr);
@@ -95,25 +133,14 @@ static auto install_exe(lua_State *state) -> int {
     return lua_error(state);
   }
 
-  // TODO: turn these into char const * bc lua_gc is off
-  lua_getfield(state, -1, "name");
-  auto const name = string(lua_tolstring(state, -1, nullptr));
-
-  lua_getfield(state, -2, "root");
-  auto const root_file = fs::path(lua_tolstring(state, -1, nullptr));
-
-  lua_getfield(state, -3, "compiler");
-  auto const command_prefix = parse_compiler_table(state);
-
-  lua_getfield(state, -4, "install_dir");
-  auto const install_dir = string(lua_tolstring(state, -1, nullptr));
+  auto main_mod = Module::make(Module::EXE, state);
 
   // TODO: build dep tree
 
   // compile the objects
   auto invoked_command =
-      std::format("{} -c {} -o {}/{}.o", command_prefix, root_file.string(),
-                  install_dir, root_file.stem().string());
+      std::format("{} -c {} -o {}/{}.o", main_mod.compiler, main_mod.root,
+                  main_mod.install_dir, main_mod.root);
   std::cerr << "Invoking [" << invoked_command << "]\n";
   if (system(invoked_command.c_str()) != 0) {
     // this should be fine bc lua will intern the string(?)
@@ -122,9 +149,9 @@ static auto install_exe(lua_State *state) -> int {
   }
 
   // compile the program
-  invoked_command =
-      std::format("{} {}/{}.o -o {}/{}", command_prefix, install_dir,
-                  root_file.stem().string(), install_dir, name);
+  invoked_command = std::format("{} {}/{}.o -o {}/{}", main_mod.compiler,
+                                main_mod.install_dir, main_mod.root,
+                                main_mod.install_dir, main_mod.name);
   std::cerr << "Invoking [" << invoked_command << "]\n";
 
   if (system(invoked_command.c_str()) != 0) {
@@ -132,7 +159,6 @@ static auto install_exe(lua_State *state) -> int {
     return lua_error(state);
   }
 
-  lua_pop(state, 3);
   exit_fn_print();
   return 0;
 }
