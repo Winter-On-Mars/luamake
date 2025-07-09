@@ -1,25 +1,103 @@
 #include "luamake_builtins.hpp"
 
 #include "common.hpp"
-#include <filesystem>
-#include <system_error>
+#include "luamake_error.hpp"
 
 extern "C" {
 #include "lua/lua.h"
 }
 
 #include <array>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <format>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace luamake_builtins {
-using std::array, std::string, std::string_view, std::vector;
+using std::array, std::string, std::string_view, std::unique_ptr, std::vector;
 
 static auto parse_compiler_table(lua_State *) -> string;
+
+// TODO: fill this out
+// read user luamake.lua to find module dependency
+static auto get_include_paths() noexcept -> vector<fs::path> {
+  return vector<fs::path>{".", "/usr/include"};
+}
+
+// TODO: make this return a bool to check if we hit 0
+static auto skip_ws(char const *ch) noexcept -> char const * {
+  auto const *local = ch;
+  while (*local != 0) {
+    switch (*local) {
+    case ' ':
+      [[fallthrough]];
+    case '\t':
+      [[fallthrough]];
+    case '\n':
+      [[fallthrough]];
+    case '\r': {
+      ++local;
+    } break;
+    default:
+      return local;
+    }
+  }
+  // TODO: error checking when we hit eof
+  return local;
+}
+
+struct File final {
+
+  // idk expand this later if you want
+  enum permissions : unsigned char {
+    READ,
+  };
+
+  File(fs::path const &path, permissions &&perms) noexcept
+      : file(fopen(path.c_str(), perms == READ ? "r" : ".")) {}
+  ~File() noexcept {
+    if (file != nullptr)
+      fclose(file);
+  }
+
+  // implicit conversion operator to FILE*
+  operator FILE *() const noexcept { return file; }
+
+private:
+  FILE *file;
+};
+
+// algorithm
+// https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function#FNV-1a_hash
+static auto constexpr fnv1a(size_t size, char const *buffer) noexcept
+    -> size_t {
+  auto [hash, fnv1a_prime] = []() -> std::pair<size_t, size_t> {
+    if constexpr (sizeof(size_t) == 4) {
+      return std::make_pair(0x01000193, 0x811c9dc5);
+    } else if constexpr (sizeof(size_t) == 8) {
+      return std::make_pair(0xcbf29ce484222325, 0x00000100000001b3);
+    } else {
+      throw;
+    }
+  }();
+
+  for (size_t i{0}; i < size; ++i) {
+    hash = hash ^ static_cast<size_t>(buffer[i]);
+    hash = hash * fnv1a_prime;
+  }
+
+  return hash;
+}
 
 struct Module final {
   enum Module_t {
@@ -46,7 +124,8 @@ struct Module final {
 
     // TODO: update this to record the number of things we push onto the stack
     // to make sure that this doesn't fuck up the stack
-    lua_pop(state, 4); // might cause an issue? just trying to restore the stack
+    lua_pop(state,
+            4); // might cause an issue? just trying to restore the stack
 
     return ret_t;
   }
@@ -73,6 +152,32 @@ private:
   M m;
 };
 
+// TODO:
+struct EmptyFileName final {
+  auto error() const noexcept -> char const * { return nullptr; };
+};
+
+struct FileDoesNotExist final {
+  auto error() const noexcept -> char const * { return nullptr; };
+};
+
+struct NonTerminatedString final {
+  auto error() const noexcept -> char const * { return nullptr; };
+};
+
+struct MalformedInclude final {
+  auto error() const noexcept -> char const * { return nullptr; };
+};
+
+struct CFileAPIError final {
+  string message;
+  auto error() const noexcept -> char const * { return message.c_str(); }
+};
+
+using SourceFileErr =
+    std::variant<EmptyFileName, FileDoesNotExist, NonTerminatedString,
+                 MalformedInclude, CFileAPIError>;
+
 struct SourceFile final {
   enum SourceFile_t {
     IMPL,
@@ -81,16 +186,157 @@ struct SourceFile final {
     MISC,
   };
 
-  static auto make(fs::path const &root) noexcept -> SourceFile {
-    auto res = SourceFile{};
-    return res;
+  static auto make(fs::path const &root) noexcept
+      -> Result<SourceFile, SourceFileErr> {
+    using Ok = Result<SourceFile, SourceFileErr>::Ok;
+    using Err = Result<SourceFile, SourceFileErr>::Err;
+    std::cerr << "calling make with path = [" << root << "]\n";
+
+    auto res = SourceFile();
+    auto const ext = root.extension();
+
+    res.m.type = determine_file_type(ext);
+
+    res.m.path = root;
+
+    if (auto opt_err = res.analyze_deps_and_hash(); opt_err.has_value()) {
+      return Err(std::move(opt_err.value()));
+    }
+
+    return Ok(std::move(res));
   }
 
+  SourceFile(SourceFile const &) = delete;
+  SourceFile &operator=(SourceFile const &) = delete;
+
+  SourceFile(SourceFile &&) = default;
+  SourceFile &operator=(SourceFile &&) = default;
+
 private:
-  SourceFile_t type;
-  fs::path root;
-  vector<std::shared_ptr<SourceFile>> deps;
-  size_t hash;
+  struct M final {
+    SourceFile_t type;
+    fs::path path;
+    vector<unique_ptr<SourceFile>> deps;
+    size_t hash;
+    // TODO:
+    // std::thread hashing_thread;
+    // std::thread dep_analyzer_thread;
+  } m;
+
+  static auto determine_file_type(fs::path const &ext) noexcept
+      -> SourceFile_t {
+    if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".c") {
+      return IMPL;
+    }
+    if (ext == ".hpp" || ext == ".hxx" || ext == ".hh" || ext == ".h") {
+      return HEADER;
+    }
+    return MISC;
+  }
+
+  auto analyze_deps_and_hash() noexcept -> std::optional<SourceFileErr> {
+    using Result = Result<SourceFile, SourceFileErr>;
+
+    auto file = File(m.path.c_str(), File::READ);
+    if (!file) {
+      return FileDoesNotExist();
+    }
+    fseek(file, 0, SEEK_END);
+    auto const _fsize = ftell(file);
+    if (_fsize == -1) {
+      return CFileAPIError(string(strerror(errno)));
+    }
+    auto const fsize = static_cast<size_t>(_fsize);
+    rewind(file);
+
+    // TODO: remove the null terminator b/c it's only needed for debugging
+    auto const fcontent = std::make_unique<char[]>(fsize + 1);
+    // TODO: check that we actually read the whole file
+    auto const amount_read = fread(fcontent.get(), sizeof(char), fsize, file);
+    if (amount_read != fsize) {
+      return CFileAPIError(string(strerror(errno)));
+    }
+    fcontent[fsize] = 0;
+
+    m.hash = fnv1a(fsize, fcontent.get());
+
+    auto constexpr include_prefix = string_view{"#include"};
+    auto const potential_include_dirs = get_include_paths();
+
+    auto in_string = false;
+
+    for (auto const *ch = fcontent.get(); *ch != 0; ++ch) {
+      auto const is_hash = *ch == '#';
+      in_string = *ch == '"';
+      if (is_hash && !in_string &&
+          strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
+        ch += include_prefix.size();
+        ch = skip_ws(ch);
+
+        switch (*ch) {
+        case '"': {
+          // TODO: local include
+          ++ch;
+          auto const *end_of_include_string = ch;
+          while (*end_of_include_string != 0 && *end_of_include_string != '"') {
+            ++end_of_include_string;
+          }
+
+          if (*end_of_include_string == 0) {
+            return NonTerminatedString();
+          }
+
+          auto const include_string_size = end_of_include_string - ch;
+          switch (include_string_size) {
+          case 0: {
+            return EmptyFileName();
+          } break;
+          default: {
+            auto const file_name =
+                fs::path(string_view{ch, end_of_include_string});
+            if (file_name.stem() == m.path.stem()) {
+              auto const file_name_ext =
+                  determine_file_type(file_name.extension());
+              if (file_name_ext == HEADER) {
+              }
+            }
+            auto const path = m.path.parent_path() / file_name;
+
+            std::cout << "file_name = [" << file_name << "]\n";
+            std::cout.flush();
+            std::cout << "path = [" << path << "]\n";
+            std::cout.flush();
+
+            auto sf = SourceFile::make(path);
+            switch (sf) {
+            case Result::OK: {
+              m.deps.emplace_back(std::make_unique<SourceFile>(sf.get()));
+            } break;
+            case Result::ERR: {
+              return sf.err();
+            } break;
+            }
+          } break;
+          }
+        } break;
+        case '<': {
+          std::cout << "found global [" << ch << "]\n";
+          std::cout.flush();
+          // TODO: global/module include
+        } break;
+        default: {
+          std::cout << "unknown char [" << *ch << "]\n";
+          std::cout.flush();
+          // TODO: report error malformed #include directive
+        } break;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  SourceFile() = default;
+  friend Result<SourceFile, SourceFileErr>;
 };
 
 auto clang(lua_State *state) -> int {
@@ -181,13 +427,20 @@ static auto install_exe(lua_State *state) -> int {
           ec);
       ec) {
     std::cerr << ec.message() << '\n';
-    lua_pushfstring(state, "Unable to create directory");
+    lua_pushstring(state, "Unable to create directory");
     return lua_error(state);
   }
   ec.clear();
 
   // TODO: build dep tree
   auto root = SourceFile::make(main_mod.root());
+  if (!root.ok()) {
+    lua_pushstring(
+        state, std::visit([](auto &&e) -> char const * { return e.error(); },
+                          root.err()));
+    // lua_pushstring(state, "Error while constructing dependency tree");
+    return lua_error(state);
+  }
 
   // compile the objects
   auto invoked_command = std::format(
@@ -195,11 +448,13 @@ static auto install_exe(lua_State *state) -> int {
       main_mod.install_dir(), main_mod.name(), main_mod.root().stem().c_str());
   std::cerr << "Invoking [" << invoked_command << "]\n";
 
+  /*
   if (system(invoked_command.c_str()) != 0) {
     // this should be fine bc lua will intern the string(?)
     lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
     return lua_error(state);
   }
+  */
 
   // compile the program
   invoked_command = std::format("{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(),
@@ -208,10 +463,12 @@ static auto install_exe(lua_State *state) -> int {
                                 main_mod.install_dir(), main_mod.name());
   std::cerr << "Invoking [" << invoked_command << "]\n";
 
+  /*
   if (system(invoked_command.c_str()) != 0) {
     lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
     return lua_error(state);
   }
+  */
 
   exit_fn_print();
   return 0;
