@@ -5,7 +5,7 @@ linker:=mold
 
 .PHONY: all, ncolor, dbg, clean_submod
 
-files:=common.o luamake_builtins.o dependency_graph.o main.o
+files:=common.o luamake_builtins.o dependency_graph.o main.o luamake_error.o
 lua_a:=lua/liblua.a
 
 all: $(files) $(lua_a)
