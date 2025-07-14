@@ -152,26 +152,56 @@ private:
   M m;
 };
 
-// TODO:
 struct EmptyFileName final {
-  auto error() const noexcept -> char const * { return nullptr; };
+  fs::path path;
+  explicit EmptyFileName(fs::path const &path) noexcept : path(path) {}
+  auto error() const noexcept -> string {
+    return string("In [") + path.string() + "] found empty include path.";
+  };
 };
 
 struct FileDoesNotExist final {
-  auto error() const noexcept -> char const * { return nullptr; };
+  fs::path name;
+  fs::path parent;
+
+  explicit FileDoesNotExist(fs::path const &fname,
+                            fs::path const &parent) noexcept
+      : name(fname), parent(parent) {}
+
+  auto error() const noexcept -> string {
+    return string("Attempting to open file [") + name.string() +
+           string("] That does not exist") +
+           (parent == fs::current_path()
+                ? string(".")
+                : string(" depended on by ") + parent.string() + ".");
+  };
 };
 
 struct NonTerminatedString final {
-  auto error() const noexcept -> char const * { return nullptr; };
+  fs::path name;
+
+  explicit NonTerminatedString(fs::path const &fname) noexcept : name(fname) {}
+
+  auto error() const noexcept -> string {
+    return string("File [") + name.string() +
+           string("] contains a non-terminating string in an include path.");
+  };
 };
 
 struct MalformedInclude final {
-  auto error() const noexcept -> char const * { return nullptr; };
+  fs::path name;
+
+  explicit MalformedInclude(fs::path const &fname) noexcept : name(fname) {}
+
+  auto error() const noexcept -> string {
+    return string("File [") + name.string() +
+           "] contains a malformed include path";
+  };
 };
 
 struct CFileAPIError final {
   string message;
-  auto error() const noexcept -> char const * { return message.c_str(); }
+  auto error() const noexcept -> string { return message; }
 };
 
 using SourceFileErr =
@@ -186,7 +216,8 @@ struct SourceFile final {
     MISC,
   };
 
-  static auto make(fs::path const &root) noexcept
+  static auto make(fs::path const &root,
+                   fs::path const &parent = fs::current_path()) noexcept
       -> Result<SourceFile, SourceFileErr> {
     using Ok = Result<SourceFile, SourceFileErr>::Ok;
     using Err = Result<SourceFile, SourceFileErr>::Err;
@@ -199,7 +230,7 @@ struct SourceFile final {
 
     res.m.path = root;
 
-    if (auto opt_err = res.analyze_deps_and_hash(); opt_err.has_value()) {
+    if (auto opt_err = res.analyze_deps_and_hash(parent); opt_err.has_value()) {
       return Err(std::move(opt_err.value()));
     }
 
@@ -211,6 +242,43 @@ struct SourceFile final {
 
   SourceFile(SourceFile &&) = default;
   SourceFile &operator=(SourceFile &&) = default;
+
+  // displays the function in a pseudo json format
+  auto display(int const depth = 0) const noexcept -> void {
+    using std::cout;
+    auto const indents = [](int const depth) -> string {
+      auto res = string(static_cast<size_t>(depth), '\t');
+      return res;
+    }(depth);
+    cout << indents << "{\n";
+    cout << indents << "type = \"";
+    switch (m.type) {
+    case IMPL:
+      cout << "IMPL";
+      break;
+    case HEADER:
+      cout << "HEADER";
+      break;
+    case SYSTEM:
+      cout << "SYSTEM";
+      break;
+    case MISC:
+      cout << "MISC";
+      break;
+    };
+    cout << "\",\n";
+
+    // path already include the ""
+    cout << indents << "path = " << m.path << ",\n";
+    cout << indents << std::hex << "hash = " << m.hash << ",\n";
+
+    cout << indents << "deps = [\n";
+    for (auto const &sf_ptr : m.deps)
+      sf_ptr->display(depth + 1);
+    cout << indents << "],\n";
+
+    cout << indents << "}\n";
+  }
 
 private:
   struct M final {
@@ -234,12 +302,13 @@ private:
     return MISC;
   }
 
-  auto analyze_deps_and_hash() noexcept -> std::optional<SourceFileErr> {
+  auto analyze_deps_and_hash(fs::path const &parent) noexcept
+      -> std::optional<SourceFileErr> {
     using Result = Result<SourceFile, SourceFileErr>;
 
     auto file = File(m.path.c_str(), File::READ);
     if (!file) {
-      return FileDoesNotExist();
+      return FileDoesNotExist(m.path, parent);
     }
     fseek(file, 0, SEEK_END);
     auto const _fsize = ftell(file);
@@ -283,13 +352,13 @@ private:
           }
 
           if (*end_of_include_string == 0) {
-            return NonTerminatedString();
+            return NonTerminatedString(m.path);
           }
 
           auto const include_string_size = end_of_include_string - ch;
           switch (include_string_size) {
           case 0: {
-            return EmptyFileName();
+            return EmptyFileName(m.path);
           } break;
           default: {
             auto const file_name =
@@ -410,6 +479,7 @@ static auto parse_compiler_table(lua_State *state) -> string {
 }
 
 static auto install_exe(lua_State *state) -> int {
+  using Result = Result<SourceFile, SourceFileErr>;
   fn_print();
 
   auto num_args = lua_gettop(state);
@@ -433,45 +503,53 @@ static auto install_exe(lua_State *state) -> int {
   ec.clear();
 
   // TODO: build dep tree
-  auto root = SourceFile::make(main_mod.root());
-  if (!root.ok()) {
-    lua_pushstring(
-        state, std::visit([](auto &&e) -> char const * { return e.error(); },
-                          root.err()));
-    // lua_pushstring(state, "Error while constructing dependency tree");
+  auto maybe_exe_root = SourceFile::make(main_mod.root());
+  switch (maybe_exe_root) {
+  case Result::OK: {
+    auto const &exe_root = maybe_exe_root.get();
+
+    exe_root.display();
+
+    // compile the objects
+    auto invoked_command =
+        std::format("{} -c {} -o {}/{}.o/{}.o", main_mod.compiler(),
+                    main_mod.root().c_str(), main_mod.install_dir(),
+                    main_mod.name(), main_mod.root().stem().c_str());
+    std::cerr << "Invoking [" << invoked_command << "]\n";
+
+    /*
+    if (system(invoked_command.c_str()) != 0) {
+      // this should be fine bc lua will intern the string(?)
+      lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
+      return lua_error(state);
+    }
+    */
+
+    // compile the program
+    invoked_command = std::format(
+        "{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(), main_mod.install_dir(),
+        main_mod.name(), main_mod.root().stem().c_str(), main_mod.install_dir(),
+        main_mod.name());
+    std::cerr << "Invoking [" << invoked_command << "]\n";
+
+    /*
+    if (system(invoked_command.c_str()) != 0) {
+      lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
+      return lua_error(state);
+    }
+    */
+
+    exit_fn_print();
+    return 0;
+  } break;
+  case Result::ERR: {
+    auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
+                                maybe_exe_root.err());
+
+    lua_pushstring(state, msg.c_str());
     return lua_error(state);
+  } break;
   }
-
-  // compile the objects
-  auto invoked_command = std::format(
-      "{} -c {} -o {}/{}.o/{}.o", main_mod.compiler(), main_mod.root().c_str(),
-      main_mod.install_dir(), main_mod.name(), main_mod.root().stem().c_str());
-  std::cerr << "Invoking [" << invoked_command << "]\n";
-
-  /*
-  if (system(invoked_command.c_str()) != 0) {
-    // this should be fine bc lua will intern the string(?)
-    lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
-    return lua_error(state);
-  }
-  */
-
-  // compile the program
-  invoked_command = std::format("{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(),
-                                main_mod.install_dir(), main_mod.name(),
-                                main_mod.root().stem().c_str(),
-                                main_mod.install_dir(), main_mod.name());
-  std::cerr << "Invoking [" << invoked_command << "]\n";
-
-  /*
-  if (system(invoked_command.c_str()) != 0) {
-    lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
-    return lua_error(state);
-  }
-  */
-
-  exit_fn_print();
-  return 0;
 }
 
 static auto install_static(lua_State *L) -> int {
