@@ -5,7 +5,7 @@
 
 template <class Success, class Error> struct Result final {
   struct Ok {
-    Ok(Success &&t) noexcept : res(std::move(t)) {}
+    constexpr Ok(Success &&t) noexcept : res(std::move(t)) {}
 
   private:
     Success res;
@@ -13,7 +13,7 @@ template <class Success, class Error> struct Result final {
   };
 
   struct Err {
-    Err(Error &&e) noexcept : e(std::move(e)) {}
+    constexpr Err(Error &&e) noexcept : e(std::move(e)) {}
 
   private:
     Error e;
@@ -35,11 +35,12 @@ template <class Success, class Error> struct Result final {
   Result(Result const &) = delete;
   Result &operator=(Result const &) = delete;
 
-  Result(Ok &&suc) noexcept : suc(std::move(suc.res)), e(nullptr) {}
-  Result(Err &&err) noexcept : suc(), e(std::make_unique<Error>(err.e)) {}
+  constexpr Result(Ok &&suc) noexcept : suc(std::move(suc.res)), e(nullptr) {}
+  constexpr Result(Err &&err) noexcept
+      : suc(), e(std::make_unique<Error>(err.e)) {}
 
-  Result(Result &&) = default;
-  Result &operator=(Result &&) = default;
+  constexpr Result(Result &&) = default;
+  constexpr Result &operator=(Result &&) = default;
 
 private:
   Success suc;
