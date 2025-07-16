@@ -474,7 +474,7 @@ private:
     // std::cout << "calling malloc with size = [" << sizeof(char) * fsize
     //             << "]\n";
     // std::cout.flush();
-    auto *fcontent = (char *)malloc(sizeof(char) * fsize);
+    auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
     if (fcontent == nullptr)
       return Err(CFileAPIError(strerror(errno)));
 
