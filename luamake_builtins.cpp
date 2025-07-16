@@ -14,7 +14,6 @@ extern "C" {
 #include <cstring>
 #include <filesystem>
 #include <format>
-#include <future>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -223,7 +222,6 @@ struct SourceFile final {
       -> Result<SourceFile, SourceFileErr> {
     using Ok = Result<SourceFile, SourceFileErr>::Ok;
     using Err = Result<SourceFile, SourceFileErr>::Err;
-    std::cerr << "calling make with path = [" << root << "]\n";
 
     auto file = File(root.c_str(), File::READ);
     if (!file)
@@ -236,13 +234,11 @@ struct SourceFile final {
       auto res = SourceFile();
       res.m.path = root;
 
-      // idk how much i like this but ig it seems to work
-      auto hash_fut = std::async(
-          std::launch::async,
-          [](size_t fsize, char const *fcontent) {
-            return fnv1a(fsize, fcontent);
-          },
-          fsize, fcontent);
+      // TODO: throw this on a separate thread
+      // there's some issues with the threads resulting in the error
+      // malloc: invalid next size (unsorted)
+      // which i can't find any info for
+      res.m.hash = fnv1a(fsize, fcontent);
 
       auto const ext = res.m.path.extension();
       res.m.type = SourceFile::determine_file_type(ext);
@@ -296,9 +292,6 @@ struct SourceFile final {
         res.m.deps.reserve(res.m.deps.size() + tmp_dep.size());
         std::move(tmp_dep.begin(), tmp_dep.end(),
                   std::back_inserter(res.m.deps));
-        // res.m.deps = std::move(opt_deps.get());
-        res.m.hash = hash_fut.get(); // need to call this before fcontent gets
-                                     // freed and becomes invalid
         free((void *)fcontent);
         return Ok(std::move(res));
       } break;
@@ -352,7 +345,7 @@ struct SourceFile final {
       sf_ptr->display(out, depth + 1);
     out << indents << "],\n";
 
-    out << indents << "}\n";
+    out << indents << "},\n";
   }
 
 private:
@@ -473,6 +466,9 @@ private:
     auto fsize = static_cast<size_t>(_fsize);
     rewind(file);
 
+    // std::cout << "calling malloc with size = [" << sizeof(char) * fsize
+    //             << "]\n";
+    // std::cout.flush();
     auto *fcontent = (char *)malloc(sizeof(char) * fsize);
     if (fcontent == nullptr)
       return Err(CFileAPIError(strerror(errno)));
@@ -592,11 +588,13 @@ static auto install_exe(lua_State *state) -> int {
     exe_root.display();
 
     // compile the objects
+    /*
     auto invoked_command =
         std::format("{} -c {} -o {}/{}.o/{}.o", main_mod.compiler(),
                     main_mod.root().c_str(), main_mod.install_dir(),
                     main_mod.name(), main_mod.root().stem().c_str());
     std::cerr << "Invoking [" << invoked_command << "]\n";
+    */
 
     /*
     if (system(invoked_command.c_str()) != 0) {
@@ -607,11 +605,13 @@ static auto install_exe(lua_State *state) -> int {
     */
 
     // compile the program
+    /*
     invoked_command = std::format(
         "{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(), main_mod.install_dir(),
         main_mod.name(), main_mod.root().stem().c_str(), main_mod.install_dir(),
         main_mod.name());
     std::cerr << "Invoking [" << invoked_command << "]\n";
+    */
 
     /*
     if (system(invoked_command.c_str()) != 0) {
