@@ -8,14 +8,15 @@ extern "C" {
 }
 
 #include <array>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <future>
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -24,7 +25,8 @@ extern "C" {
 #include <vector>
 
 namespace luamake_builtins {
-using std::array, std::string, std::string_view, std::unique_ptr, std::vector;
+using std::pair, std::array, std::string, std::string_view, std::unique_ptr,
+    std::vector;
 
 static auto parse_compiler_table(lua_State *) -> string;
 
@@ -57,15 +59,14 @@ static auto skip_ws(char const *ch) noexcept -> char const * {
 }
 
 struct File final {
-
   // idk expand this later if you want
   enum permissions : unsigned char {
     READ,
   };
 
-  File(fs::path const &path, permissions &&perms) noexcept
+  constexpr File(fs::path const &path, permissions &&perms) noexcept
       : file(fopen(path.c_str(), perms == READ ? "r" : ".")) {}
-  ~File() noexcept {
+  constexpr ~File() noexcept {
     if (file != nullptr)
       fclose(file);
   }
@@ -201,6 +202,7 @@ struct MalformedInclude final {
 
 struct CFileAPIError final {
   string message;
+  explicit CFileAPIError(string const &message) noexcept : message(message) {}
   auto error() const noexcept -> string { return message; }
 };
 
@@ -223,18 +225,91 @@ struct SourceFile final {
     using Err = Result<SourceFile, SourceFileErr>::Err;
     std::cerr << "calling make with path = [" << root << "]\n";
 
-    auto res = SourceFile();
-    auto const ext = root.extension();
+    auto file = File(root.c_str(), File::READ);
+    if (!file)
+      return Err(FileDoesNotExist(root, parent));
 
-    res.m.type = determine_file_type(ext);
+    auto maybe_fsize = SourceFile::read_and_report_fsize(file);
+    switch (maybe_fsize) {
+    case decltype(maybe_fsize)::OK: {
+      auto &&[fcontent, fsize] = maybe_fsize.get();
+      auto res = SourceFile();
+      res.m.path = root;
 
-    res.m.path = root;
+      // idk how much i like this but ig it seems to work
+      auto hash_fut = std::async(
+          std::launch::async,
+          [](size_t fsize, char const *fcontent) {
+            return fnv1a(fsize, fcontent);
+          },
+          fsize, fcontent);
 
-    if (auto opt_err = res.analyze_deps_and_hash(parent); opt_err.has_value()) {
-      return Err(std::move(opt_err.value()));
+      auto const ext = res.m.path.extension();
+      res.m.type = SourceFile::determine_file_type(ext);
+
+      if (res.m.type == HEADER) {
+        // try to open impl file
+        auto const potential_impl =
+            (res.m.path.parent_path() / res.m.path.stem()).string();
+        std::cout << "checking to see if [" << potential_impl << "] exists\n";
+        std::cout.flush();
+        if (fs::exists(fs::path(potential_impl + ".cpp"))) {
+          std::cout << "found [" << fs::path(potential_impl + ".cpp") << "]\n";
+          std::cout.flush();
+          auto maybe_impl =
+              SourceFile::make(fs::path(potential_impl + ".cpp"), res.m.path);
+          switch (maybe_impl) {
+          case decltype(maybe_impl)::OK: {
+            res.m.deps.emplace_back(
+                std::make_unique<SourceFile>(maybe_impl.get()));
+          } break;
+          case decltype(maybe_impl)::ERR:
+            free((void *)fcontent);
+            return Err(maybe_impl.err());
+          }
+        } else if (fs::exists(fs::path(potential_impl + ".c"))) {
+          std::cout << "found [" << fs::path(potential_impl + ".c") << "]\n";
+          std::cout.flush();
+          auto maybe_impl =
+              SourceFile::make(fs::path(potential_impl + ".c"), res.m.path);
+          switch (maybe_impl) {
+          case decltype(maybe_impl)::OK: {
+            res.m.deps.emplace_back(
+                std::make_unique<SourceFile>(maybe_impl.get()));
+          } break;
+          case decltype(maybe_impl)::ERR:
+            free((void *)fcontent);
+            return Err(maybe_impl.err());
+          }
+        } else {
+          // idk probably a header only library
+        }
+      }
+
+      auto opt_deps =
+          SourceFile::analyze_dep(res.m.path, parent, file, fcontent);
+      switch (opt_deps) {
+      case decltype(opt_deps)::OK: {
+        // have to move the new deps over, otherwise we'll be clobbering the
+        // impl deps
+        auto tmp_dep = std::move(opt_deps.get());
+        res.m.deps.reserve(res.m.deps.size() + tmp_dep.size());
+        std::move(tmp_dep.begin(), tmp_dep.end(),
+                  std::back_inserter(res.m.deps));
+        // res.m.deps = std::move(opt_deps.get());
+        res.m.hash = hash_fut.get(); // need to call this before fcontent gets
+                                     // freed and becomes invalid
+        free((void *)fcontent);
+        return Ok(std::move(res));
+      } break;
+      case decltype(opt_deps)::ERR:
+        free((void *)fcontent);
+        return Err(opt_deps.err());
+      }
+    } break;
+    case decltype(maybe_fsize)::ERR:
+      return Err(maybe_fsize.err());
     }
-
-    return Ok(std::move(res));
   }
 
   SourceFile(SourceFile const &) = delete;
@@ -244,40 +319,40 @@ struct SourceFile final {
   SourceFile &operator=(SourceFile &&) = default;
 
   // displays the function in a pseudo json format
-  auto display(int const depth = 0) const noexcept -> void {
-    using std::cout;
+  auto display(std::ostream &out = std::cout,
+               int const depth = 0) const noexcept -> void {
     auto const indents = [](int const depth) -> string {
       auto res = string(static_cast<size_t>(depth), '\t');
       return res;
     }(depth);
-    cout << indents << "{\n";
-    cout << indents << "type = \"";
+    out << indents << "{\n";
+    out << indents << "type = \"";
     switch (m.type) {
     case IMPL:
-      cout << "IMPL";
+      out << "IMPL";
       break;
     case HEADER:
-      cout << "HEADER";
+      out << "HEADER";
       break;
     case SYSTEM:
-      cout << "SYSTEM";
+      out << "SYSTEM";
       break;
     case MISC:
-      cout << "MISC";
+      out << "MISC";
       break;
     };
-    cout << "\",\n";
+    out << "\",\n";
 
     // path already include the ""
-    cout << indents << "path = " << m.path << ",\n";
-    cout << indents << std::hex << "hash = " << m.hash << ",\n";
+    out << indents << "path = " << m.path << ",\n";
+    out << indents << std::hex << "hash = " << m.hash << ",\n";
 
-    cout << indents << "deps = [\n";
+    out << indents << "deps = [\n";
     for (auto const &sf_ptr : m.deps)
-      sf_ptr->display(depth + 1);
-    cout << indents << "],\n";
+      sf_ptr->display(out, depth + 1);
+    out << indents << "],\n";
 
-    cout << indents << "}\n";
+    out << indents << "}\n";
   }
 
 private:
@@ -302,39 +377,21 @@ private:
     return MISC;
   }
 
-  auto analyze_deps_and_hash(fs::path const &parent) noexcept
-      -> std::optional<SourceFileErr> {
-    using Result = Result<SourceFile, SourceFileErr>;
+  static auto analyze_dep(fs::path const &path, fs::path const &parent,
+                          FILE *file, char const *fcontent) noexcept
+      -> Result<decltype(SourceFile::M::deps), SourceFileErr> {
+    using Ok = Result<decltype(SourceFile::M::deps), SourceFileErr>::Ok;
+    using Err = Result<decltype(SourceFile::M::deps), SourceFileErr>::Err;
+    std::cout.flush();
 
-    auto file = File(m.path.c_str(), File::READ);
-    if (!file) {
-      return FileDoesNotExist(m.path, parent);
-    }
-    fseek(file, 0, SEEK_END);
-    auto const _fsize = ftell(file);
-    if (_fsize == -1) {
-      return CFileAPIError(string(strerror(errno)));
-    }
-    auto const fsize = static_cast<size_t>(_fsize);
-    rewind(file);
-
-    // TODO: remove the null terminator b/c it's only needed for debugging
-    auto const fcontent = std::make_unique<char[]>(fsize + 1);
-    // TODO: check that we actually read the whole file
-    auto const amount_read = fread(fcontent.get(), sizeof(char), fsize, file);
-    if (amount_read != fsize) {
-      return CFileAPIError(string(strerror(errno)));
-    }
-    fcontent[fsize] = 0;
-
-    m.hash = fnv1a(fsize, fcontent.get());
+    auto res = vector<unique_ptr<SourceFile>>();
 
     auto constexpr include_prefix = string_view{"#include"};
     auto const potential_include_dirs = get_include_paths();
 
     auto in_string = false;
 
-    for (auto const *ch = fcontent.get(); *ch != 0; ++ch) {
+    for (auto const *ch = fcontent; *ch != 0; ++ch) {
       auto const is_hash = *ch == '#';
       in_string = *ch == '"';
       if (is_hash && !in_string &&
@@ -352,45 +409,43 @@ private:
           }
 
           if (*end_of_include_string == 0) {
-            return NonTerminatedString(m.path);
+            return Err(NonTerminatedString(path));
           }
 
           auto const include_string_size = end_of_include_string - ch;
           switch (include_string_size) {
           case 0: {
-            return EmptyFileName(m.path);
+            return Err(EmptyFileName(path));
           } break;
           default: {
-            auto const file_name =
+            auto const include_file =
                 fs::path(string_view{ch, end_of_include_string});
-            if (file_name.stem() == m.path.stem()) {
-              auto const file_name_ext =
-                  determine_file_type(file_name.extension());
-              if (file_name_ext == HEADER) {
+            if (include_file.stem() == path.stem()) {
+              auto const include_f_ext =
+                  determine_file_type(include_file.extension());
+              auto const path_ext = determine_file_type(path.extension());
+              if (include_f_ext == HEADER && path_ext == IMPL) {
+                continue;
+                // ignore this path
               }
             }
-            auto const path = m.path.parent_path() / file_name;
+            auto const dep_path = path.parent_path() / include_file;
 
-            std::cout << "file_name = [" << file_name << "]\n";
-            std::cout.flush();
-            std::cout << "path = [" << path << "]\n";
-            std::cout.flush();
-
-            auto sf = SourceFile::make(path);
+            auto sf = SourceFile::make(dep_path, path);
             switch (sf) {
-            case Result::OK: {
-              m.deps.emplace_back(std::make_unique<SourceFile>(sf.get()));
+            case decltype(sf)::OK: {
+              res.emplace_back(std::make_unique<SourceFile>(sf.get()));
             } break;
-            case Result::ERR: {
-              return sf.err();
+            case decltype(sf)::ERR: {
+              return Err(sf.err());
             } break;
             }
           } break;
           }
         } break;
         case '<': {
-          std::cout << "found global [" << ch << "]\n";
-          std::cout.flush();
+          // std::cout << "found global [" << ch << "]\n";
+          // std::cout.flush();
           // TODO: global/module include
         } break;
         default: {
@@ -401,10 +456,36 @@ private:
         }
       }
     }
-    return std::nullopt;
+    return Ok(std::move(res));
+  }
+
+  static auto read_and_report_fsize(FILE *file) noexcept
+      -> Result<pair<char const *, size_t>, SourceFileErr> {
+    using Ok = Result<pair<char const *, size_t>, SourceFileErr>::Ok;
+    using Err = Result<pair<char const *, size_t>, SourceFileErr>::Err;
+    if (fseek(file, 0, SEEK_END) == -1)
+      return Err(CFileAPIError(strerror(errno)));
+
+    auto const _fsize = ftell(file);
+    if (_fsize == -1)
+      return Err(CFileAPIError(strerror(errno)));
+
+    auto fsize = static_cast<size_t>(_fsize);
+    rewind(file);
+
+    auto *fcontent = (char *)malloc(sizeof(char) * fsize);
+    if (fcontent == nullptr)
+      return Err(CFileAPIError(strerror(errno)));
+
+    if (auto const amount_read = fread(fcontent, sizeof(char), fsize, file);
+        amount_read != fsize)
+      return Err(CFileAPIError(strerror(errno)));
+    fcontent[fsize] = 0;
+    return Ok(std::make_pair(fcontent, fsize));
   }
 
   SourceFile() = default;
+  SourceFile(SourceFile::M &&m) noexcept : m(std::move(m)) {}
   friend Result<SourceFile, SourceFileErr>;
 };
 
