@@ -2,6 +2,7 @@
 
 #include "common.hpp"
 #include "luamake_error.hpp"
+#include <fstream>
 
 extern "C" {
 #include "lua/lua.h"
@@ -319,7 +320,7 @@ struct SourceFile final {
       return res;
     }(depth);
     out << indents << "{\n";
-    out << indents << "type = \"";
+    out << indents << "\"type\":\"";
     switch (m.type) {
     case IMPL:
       out << "IMPL";
@@ -337,15 +338,19 @@ struct SourceFile final {
     out << "\",\n";
 
     // path already include the ""
-    out << indents << "path = " << m.path << ",\n";
-    out << indents << std::hex << "hash = " << m.hash << ",\n";
+    out << indents << "\"path\":" << m.path << ",\n";
+    out << indents << "\"hash\":" << m.hash << ",\n";
 
-    out << indents << "deps = [\n";
-    for (auto const &sf_ptr : m.deps)
+    out << indents << "\"deps\":[\n";
+    for (int i = 0; auto const &sf_ptr : m.deps) {
       sf_ptr->display(out, depth + 1);
-    out << indents << "],\n";
+      if (i != m.deps.size() - 1)
+        out << ",\n";
+      ++i;
+    }
+    out << indents << "]\n";
 
-    out << indents << "},\n";
+    out << indents << "}\n";
   }
 
 private:
@@ -585,7 +590,8 @@ static auto install_exe(lua_State *state) -> int {
   case Result::OK: {
     auto const &exe_root = maybe_exe_root.get();
 
-    exe_root.display();
+    auto cache_file = std::ofstream("./.cache.json");
+    exe_root.display(cache_file);
 
     // compile the objects
     /*
