@@ -2,7 +2,6 @@
 
 #include "common.hpp"
 #include "luamake_error.hpp"
-#include <fstream>
 
 extern "C" {
 #include "lua/lua.h"
@@ -13,8 +12,10 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <endian.h>
 #include <filesystem>
 #include <format>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -59,13 +60,27 @@ static auto skip_ws(char const *ch) noexcept -> char const * {
 }
 
 struct File final {
-  // idk expand this later if you want
   enum permissions : unsigned char {
-    READ,
+    READ = 1 << 0,
+    WRITE = 1 << 1,
+    BINARY = 1 << 2,
   };
 
   constexpr File(fs::path const &path, permissions &&perms) noexcept
-      : file(fopen(path.c_str(), perms == READ ? "r" : ".")) {}
+      : file(nullptr) {
+    char max_length_perms[] = {0, 0, 0,
+                               0}; // this should be 5 or 7 from man fread
+    if ((perms & READ) == READ)
+      max_length_perms[0] = 'r';
+    if ((perms & WRITE) == WRITE)
+      max_length_perms[max_length_perms[0] != 0 ? 1 : 0] = 'w';
+    if ((perms & BINARY) == BINARY)
+      max_length_perms[max_length_perms[0] != 0
+                           ? max_length_perms[1] != 0 ? 2 : 1
+                           : 0] = 'b';
+
+    file = fopen(path.c_str(), max_length_perms);
+  }
   constexpr ~File() noexcept {
     if (file != nullptr)
       fclose(file);
@@ -74,9 +89,23 @@ struct File final {
   // implicit conversion operator to FILE*
   operator FILE *() const noexcept { return file; }
 
+  auto write(void const *__restrict ptr, size_t size, size_t amount) noexcept
+      -> size_t {
+    return fwrite(ptr, size, amount, file);
+  }
+
+  auto flush() noexcept -> void { fflush(file); }
+
 private:
   FILE *file;
 };
+
+auto constexpr operator|(File::permissions lhs, File::permissions rhs) noexcept
+    -> File::permissions {
+  return static_cast<File::permissions>(
+      static_cast<std::underlying_type_t<File::permissions>>(lhs) |
+      static_cast<std::underlying_type_t<File::permissions>>(rhs));
+}
 
 // algorithm
 // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function#FNV-1a_hash
@@ -224,7 +253,7 @@ struct SourceFile final {
     using Ok = Result<SourceFile, SourceFileErr>::Ok;
     using Err = Result<SourceFile, SourceFileErr>::Err;
 
-    auto file = File(root.c_str(), File::READ);
+    auto file = File(root, File::READ);
     if (!file)
       return Err(FileDoesNotExist(root, parent));
 
@@ -235,11 +264,12 @@ struct SourceFile final {
       auto res = SourceFile();
       res.m.path = root;
 
-      // TODO: throw this on a separate thread
-      // there's some issues with the threads resulting in the error
-      // malloc: invalid next size (unsorted)
-      // which i can't find any info for
-      res.m.hash = fnv1a(fsize, fcontent);
+      auto hash_fut = std::async(
+          std::launch::async,
+          [](size_t size, char const *fcontent) {
+            return fnv1a(size, fcontent);
+          },
+          fsize, fcontent);
 
       auto const ext = res.m.path.extension();
       res.m.type = SourceFile::determine_file_type(ext);
@@ -293,6 +323,11 @@ struct SourceFile final {
         res.m.deps.reserve(res.m.deps.size() + tmp_dep.size());
         std::move(tmp_dep.begin(), tmp_dep.end(),
                   std::back_inserter(res.m.deps));
+
+        // make sure the hashing is finished
+        res.m.hash = hash_fut.get();
+
+        // clean up and return
         free((void *)fcontent);
         return Ok(std::move(res));
       } break;
@@ -313,8 +348,7 @@ struct SourceFile final {
   SourceFile &operator=(SourceFile &&) = default;
 
   // displays the function in a pseudo json format
-  auto display(std::ostream &out = std::cout,
-               int const depth = 0) const noexcept -> void {
+  auto display(std::ostream &out, int const depth = 0) const noexcept -> void {
     auto const indents = [](int const depth) -> string {
       auto res = string(static_cast<size_t>(depth), '\t');
       return res;
@@ -339,7 +373,7 @@ struct SourceFile final {
 
     // path already include the ""
     out << indents << "\"path\":" << m.path << ",\n";
-    out << indents << "\"hash\":" << m.hash << ",\n";
+    out << std::hex << indents << "\"hash\":" << m.hash << ",\n";
 
     out << indents << "\"deps\":[\n";
     for (int i = 0; auto const &sf_ptr : m.deps) {
@@ -351,6 +385,29 @@ struct SourceFile final {
     out << indents << "]\n";
 
     out << indents << "}\n";
+  }
+
+  // TODO: add better error handling
+  auto serialize(fs::path const &path) const noexcept -> void {
+    auto outfile = File(path, File::WRITE | File::BINARY);
+    if (outfile == nullptr) {
+      return;
+    }
+
+    auto amount_written = outfile.write(&m.type, sizeof(decltype(M::type)), 1);
+
+    auto bytes = htobe64(m.hash);
+    amount_written += outfile.write(&bytes, sizeof(decltype(M::hash)), 1);
+
+    // i hope this doesn't alloc that'd be annoying
+    auto const path_len = m.path.string().size();
+    amount_written += outfile.write(&path_len, sizeof(decltype(path_len)), 1);
+    amount_written += outfile.write(m.path.c_str(), sizeof(char), path_len);
+
+    // TODO: write out the deps
+    // outfile.write(&(m.deps.size()), sizeof(decltype(M::deps.size())), 1);
+    expr_dbg(amount_written);
+    outfile.flush();
   }
 
 private:
@@ -590,8 +647,9 @@ static auto install_exe(lua_State *state) -> int {
   case Result::OK: {
     auto const &exe_root = maybe_exe_root.get();
 
-    auto cache_file = std::ofstream("./.cache.json");
-    exe_root.display(cache_file);
+    // auto cache_file = std::ofstream("./.cache.json");
+    exe_root.display(std::cout);
+    exe_root.serialize(".test.bin");
 
     // compile the objects
     /*
