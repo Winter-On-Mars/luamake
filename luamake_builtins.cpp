@@ -17,17 +17,16 @@ extern "C" {
 #include <format>
 #include <future>
 #include <iostream>
-#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace luamake_builtins {
-using std::pair, std::array, std::string, std::string_view, std::unique_ptr,
-    std::vector;
+using std::pair, std::array, std::string, std::string_view, std::vector;
 
 static auto parse_compiler_table(lua_State *) -> string;
 
@@ -287,8 +286,7 @@ struct SourceFile final {
               SourceFile::make(fs::path(potential_impl + ".cpp"), res.m.path);
           switch (maybe_impl) {
           case decltype(maybe_impl)::OK: {
-            res.m.deps.emplace_back(
-                std::make_unique<SourceFile>(maybe_impl.get()));
+            res.m.deps.emplace_back(new SourceFile(maybe_impl.get()));
           } break;
           case decltype(maybe_impl)::ERR:
             free((void *)fcontent);
@@ -301,8 +299,7 @@ struct SourceFile final {
               SourceFile::make(fs::path(potential_impl + ".c"), res.m.path);
           switch (maybe_impl) {
           case decltype(maybe_impl)::OK: {
-            res.m.deps.emplace_back(
-                std::make_unique<SourceFile>(maybe_impl.get()));
+            res.m.deps.emplace_back(new SourceFile(maybe_impl.get()));
           } break;
           case decltype(maybe_impl)::ERR:
             free((void *)fcontent);
@@ -325,6 +322,7 @@ struct SourceFile final {
                   std::back_inserter(res.m.deps));
 
         // make sure the hashing is finished
+        hash_fut.wait();
         res.m.hash = hash_fut.get();
 
         // clean up and return
@@ -346,6 +344,12 @@ struct SourceFile final {
 
   SourceFile(SourceFile &&) = default;
   SourceFile &operator=(SourceFile &&) = default;
+
+  ~SourceFile() noexcept {
+    for (auto *sf : m.deps) {
+      delete sf;
+    }
+  }
 
   // displays the function in a pseudo json format
   auto display(std::ostream &out, int const depth = 0) const noexcept -> void {
@@ -410,11 +414,15 @@ struct SourceFile final {
     outfile.flush();
   }
 
+  auto path() const noexcept -> fs::path { return m.path; }
+  auto deps() const noexcept -> vector<SourceFile *> { return m.deps; }
+  auto type() const noexcept -> SourceFile_t { return m.type; }
+
 private:
   struct M final {
     SourceFile_t type;
     fs::path path;
-    vector<unique_ptr<SourceFile>> deps;
+    vector<SourceFile *> deps;
     size_t hash;
     // TODO:
     // std::thread hashing_thread;
@@ -439,7 +447,7 @@ private:
     using Err = Result<decltype(SourceFile::M::deps), SourceFileErr>::Err;
     std::cout.flush();
 
-    auto res = vector<unique_ptr<SourceFile>>();
+    auto res = vector<SourceFile *>();
 
     auto constexpr include_prefix = string_view{"#include"};
     auto const potential_include_dirs = get_include_paths();
@@ -489,7 +497,8 @@ private:
             auto sf = SourceFile::make(dep_path, path);
             switch (sf) {
             case decltype(sf)::OK: {
-              res.emplace_back(std::make_unique<SourceFile>(sf.get()));
+              auto *_sf = new SourceFile(sf.get());
+              res.emplace_back(_sf);
             } break;
             case decltype(sf)::ERR: {
               return Err(sf.err());
@@ -546,6 +555,24 @@ private:
   SourceFile(SourceFile::M &&m) noexcept : m(std::move(m)) {}
   friend Result<SourceFile, SourceFileErr>;
 };
+
+static auto compile(Module mod, SourceFile const *sf) noexcept -> void {
+  auto path = sf->path();
+  if (sf->type() == SourceFile::IMPL) {
+    auto invoked_command =
+        std::format("{} -c {} -o {}/{}.o/{}.o", mod.compiler(), path.c_str(),
+                    mod.install_dir(), mod.name(), path.stem().c_str());
+    std::cout << "Invoking [" << invoked_command << "]\n";
+    std::cout.flush();
+  }
+  // figure out a way to read the number of threads available, then set the
+  // pool's max size at that
+  auto fut_pool = vector<std::jthread>();
+  fut_pool.reserve(8);
+  for (auto const &dep : sf->deps()) {
+    fut_pool.emplace_back(std::jthread(compile, mod, dep));
+  }
+}
 
 auto clang(lua_State *state) -> int {
   fn_print();
@@ -645,42 +672,35 @@ static auto install_exe(lua_State *state) -> int {
   auto maybe_exe_root = SourceFile::make(main_mod.root());
   switch (maybe_exe_root) {
   case Result::OK: {
-    auto const &exe_root = maybe_exe_root.get();
+    auto exe_root = maybe_exe_root.get();
 
     // auto cache_file = std::ofstream("./.cache.json");
     exe_root.display(std::cout);
     exe_root.serialize(".test.bin");
 
     // compile the objects
-    /*
-    auto invoked_command =
-        std::format("{} -c {} -o {}/{}.o/{}.o", main_mod.compiler(),
-                    main_mod.root().c_str(), main_mod.install_dir(),
-                    main_mod.name(), main_mod.root().stem().c_str());
-    std::cerr << "Invoking [" << invoked_command << "]\n";
-    */
+    auto root_async_call = std::async(
+        [](Module mod, SourceFile const *sf) { return compile(mod, sf); },
+        main_mod, &exe_root);
+    root_async_call.wait();
 
-    /*
-    if (system(invoked_command.c_str()) != 0) {
-      // this should be fine bc lua will intern the string(?)
-      lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
-      return lua_error(state);
-    }
-    */
+    auto invoked_command = std::format("");
+    std::cerr << "invoking [" << invoked_command << "]\n";
 
     // compile the program
     /*
     invoked_command = std::format(
-        "{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(), main_mod.install_dir(),
-        main_mod.name(), main_mod.root().stem().c_str(), main_mod.install_dir(),
+        "{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(),
+    main_mod.install_dir(), main_mod.name(),
+    main_mod.root().stem().c_str(), main_mod.install_dir(),
         main_mod.name());
     std::cerr << "Invoking [" << invoked_command << "]\n";
     */
 
     /*
     if (system(invoked_command.c_str()) != 0) {
-      lua_pushfstring(state, "Error invoking [%s]\n", invoked_command.c_str());
-      return lua_error(state);
+      lua_pushfstring(state, "Error invoking [%s]\n",
+    invoked_command.c_str()); return lua_error(state);
     }
     */
 
