@@ -12,7 +12,7 @@ all: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
 dbg: cc_flags+=-g
-dbg: $(files)
+dbg: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
 ncolor: cc_flags+=-DNO_TERM_COLOR
