@@ -448,6 +448,7 @@ private:
     std::cout.flush();
 
     auto res = vector<SourceFile *>();
+    res.reserve(4);
 
     auto constexpr include_prefix = string_view{"#include"};
     auto const potential_include_dirs = get_include_paths();
@@ -556,22 +557,56 @@ private:
   friend Result<SourceFile, SourceFileErr>;
 };
 
-static auto compile(Module mod, SourceFile const *sf) noexcept -> void {
-  auto path = sf->path();
+// TODO: there's an error, because we're skipping over header files
+// but we're still making a fut_res for those, so calling fut_res.wait()
+// or fut_res.get() [which calling fut_res.wait()] results in an error
+// being thrown, so basically rewrite this function to make that not happen :)
+static auto compile(Module const &mod, SourceFile const *sf) noexcept -> void {
+  std::cerr << "in thread [" << std::hex << std::this_thread::get_id()
+            << "], path = [" << sf->path() << "]\n";
+  auto const path = sf->path();
+  auto fut_res = std::future<int>();
+  auto const invoked_command =
+      std::format("{} -c {} -o {}/{}.o/{}.o", mod.compiler(), path.c_str(),
+                  mod.install_dir(), mod.name(), path.stem().c_str());
   if (sf->type() == SourceFile::IMPL) {
-    auto invoked_command =
-        std::format("{} -c {} -o {}/{}.o/{}.o", mod.compiler(), path.c_str(),
-                    mod.install_dir(), mod.name(), path.stem().c_str());
-    std::cout << "Invoking [" << invoked_command << "]\n";
-    std::cout.flush();
+    fut_res = std::async(
+        std::launch::async,
+        [](string_view command) {
+          std::cerr << "Calling [" << command << "] on thread ["
+                    << std::this_thread::get_id() << "]\n";
+          return system(command.data());
+        },
+        invoked_command);
   }
   // figure out a way to read the number of threads available, then set the
   // pool's max size at that
-  auto fut_pool = vector<std::jthread>();
+  auto fut_pool = vector<std::future<void>>();
   fut_pool.reserve(8);
   for (auto const &dep : sf->deps()) {
-    fut_pool.emplace_back(std::jthread(compile, mod, dep));
+    fut_pool.emplace_back(std::async(std::launch::async, compile, mod, dep));
   }
+
+  for (auto const &fut : fut_pool) {
+    try {
+      fut.wait();
+    } catch (...) {
+      std::cerr << "Here on thread [" << std::this_thread::get_id()
+                << "] waiting for fut from fut_pool\n";
+    }
+  }
+
+  try {
+    fut_res.wait();
+  } catch (...) {
+    std::cerr << "Here on thread [" << std::this_thread::get_id()
+              << "], waiting for fut_res\n";
+  }
+  /*
+  if (fut_res.get() != 0) {
+    std::cerr << "error invoking [" << invoked_command << "]\n";
+  }
+  */
 }
 
 auto clang(lua_State *state) -> int {
@@ -679,13 +714,7 @@ static auto install_exe(lua_State *state) -> int {
     exe_root.serialize(".test.bin");
 
     // compile the objects
-    auto root_async_call = std::async(
-        [](Module mod, SourceFile const *sf) { return compile(mod, sf); },
-        main_mod, &exe_root);
-    root_async_call.wait();
-
-    auto invoked_command = std::format("");
-    std::cerr << "invoking [" << invoked_command << "]\n";
+    compile(main_mod, &exe_root);
 
     // compile the program
     /*
