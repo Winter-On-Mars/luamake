@@ -28,16 +28,17 @@ extern "C" {
 namespace luamake_builtins {
 using std::pair, std::array, std::string, std::string_view, std::vector;
 
-static auto parse_compiler_table(lua_State *) -> string;
+namespace {
+auto parse_compiler_table(lua_State *) -> string;
 
 // TODO: fill this out
 // read user luamake.lua to find module dependency
-static auto get_include_paths() noexcept -> vector<fs::path> {
+auto get_include_paths() noexcept -> vector<fs::path> {
   return vector<fs::path>{".", "/usr/include"};
 }
 
 // TODO: make this return a bool to check if we hit 0
-static auto skip_ws(char const *ch) noexcept -> char const * {
+auto skip_ws(char const *ch) noexcept -> char const * {
   auto const *local = ch;
   while (*local != 0) {
     switch (*local) {
@@ -67,8 +68,7 @@ auto constexpr operator|(File::permissions lhs, File::permissions rhs) noexcept
 
 // algorithm
 // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function#FNV-1a_hash
-static auto constexpr fnv1a(size_t size, char const *buffer) noexcept
-    -> size_t {
+auto constexpr fnv1a(size_t size, char const *buffer) noexcept -> size_t {
   auto [hash, fnv1a_prime] = []() -> std::pair<size_t, size_t> {
     if constexpr (sizeof(size_t) == 4) {
       return std::make_pair(0x01000193, 0x811c9dc5);
@@ -361,6 +361,20 @@ struct SourceFile final {
     outfile.flush();
   }
 
+  // TODO: we're just assuming that the path is well constructed
+  // so add some error handling to this function
+  [[nodiscard(
+      "We spent all this time deserializing you better use the result")]]
+  static auto deserialize(fs::path const &path) noexcept -> SourceFile {
+    auto sf = SourceFile();
+    auto file = File(path, File::READ | File::BINARY);
+    if (file == nullptr) {
+      std::cerr << "unable to open serialization file [" << path << "]\n";
+      std::terminate();
+    }
+    return sf;
+  }
+
   auto path() const noexcept -> fs::path { return m.path; }
   auto deps() const noexcept -> vector<SourceFile *> { return m.deps; }
   auto type() const noexcept -> SourceFile_t { return m.type; }
@@ -524,7 +538,7 @@ private:
   friend Result<SourceFile, SourceFileErr>;
 };
 
-static auto compile(Module const &mod, SourceFile const *sf) noexcept -> void {
+auto compile(Module const &mod, SourceFile const *sf) noexcept -> void {
   std::cerr << "in thread [" << std::hex << std::this_thread::get_id()
             << "], path = [" << sf->path() << "]\n";
   auto const path = sf->path();
@@ -567,6 +581,130 @@ static auto compile(Module const &mod, SourceFile const *sf) noexcept -> void {
   }
 }
 
+auto parse_compiler_table(lua_State *state) -> string {
+  auto str = string();
+
+  lua_getfield(state, -1, "compiler");
+  str += lua_tolstring(state, -1, nullptr);
+
+  lua_getfield(state, -2, "optimize");
+  str += " -";
+  str += lua_tolstring(state, -1, nullptr);
+
+  lua_getfield(state, -3, "warnings");
+  auto tbl_idx = -1;
+  auto num_warnings = lua_rawlen(state, tbl_idx);
+  for (auto i = lua_Unsigned{1}; i <= num_warnings; ++i) {
+    switch (lua_geti(state, tbl_idx, static_cast<lua_Integer>(i))) {
+    case LUA_TSTRING:
+      str += " -";
+      str += lua_tolstring(state, -1, nullptr);
+      break;
+    default: // TODO: propogate error up
+      lua_pushstring(state, "Incorrect type in `warnings` table");
+      lua_error(state);
+      return str;
+    }
+    --tbl_idx;
+  }
+  lua_pop(state, 3 + static_cast<int>(num_warnings));
+  return str;
+}
+
+auto install_exe(lua_State *state) -> int {
+  using Result = Result<SourceFile, SourceFileErr>;
+  fn_print();
+
+  auto num_args = lua_gettop(state);
+  if (num_args != 1) {
+    lua_pushstring(state, "Too many arguments.");
+    return lua_error(state);
+  }
+
+  auto main_mod = Module::make(Module::EXE, state);
+
+  auto ec = std::error_code{};
+  if (fs::create_directories(
+          fs::path(
+              std::format("{}/{}.o", main_mod.install_dir(), main_mod.name())),
+          ec);
+      ec) {
+    std::cerr << ec.message() << '\n';
+    lua_pushstring(state, "Unable to create directory");
+    return lua_error(state);
+  }
+  ec.clear();
+
+  // TODO: build dep tree
+  auto maybe_exe_root = SourceFile::make(main_mod.root());
+  switch (maybe_exe_root) {
+  case Result::OK: {
+    auto exe_root = maybe_exe_root.get();
+
+    // auto cache_file = std::ofstream("./.cache.json");
+    exe_root.display(std::cout);
+
+    auto const cache_file = fs::path("test.bin");
+    exe_root.serialize(cache_file);
+
+    // compile the objects
+    compile(main_mod, &exe_root);
+
+    // TODO: compile the program
+    /*
+    invoked_command = std::format(
+        "{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(),
+    main_mod.install_dir(), main_mod.name(),
+    main_mod.root().stem().c_str(), main_mod.install_dir(),
+        main_mod.name());
+    std::cerr << "Invoking [" << invoked_command << "]\n";
+    */
+
+    /*
+    if (system(invoked_command.c_str()) != 0) {
+      lua_pushfstring(state, "Error invoking [%s]\n",
+    invoked_command.c_str()); return lua_error(state);
+    }
+    */
+
+    auto serialized_root = SourceFile::deserialize(cache_file);
+    serialized_root.display(std::cout);
+
+    exit_fn_print();
+    return 0;
+  } break;
+  case Result::ERR: {
+    auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
+                                maybe_exe_root.err());
+
+    lua_pushstring(state, msg.c_str());
+    return lua_error(state);
+  } break;
+  }
+}
+
+auto install_static(lua_State *L) -> int {
+  fn_print();
+
+  auto num_args = lua_gettop(L);
+  if (num_args != 1) {
+    lua_pushstring(L, "Too many arguments");
+    return lua_error(L);
+  }
+
+  lua_getfield(L, -1, "name");
+  auto const name = string(lua_tolstring(L, -1, nullptr));
+
+  lua_getfield(L, -2, "invoke_command");
+  auto const install_command = string(lua_tolstring(L, -1, nullptr));
+
+  expr_dbg(install_command);
+
+  exit_fn_print();
+  return 0;
+}
+} // namespace
+
 auto clang(lua_State *state) -> int {
   fn_print();
 
@@ -605,136 +743,6 @@ auto clang(lua_State *state) -> int {
   exit_fn_print();
 
   return 1;
-}
-
-static auto parse_compiler_table(lua_State *state) -> string {
-  auto str = string();
-
-  lua_getfield(state, -1, "compiler");
-  str += lua_tolstring(state, -1, nullptr);
-
-  lua_getfield(state, -2, "optimize");
-  str += " -";
-  str += lua_tolstring(state, -1, nullptr);
-
-  lua_getfield(state, -3, "warnings");
-  auto tbl_idx = -1;
-  auto num_warnings = lua_rawlen(state, tbl_idx);
-  for (auto i = lua_Unsigned{1}; i <= num_warnings; ++i) {
-    switch (lua_geti(state, tbl_idx, static_cast<lua_Integer>(i))) {
-    case LUA_TSTRING:
-      str += " -";
-      str += lua_tolstring(state, -1, nullptr);
-      break;
-    default: // TODO: propogate error up
-      lua_pushstring(state, "Incorrect type in `warnings` table");
-      lua_error(state);
-      return str;
-    }
-    --tbl_idx;
-  }
-  lua_pop(state, 3 + static_cast<int>(num_warnings));
-  return str;
-}
-
-static auto install_exe(lua_State *state) -> int {
-  using Result = Result<SourceFile, SourceFileErr>;
-  fn_print();
-
-  auto num_args = lua_gettop(state);
-  if (num_args != 1) {
-    lua_pushstring(state, "Too many arguments.");
-    return lua_error(state);
-  }
-
-  auto main_mod = Module::make(Module::EXE, state);
-
-  auto ec = std::error_code{};
-  if (fs::create_directories(
-          fs::path(
-              std::format("{}/{}.o", main_mod.install_dir(), main_mod.name())),
-          ec);
-      ec) {
-    std::cerr << ec.message() << '\n';
-    lua_pushstring(state, "Unable to create directory");
-    return lua_error(state);
-  }
-  ec.clear();
-
-  // TODO: build dep tree
-  auto maybe_exe_root = SourceFile::make(main_mod.root());
-  switch (maybe_exe_root) {
-  case Result::OK: {
-    auto exe_root = maybe_exe_root.get();
-
-    // auto cache_file = std::ofstream("./.cache.json");
-    exe_root.display(std::cout);
-
-    auto const cache_file = fs::path("test.bin");
-    exe_root.serialize(cache_file);
-
-    auto test = File(cache_file, File::READ | File::BINARY);
-    auto const fsize = fs::file_size(cache_file);
-    std::cout << "fsize = [" << fsize << "]\n";
-    std::cout << "fcontent = [\n";
-    for (auto ch = fgetc(test); ch != EOF; ch = fgetc(test)) {
-      std::cout << ch << ", ";
-    }
-    std::cout << "\n]\n";
-    std::cout.flush();
-
-    // compile the objects
-    compile(main_mod, &exe_root);
-
-    // compile the program
-    /*
-    invoked_command = std::format(
-        "{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(),
-    main_mod.install_dir(), main_mod.name(),
-    main_mod.root().stem().c_str(), main_mod.install_dir(),
-        main_mod.name());
-    std::cerr << "Invoking [" << invoked_command << "]\n";
-    */
-
-    /*
-    if (system(invoked_command.c_str()) != 0) {
-      lua_pushfstring(state, "Error invoking [%s]\n",
-    invoked_command.c_str()); return lua_error(state);
-    }
-    */
-
-    exit_fn_print();
-    return 0;
-  } break;
-  case Result::ERR: {
-    auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
-                                maybe_exe_root.err());
-
-    lua_pushstring(state, msg.c_str());
-    return lua_error(state);
-  } break;
-  }
-}
-
-static auto install_static(lua_State *L) -> int {
-  fn_print();
-
-  auto num_args = lua_gettop(L);
-  if (num_args != 1) {
-    lua_pushstring(L, "Too many arguments");
-    return lua_error(L);
-  }
-
-  lua_getfield(L, -1, "name");
-  auto const name = string(lua_tolstring(L, -1, nullptr));
-
-  lua_getfield(L, -2, "invoke_command");
-  auto const install_command = string(lua_tolstring(L, -1, nullptr));
-
-  expr_dbg(install_command);
-
-  exit_fn_print();
-  return 0;
 }
 
 auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
