@@ -1,7 +1,12 @@
 #ifndef __LUAMAKE_COMMON_HPP
 #define __LUAMAKE_COMMON_HPP
 
+#include <cstdio>
 #include <filesystem>
+
+#ifdef DEBUG
+#include <iostream>
+#endif
 
 #if defined(_WIN32)
 #define NL "\r\n"
@@ -91,6 +96,11 @@ struct File final {
   auto write(void const *__restrict ptr, size_t size, size_t amount) noexcept
       -> size_t {
     return fwrite(ptr, size, amount, file);
+  }
+
+  /// @return returns the amount read from the file stream
+  auto read(void *__restrict dest, size_t size, size_t n) noexcept -> size_t {
+    return fread(dest, size, n, file);
   }
 
   auto write_num(int c) noexcept -> int { return fputc(c, file); }
