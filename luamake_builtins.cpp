@@ -78,6 +78,8 @@ struct File final {
                            ? max_length_perms[1] != 0 ? 2 : 1
                            : 0] = 'b';
 
+    std::cerr << "Opening [" << path << "] with options [" << max_length_perms
+              << "]\n";
     file = fopen(path.c_str(), max_length_perms);
   }
   constexpr ~File() noexcept {
@@ -92,6 +94,8 @@ struct File final {
       -> size_t {
     return fwrite(ptr, size, amount, file);
   }
+
+  auto write_num(int c) noexcept -> int { return fputc(c, file); }
 
   auto flush() noexcept -> void { fflush(file); }
 
@@ -239,7 +243,7 @@ using SourceFileErr =
                  MalformedInclude, CFileAPIError>;
 
 struct SourceFile final {
-  enum SourceFile_t {
+  enum SourceFile_t : unsigned char {
     IMPL,
     HEADER,
     SYSTEM,
@@ -398,19 +402,7 @@ struct SourceFile final {
       return;
     }
 
-    auto amount_written = outfile.write(&m.type, sizeof(decltype(M::type)), 1);
-
-    auto bytes = htobe64(m.hash);
-    amount_written += outfile.write(&bytes, sizeof(decltype(M::hash)), 1);
-
-    // i hope this doesn't alloc that'd be annoying
-    auto const path_len = m.path.string().size();
-    amount_written += outfile.write(&path_len, sizeof(decltype(path_len)), 1);
-    amount_written += outfile.write(m.path.c_str(), sizeof(char), path_len);
-
-    // TODO: write out the deps
-    // outfile.write(&(m.deps.size()), sizeof(decltype(M::deps.size())), 1);
-    expr_dbg(amount_written);
+    serialize_impl(outfile);
     outfile.flush();
   }
 
@@ -429,6 +421,7 @@ private:
     // std::thread dep_analyzer_thread;
   } m;
 
+  [[nodiscard]]
   static auto determine_file_type(fs::path const &ext) noexcept
       -> SourceFile_t {
     if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".c") {
@@ -550,6 +543,26 @@ private:
       return Err(CFileAPIError(strerror(errno)));
     fcontent[fsize] = 0;
     return Ok(std::make_pair(fcontent, fsize));
+  }
+
+  auto serialize_impl(File &file) const noexcept -> void {
+    file.write(&m.type, sizeof(decltype(M::type)), 1);
+
+    file.write(&m.hash, sizeof(decltype(M::hash)), 1);
+
+    // i hope this doesn't alloc that'd be annoying
+    auto const path_len = m.path.string().size();
+    file.write(&path_len, sizeof(decltype(path_len)), 1);
+
+    file.write(m.path.c_str(), sizeof(char), path_len);
+
+    // TODO: write out the deps
+    auto const deps_size = m.deps.size();
+    file.write(&deps_size, sizeof(decltype(M::deps.size())), 1);
+
+    for (auto const &dep : m.deps) {
+      dep->serialize_impl(file);
+    }
   }
 
   SourceFile() = default;
@@ -711,7 +724,19 @@ static auto install_exe(lua_State *state) -> int {
 
     // auto cache_file = std::ofstream("./.cache.json");
     exe_root.display(std::cout);
-    exe_root.serialize(".test.bin");
+
+    auto const cache_file = fs::path("test.bin");
+    exe_root.serialize(cache_file);
+
+    auto test = File(cache_file, File::READ | File::BINARY);
+    auto const fsize = fs::file_size(cache_file);
+    std::cout << "fsize = [" << fsize << "]\n";
+    std::cout << "fcontent = [\n";
+    for (auto ch = fgetc(test); ch != EOF; ch = fgetc(test)) {
+      std::cout << ch << ", ";
+    }
+    std::cout << "\n]\n";
+    std::cout.flush();
 
     // compile the objects
     compile(main_mod, &exe_root);
