@@ -555,26 +555,21 @@ static auto compile(Module const &mod, SourceFile const *sf) noexcept -> void {
     fut_pool.emplace_back(std::async(std::launch::async, compile, mod, dep));
   }
 
-  for (auto const &fut : fut_pool) {
+  for (auto const &fut : fut_pool)
+    fut.wait();
+
+  if (!fut_res.valid()) {
+    return; // if the value was never set then early return
+  } else {
     try {
-      fut.wait();
+      if (fut_res.get() != 0) {
+        std::cerr << "There was an issue compiling [" << path << "]\n";
+      }
     } catch (...) {
       std::cerr << "Here on thread [" << std::this_thread::get_id()
-                << "] waiting for fut from fut_pool\n";
+                << "], waiting for fut_res\n";
     }
   }
-
-  try {
-    fut_res.wait();
-  } catch (...) {
-    std::cerr << "Here on thread [" << std::this_thread::get_id()
-              << "], waiting for fut_res\n";
-  }
-  /*
-  if (fut_res.get() != 0) {
-    std::cerr << "error invoking [" << invoked_command << "]\n";
-  }
-  */
 }
 
 auto clang(lua_State *state) -> int {
