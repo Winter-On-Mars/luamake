@@ -525,10 +525,6 @@ private:
   friend Result<SourceFile, SourceFileErr>;
 };
 
-// TODO: there's an error, because we're skipping over header files
-// but we're still making a fut_res for those, so calling fut_res.wait()
-// or fut_res.get() [which calling fut_res.wait()] results in an error
-// being thrown, so basically rewrite this function to make that not happen :)
 static auto compile(Module const &mod, SourceFile const *sf) noexcept -> void {
   std::cerr << "in thread [" << std::hex << std::this_thread::get_id()
             << "], path = [" << sf->path() << "]\n";
