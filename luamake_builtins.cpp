@@ -511,7 +511,6 @@ private:
 
     file.write(m.path.c_str(), sizeof(char), path_len);
 
-    // TODO: write out the deps
     auto const deps_size = m.deps.size();
     file.write(&deps_size, sizeof(decltype(M::deps.size())), 1);
 
