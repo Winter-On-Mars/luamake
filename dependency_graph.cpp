@@ -37,20 +37,6 @@ auto graph::insert(fs::path const &f_name, src_file &&src_file) noexcept
   }
 }
 
-struct File final {
-  FILE *handle;
-
-  File(fs::path const f_name) noexcept : handle(fopen(f_name.c_str(), "r")) {}
-  ~File() noexcept {
-    if (handle != nullptr) {
-      fclose(handle);
-      handle = nullptr;
-    }
-  }
-
-  constexpr operator FILE *() noexcept { return handle; }
-};
-
 enum class return_t {
   ok,
   cont,
@@ -111,7 +97,7 @@ static auto generate_files_deps(graph &graph, fs::path const &fpath,
     auto const impl_fpath =
         fs::path((fpath.parent_path() / fpath.stem()).string() + ".cpp");
     if (!graph.seen(impl_fpath)) {
-      auto impl_file = File(impl_fpath);
+      auto impl_file = File(impl_fpath, File::READ);
       if (impl_file != nullptr) { // checking if header is a hol
         impl_file.~File();
         graph.insert(fpath, src_file(impl_fpath));
@@ -122,7 +108,7 @@ static auto generate_files_deps(graph &graph, fs::path const &fpath,
     }
   }
 
-  auto file = File(fpath);
+  auto file = File(fpath, File::READ);
   if (file == nullptr) {
     ferror_message(
         "While parsing include directives, unable to open file at [%s]",
@@ -131,8 +117,8 @@ static auto generate_files_deps(graph &graph, fs::path const &fpath,
   }
 
   size_t len = 0;
-  for (auto amount_read = getline(&line, &len, file.handle); amount_read != -1;
-       amount_read = getline(&line, &len, file.handle)) {
+  for (auto amount_read = getline(&line, &len, file); amount_read != -1;
+       amount_read = getline(&line, &len, file)) {
     switch (generate_impl(graph, fpath, len, line)) {
     case return_t::ok:
       [[fallthrough]];

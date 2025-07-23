@@ -58,51 +58,6 @@ static auto skip_ws(char const *ch) noexcept -> char const * {
   return local;
 }
 
-struct File final {
-  enum permissions : unsigned char {
-    READ = 1 << 0,
-    WRITE = 1 << 1,
-    BINARY = 1 << 2,
-  };
-
-  constexpr File(fs::path const &path, permissions &&perms) noexcept
-      : file(nullptr) {
-    char max_length_perms[] = {0, 0, 0,
-                               0}; // this should be 5 or 7 from man fread
-    if ((perms & READ) == READ)
-      max_length_perms[0] = 'r';
-    if ((perms & WRITE) == WRITE)
-      max_length_perms[max_length_perms[0] != 0 ? 1 : 0] = 'w';
-    if ((perms & BINARY) == BINARY)
-      max_length_perms[max_length_perms[0] != 0
-                           ? max_length_perms[1] != 0 ? 2 : 1
-                           : 0] = 'b';
-
-    std::cerr << "Opening [" << path << "] with options [" << max_length_perms
-              << "]\n";
-    file = fopen(path.c_str(), max_length_perms);
-  }
-  constexpr ~File() noexcept {
-    if (file != nullptr)
-      fclose(file);
-  }
-
-  // implicit conversion operator to FILE*
-  operator FILE *() const noexcept { return file; }
-
-  auto write(void const *__restrict ptr, size_t size, size_t amount) noexcept
-      -> size_t {
-    return fwrite(ptr, size, amount, file);
-  }
-
-  auto write_num(int c) noexcept -> int { return fputc(c, file); }
-
-  auto flush() noexcept -> void { fflush(file); }
-
-private:
-  FILE *file;
-};
-
 auto constexpr operator|(File::permissions lhs, File::permissions rhs) noexcept
     -> File::permissions {
   return static_cast<File::permissions>(
