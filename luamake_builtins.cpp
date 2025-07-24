@@ -366,13 +366,13 @@ struct SourceFile final {
   [[nodiscard(
       "We spent all this time deserializing you better use the result")]]
   static auto deserialize(fs::path const &path) noexcept -> SourceFile {
-    auto sf = SourceFile();
     auto file = File(path, File::READ | File::BINARY);
     if (file == nullptr) {
       std::cerr << "unable to open serialization file [" << path << "]\n";
       std::terminate();
     }
-    return sf;
+
+    return SourceFile::deserialize_impl(file);
   }
 
   auto path() const noexcept -> fs::path { return m.path; }
@@ -531,6 +531,30 @@ private:
     for (auto const &dep : m.deps) {
       dep->serialize_impl(file);
     }
+  }
+
+  static auto deserialize_impl(File &file) noexcept -> SourceFile {
+    auto sf = SourceFile();
+    file.read(&sf.m.type, sizeof(decltype(M::type)), 1);
+
+    file.read(&sf.m.hash, sizeof(decltype(M::hash)), 1);
+
+    auto string_len = decltype(M::path.string().size()){};
+    file.read(&string_len, sizeof(decltype(string_len)), 1);
+    auto *buffer = (char *)malloc(string_len + 1);
+    file.read(buffer, sizeof(char), string_len);
+    buffer[string_len] = 0;
+    sf.m.path = fs::path(buffer);
+    free(buffer);
+
+    auto num_deps = decltype(M::deps.size()){};
+    file.read(&num_deps, sizeof(num_deps), 1);
+    sf.m.deps.reserve(num_deps);
+
+    for (auto i = decltype(num_deps){}; i < num_deps; ++i)
+      sf.m.deps.emplace_back(new SourceFile(deserialize_impl(file)));
+
+    return sf;
   }
 
   SourceFile() = default;
