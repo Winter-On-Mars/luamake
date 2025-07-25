@@ -91,7 +91,7 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
     return {Type::CLEAN, 0, nullptr};
   } else if (strcmp(argv[1], "t") == 0 || strcmp(argv[1], "test") == 0) {
     return {Type::TEST, argc, argv};
-  } else if (strcmp(argv[1], "run") == 0) {
+  } else if (strcmp(argv[1], "r") == 0 || strcmp(argv[1], "run") == 0) {
     return {Type::RUN, argc, argv};
   } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
     return {Type::HELP, 0, nullptr};
