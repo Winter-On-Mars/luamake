@@ -59,13 +59,6 @@ auto skip_ws(char const *ch) noexcept -> char const * {
   return local;
 }
 
-auto constexpr operator|(File::permissions lhs, File::permissions rhs) noexcept
-    -> File::permissions {
-  return static_cast<File::permissions>(
-      static_cast<std::underlying_type_t<File::permissions>>(lhs) |
-      static_cast<std::underlying_type_t<File::permissions>>(rhs));
-}
-
 // algorithm
 // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function#FNV-1a_hash
 auto constexpr fnv1a(size_t size, char const *buffer) noexcept -> size_t {

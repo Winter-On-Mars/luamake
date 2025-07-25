@@ -111,4 +111,11 @@ private:
   FILE *file;
 };
 
+auto constexpr operator|(File::permissions lhs, File::permissions rhs) noexcept
+    -> File::permissions {
+  return static_cast<File::permissions>(
+      static_cast<std::underlying_type_t<File::permissions>>(lhs) |
+      static_cast<std::underlying_type_t<File::permissions>>(rhs));
+}
+
 #endif
