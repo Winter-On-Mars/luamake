@@ -52,6 +52,7 @@ static auto run(user_func_config const *const) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
 struct Type final {
+  // TODO: add command for generating compile_commands.json to the project
   enum {
     UNKNOWN_ARG,
     BUILD,
