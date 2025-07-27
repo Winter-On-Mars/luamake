@@ -53,6 +53,8 @@ static auto help() noexcept -> exit_t;
 
 struct Type final {
   // TODO: add command for generating compile_commands.json to the project
+  // add optional argument for running in verbose mode to output more
+  // information like the specific thread things are being run on
   enum {
     UNKNOWN_ARG,
     BUILD,

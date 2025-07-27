@@ -17,6 +17,7 @@ extern "C" {
 #include <format>
 #include <future>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -229,11 +230,7 @@ struct SourceFile final {
         // try to open impl file
         auto const potential_impl =
             (res.m.path.parent_path() / res.m.path.stem()).string();
-        std::cout << "checking to see if [" << potential_impl << "] exists\n";
-        std::cout.flush();
         if (fs::exists(fs::path(potential_impl + ".cpp"))) {
-          std::cout << "found [" << fs::path(potential_impl + ".cpp") << "]\n";
-          std::cout.flush();
           auto maybe_impl =
               SourceFile::make(fs::path(potential_impl + ".cpp"), res.m.path);
           switch (maybe_impl) {
@@ -245,8 +242,6 @@ struct SourceFile final {
             return Err(maybe_impl.err());
           }
         } else if (fs::exists(fs::path(potential_impl + ".c"))) {
-          std::cout << "found [" << fs::path(potential_impl + ".c") << "]\n";
-          std::cout.flush();
           auto maybe_impl =
               SourceFile::make(fs::path(potential_impl + ".c"), res.m.path);
           switch (maybe_impl) {
@@ -372,17 +367,6 @@ struct SourceFile final {
   auto deps() const noexcept -> vector<SourceFile *> { return m.deps; }
   auto type() const noexcept -> SourceFile_t { return m.type; }
 
-private:
-  struct M final {
-    SourceFile_t type;
-    fs::path path;
-    vector<SourceFile *> deps;
-    size_t hash;
-    // TODO:
-    // std::thread hashing_thread;
-    // std::thread dep_analyzer_thread;
-  } m;
-
   [[nodiscard]]
   static auto determine_file_type(fs::path const &ext) noexcept
       -> SourceFile_t {
@@ -395,12 +379,22 @@ private:
     return MISC;
   }
 
+private:
+  struct M final {
+    SourceFile_t type;
+    fs::path path;
+    vector<SourceFile *> deps;
+    size_t hash;
+    // TODO:
+    // std::thread hashing_thread;
+    // std::thread dep_analyzer_thread;
+  } m;
+
   static auto analyze_dep(fs::path const &path, fs::path const &parent,
                           FILE *file, char const *fcontent) noexcept
       -> Result<decltype(SourceFile::M::deps), SourceFileErr> {
     using Ok = Result<decltype(SourceFile::M::deps), SourceFileErr>::Ok;
     using Err = Result<decltype(SourceFile::M::deps), SourceFileErr>::Err;
-    std::cout.flush();
 
     auto res = vector<SourceFile *>();
     res.reserve(4);
@@ -469,8 +463,7 @@ private:
           // TODO: global/module include
         } break;
         default: {
-          std::cout << "unknown char [" << *ch << "]\n";
-          std::cout.flush();
+          std::cerr << "unknown char [" << *ch << "]\n";
           // TODO: report error malformed #include directive
         } break;
         }
@@ -493,9 +486,6 @@ private:
     auto fsize = static_cast<size_t>(_fsize);
     rewind(file);
 
-    // std::cout << "calling malloc with size = [" << sizeof(char) * fsize
-    //             << "]\n";
-    // std::cout.flush();
     auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
     if (fcontent == nullptr)
       return Err(CFileAPIError(strerror(errno)));
@@ -555,47 +545,119 @@ private:
   friend Result<SourceFile, SourceFileErr>;
 };
 
-auto compile(Module const &mod, SourceFile const *sf) noexcept -> void {
-  std::cerr << "in thread [" << std::hex << std::this_thread::get_id()
-            << "], path = [" << sf->path() << "]\n";
-  auto const path = sf->path();
-  auto fut_res = std::future<int>();
-  auto const invoked_command =
-      std::format("{} -c {} -o {}/{}.o/{}.o", mod.compiler(), path.c_str(),
-                  mod.install_dir(), mod.name(), path.stem().c_str());
-  if (sf->type() == SourceFile::IMPL) {
-    fut_res = std::async(
-        std::launch::async,
-        [](string_view command) {
-          std::cerr << "Calling [" << command << "] on thread ["
-                    << std::this_thread::get_id() << "]\n";
-          return system(command.data());
-        },
-        invoked_command);
-  }
-  // figure out a way to read the number of threads available, then set the
-  // pool's max size at that
-  auto fut_pool = vector<std::future<void>>();
-  fut_pool.reserve(8);
-  for (auto const &dep : sf->deps()) {
-    fut_pool.emplace_back(std::async(std::launch::async, compile, mod, dep));
+// sort of a thread pool like structure that is just for compiling
+struct CompilationPool final {
+  CompilationPool(Module const &mod,
+                  size_t num_threads = std::thread::hardware_concurrency() -
+                                       1) noexcept
+      : mod(mod) {
+    workers.reserve(num_threads);
+    remaining_tasks.reserve(8);
   }
 
-  for (auto const &fut : fut_pool)
-    fut.wait();
+  ~CompilationPool() noexcept = default;
 
-  if (!fut_res.valid()) {
-    return; // if the value was never set then early return
-  } else {
-    try {
-      if (fut_res.get() != 0) {
-        std::cerr << "There was an issue compiling [" << path << "]\n";
-      }
-    } catch (...) {
-      std::cerr << "Here on thread [" << std::this_thread::get_id()
-                << "], waiting for fut_res\n";
+  auto add_task(SourceFile const *) noexcept -> void;
+
+  auto run() noexcept -> void;
+
+  auto busy() noexcept -> bool;
+
+  auto get() noexcept -> string;
+
+  CompilationPool() = delete;
+  CompilationPool(CompilationPool &&) = delete;
+  CompilationPool &operator=(CompilationPool &&) = delete;
+  CompilationPool(CompilationPool const &) = delete;
+  CompilationPool &operator=(CompilationPool const &) = delete;
+
+private:
+  auto _thread_loop() noexcept -> void;
+
+  vector<std::thread> workers;
+  vector<fs::path> remaining_tasks;
+  std::mutex queue_mtx;
+
+  string result;
+  std::mutex result_mtx;
+
+  Module const &mod;
+};
+
+auto CompilationPool::run() noexcept -> void {
+  for (auto i = 0; i < workers.capacity(); ++i)
+    workers.emplace_back([this]() { _thread_loop(); });
+}
+
+auto CompilationPool::add_task(SourceFile const *sf) noexcept -> void {
+  remaining_tasks.push_back(sf->path());
+  for (auto const &dep : sf->deps())
+    add_task(dep);
+}
+
+auto CompilationPool::busy() noexcept -> bool {
+  auto pool_busy = true;
+  {
+    auto lock = std::unique_lock(queue_mtx);
+    pool_busy = !remaining_tasks.empty();
+  }
+  std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+  return pool_busy;
+}
+
+auto CompilationPool::_thread_loop() noexcept -> void {
+  while (true) {
+    auto guard = std::unique_lock(queue_mtx);
+    if (remaining_tasks.empty())
+      return;
+
+    auto this_path = remaining_tasks.back();
+    remaining_tasks.pop_back();
+    guard.unlock();
+
+    if (SourceFile::determine_file_type(this_path.extension()) ==
+        SourceFile::HEADER) {
+      continue;
+    }
+
+    auto const invoked_command = std::format(
+        "{} -c {} -o {}/{}.o/{}.o", mod.compiler(), this_path.c_str(),
+        mod.install_dir(), mod.name(), this_path.stem().c_str());
+    std::cout << "[" << invoked_command << "]\n";
+    std::cout.flush();
+    auto const res = system(invoked_command.c_str());
+    if (res == 0) {
+      auto res_lock = std::unique_lock(result_mtx);
+      result += std::format("{}/{}.o/{}.o ", mod.install_dir(), mod.name(),
+                            this_path.stem().c_str());
     }
   }
+}
+
+auto CompilationPool::get() noexcept -> string {
+  while (busy()) {
+    /* wait */
+  }
+
+  // wait for all jobs to finish after we know everything has been queued
+  // this also cleans up all of the threads, so in the destructor we don't
+  // need to call join again
+  for (auto &worker : workers)
+    worker.join();
+
+  return result;
+}
+
+[[nodiscard]]
+auto compile(Module const &mod, SourceFile const *sf) noexcept -> string {
+  auto res = string();
+
+  auto tp = CompilationPool(mod);
+  tp.add_task(sf);
+  tp.run();
+  res = tp.get();
+
+  return res;
 }
 
 auto parse_compiler_table(lua_State *state) -> string {
@@ -630,8 +692,6 @@ auto parse_compiler_table(lua_State *state) -> string {
 
 auto install_exe(lua_State *state) -> int {
   using Result = Result<SourceFile, SourceFileErr>;
-  fn_print();
-
   auto num_args = lua_gettop(state);
   if (num_args != 1) {
     lua_pushstring(state, "Too many arguments.");
@@ -658,37 +718,25 @@ auto install_exe(lua_State *state) -> int {
   case Result::OK: {
     auto exe_root = maybe_exe_root.get();
 
-    // auto cache_file = std::ofstream("./.cache.json");
-    exe_root.display(std::cout);
-
-    auto const cache_file = fs::path("test.bin");
-    exe_root.serialize(cache_file);
-
     // compile the objects
-    compile(main_mod, &exe_root);
+    auto const actually_compiled_files = compile(main_mod, &exe_root);
 
-    // TODO: compile the program
-    /*
-    invoked_command = std::format(
-        "{} {}/{}.o/{}.o -o {}/{}", main_mod.compiler(),
-    main_mod.install_dir(), main_mod.name(),
-    main_mod.root().stem().c_str(), main_mod.install_dir(),
-        main_mod.name());
-    std::cerr << "Invoking [" << invoked_command << "]\n";
-    */
+    // because of the format of `actually_compiled_files` for the best
+    // formatting of the command there shouldn't be a space between it and the
+    // -o
+    auto const invoked_command = std::format(
+        "{} {}-o {}/{}", main_mod.compiler(), actually_compiled_files,
+        main_mod.install_dir(), main_mod.name());
 
-    /*
+    std::cout << "[" << invoked_command << "]\n";
+    std::cout.flush();
+
     if (system(invoked_command.c_str()) != 0) {
-      lua_pushfstring(state, "Error invoking [%s]\n",
-    invoked_command.c_str()); return lua_error(state);
+      lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
+      return lua_error(state);
+    } else {
+      return 0;
     }
-    */
-
-    auto serialized_root = SourceFile::deserialize(cache_file);
-    serialized_root.display(std::cout);
-
-    exit_fn_print();
-    return 0;
   } break;
   case Result::ERR: {
     auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
