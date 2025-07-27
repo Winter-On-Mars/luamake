@@ -718,7 +718,18 @@ auto install_exe(lua_State *state) -> int {
   case Result::OK: {
     auto exe_root = maybe_exe_root.get();
 
-    // compile the objects
+    // TODO: there is an error where if you have the following situation
+    //   A.h/cpp
+    //  /       \
+    // B.h/cpp   C.h/cpp
+    // \        /
+    //  main.cpp
+    // then A.cpp will be compiled twice, causing a linking error
+    // the way to fix this is to order the dep tree in topological order
+    // i.e. we need to topologically sort the dep tree so that it's linearized
+    // we also need to reverse the tree to make caching files actually work
+    // that is when a file is changed we only recompile all of the dependent
+    // files instead of the entire project compile the objects :)
     auto const actually_compiled_files = compile(main_mod, &exe_root);
 
     // because of the format of `actually_compiled_files` for the best
