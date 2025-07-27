@@ -17,8 +17,6 @@ extern "C" {
 
 using std::array, std::pair, std::string, std::string_view;
 
-using u8 = std::uint8_t;
-
 #define BUILDER_OBJ "__luamake_builder"
 #define RUNNER_OBJ "__luamake_runner"
 #define TESTING_MACRO "__define_testing_macro"
