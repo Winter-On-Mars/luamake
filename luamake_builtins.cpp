@@ -30,8 +30,6 @@ namespace luamake_builtins {
 using std::pair, std::array, std::string, std::string_view, std::vector;
 
 namespace {
-auto parse_compiler_table(lua_State *) -> string;
-
 // TODO: fill this out
 // read user luamake.lua to find module dependency
 auto get_include_paths() noexcept -> vector<fs::path> {
@@ -88,29 +86,7 @@ struct Module final {
     DYNAMIC,
   };
 
-  static auto make(Module_t type, lua_State *state) noexcept -> Module {
-    auto ret_t = Module{};
-    ret_t.m.type = type;
-
-    lua_getfield(state, -1, "name");
-    ret_t.m.name = lua_tolstring(state, -1, nullptr);
-
-    lua_getfield(state, -2, "root");
-    ret_t.m.root = lua_tolstring(state, -1, nullptr);
-
-    lua_getfield(state, -3, "compiler");
-    ret_t.m.compiler = parse_compiler_table(state);
-
-    lua_getfield(state, -4, "install_dir");
-    ret_t.m.install_dir = lua_tolstring(state, -1, nullptr);
-
-    // TODO: update this to record the number of things we push onto the stack
-    // to make sure that this doesn't fuck up the stack
-    lua_pop(state,
-            4); // might cause an issue? just trying to restore the stack
-
-    return ret_t;
-  }
+  static auto make(Module_t &&type, lua_State *state) noexcept -> Module;
 
   auto constexpr install_dir() const noexcept -> char const * {
     return m.install_dir;
@@ -123,6 +99,8 @@ struct Module final {
   auto compiler() const noexcept -> std::string { return m.compiler; }
 
 private:
+  static auto parse_compiler_table(lua_State *state) -> string;
+
   struct M {
     Module_t type;
     char const *name;
@@ -133,6 +111,60 @@ private:
   };
   M m;
 };
+
+auto Module::make(Module_t &&type, lua_State *state) noexcept -> Module {
+  auto ret_t = Module{};
+  ret_t.m.type = type;
+
+  lua_getfield(state, -1, "name");
+  ret_t.m.name = lua_tolstring(state, -1, nullptr);
+
+  lua_getfield(state, -2, "root");
+  ret_t.m.root = lua_tolstring(state, -1, nullptr);
+
+  lua_getfield(state, -3, "compiler");
+  ret_t.m.compiler = Module::parse_compiler_table(state);
+
+  lua_getfield(state, -4, "install_dir");
+  ret_t.m.install_dir = lua_tolstring(state, -1, nullptr);
+
+  // TODO: update this to record the number of things we push onto the stack
+  // to make sure that this doesn't fuck up the stack
+  lua_pop(state,
+          4); // might cause an issue? just trying to restore the stack
+
+  return ret_t;
+}
+
+auto Module::parse_compiler_table(lua_State *state) -> string {
+  auto str = string();
+
+  lua_getfield(state, -1, "compiler");
+  str += lua_tolstring(state, -1, nullptr);
+
+  lua_getfield(state, -2, "optimize");
+  str += " -";
+  str += lua_tolstring(state, -1, nullptr);
+
+  lua_getfield(state, -3, "warnings");
+  auto tbl_idx = -1;
+  auto num_warnings = lua_rawlen(state, tbl_idx);
+  for (auto i = lua_Unsigned{1}; i <= num_warnings; ++i) {
+    switch (lua_geti(state, tbl_idx, static_cast<lua_Integer>(i))) {
+    case LUA_TSTRING:
+      str += " -";
+      str += lua_tolstring(state, -1, nullptr);
+      break;
+    default: // TODO: propogate error up
+      lua_pushstring(state, "Incorrect type in `warnings` table");
+      lua_error(state);
+      return str;
+    }
+    --tbl_idx;
+  }
+  lua_pop(state, 3 + static_cast<int>(num_warnings));
+  return str;
+}
 
 struct EmptyFileName final {
   fs::path path;
@@ -658,36 +690,6 @@ auto compile(Module const &mod, SourceFile const *sf) noexcept -> string {
   res = tp.get();
 
   return res;
-}
-
-auto parse_compiler_table(lua_State *state) -> string {
-  auto str = string();
-
-  lua_getfield(state, -1, "compiler");
-  str += lua_tolstring(state, -1, nullptr);
-
-  lua_getfield(state, -2, "optimize");
-  str += " -";
-  str += lua_tolstring(state, -1, nullptr);
-
-  lua_getfield(state, -3, "warnings");
-  auto tbl_idx = -1;
-  auto num_warnings = lua_rawlen(state, tbl_idx);
-  for (auto i = lua_Unsigned{1}; i <= num_warnings; ++i) {
-    switch (lua_geti(state, tbl_idx, static_cast<lua_Integer>(i))) {
-    case LUA_TSTRING:
-      str += " -";
-      str += lua_tolstring(state, -1, nullptr);
-      break;
-    default: // TODO: propogate error up
-      lua_pushstring(state, "Incorrect type in `warnings` table");
-      lua_error(state);
-      return str;
-    }
-    --tbl_idx;
-  }
-  lua_pop(state, 3 + static_cast<int>(num_warnings));
-  return str;
 }
 
 auto install_exe(lua_State *state) -> int {
