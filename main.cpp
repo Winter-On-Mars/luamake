@@ -338,7 +338,13 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
                   "end" NL
                   NL
                   "function Run(runner)" NL
-                  "    runner.exe = \"build/a\"" NL
+                  "    local exe = {" NL
+                  "        name = \"a\"," NL
+                  "        path = \"build/a\"," NL
+                  "        args = {}," NL
+                  "    }" NL
+                  NL
+                  "    runner.run(exe)" NL
                   "end" NL
                   NL
                   "Tests = {" NL
