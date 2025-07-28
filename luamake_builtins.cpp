@@ -26,6 +26,12 @@ extern "C" {
 #include <variant>
 #include <vector>
 
+#define LUA_ASSERT(L, A, B, ERROR)                                             \
+  if ((A) != (B)) {                                                            \
+    lua_pushstring((L), (ERROR));                                              \
+    return lua_error((L));                                                     \
+  }
+
 namespace luamake_builtins {
 using std::pair, std::array, std::string, std::string_view, std::vector;
 
@@ -79,6 +85,17 @@ auto constexpr fnv1a(size_t size, char const *buffer) noexcept -> size_t {
   return hash;
 }
 
+struct MissingField final {
+  string_view field_name;
+  MissingField(string_view &&field_name) noexcept : field_name(field_name) {}
+  auto error() const noexcept -> string {
+    return string("Required field [") + field_name.data() +
+           string("] could not be found when constructing a module.");
+  }
+};
+
+using ModuleErr = std::variant<MissingField>;
+
 struct Module final {
   enum Module_t {
     EXE,
@@ -86,7 +103,8 @@ struct Module final {
     DYNAMIC,
   };
 
-  static auto make(Module_t &&type, lua_State *state) noexcept -> Module;
+  static auto make(Module_t &&type, lua_State *state) noexcept
+      -> Result<Module, ModuleErr>;
 
   auto constexpr install_dir() const noexcept -> char const * {
     return m.install_dir;
@@ -112,57 +130,85 @@ private:
   M m;
 };
 
-auto Module::make(Module_t &&type, lua_State *state) noexcept -> Module {
+auto Module::make(Module_t &&type, lua_State *state) noexcept
+    -> Result<Module, ModuleErr> {
+  using Ok = Result<Module, ModuleErr>::Ok;
+  using Err = Result<Module, ModuleErr>::Err;
   auto ret_t = Module{};
   ret_t.m.type = type;
 
   lua_getfield(state, -1, "name");
+  if (lua_type(state, -1) == LUA_TNIL)
+    return Err(MissingField("name"));
   ret_t.m.name = lua_tolstring(state, -1, nullptr);
 
   lua_getfield(state, -2, "root");
+  if (lua_type(state, -1) == LUA_TNIL)
+    return Err(MissingField("root"));
   ret_t.m.root = lua_tolstring(state, -1, nullptr);
 
   lua_getfield(state, -3, "compiler");
+  if (lua_type(state, -1) == LUA_TNIL)
+    return Err(MissingField("compiler"));
   ret_t.m.compiler = Module::parse_compiler_table(state);
 
   lua_getfield(state, -4, "install_dir");
+  if (lua_type(state, -1) == LUA_TNIL)
+    return Err(MissingField("install_dir"));
   ret_t.m.install_dir = lua_tolstring(state, -1, nullptr);
 
-  // TODO: update this to record the number of things we push onto the stack
-  // to make sure that this doesn't fuck up the stack
-  lua_pop(state,
-          4); // might cause an issue? just trying to restore the stack
+  lua_pop(state, 3);
 
-  return ret_t;
+  return Ok(std::move(ret_t));
 }
 
 auto Module::parse_compiler_table(lua_State *state) -> string {
   auto str = string();
 
-  lua_getfield(state, -1, "compiler");
+  auto const compiler_idx = lua_absindex(state, -1);
+
+  lua_getfield(state, compiler_idx, "compiler");
   str += lua_tolstring(state, -1, nullptr);
 
-  lua_getfield(state, -2, "optimize");
+  lua_getfield(state, compiler_idx, "optimize");
   str += " -";
   str += lua_tolstring(state, -1, nullptr);
 
-  lua_getfield(state, -3, "warnings");
-  auto tbl_idx = -1;
-  auto num_warnings = lua_rawlen(state, tbl_idx);
-  for (auto i = lua_Unsigned{1}; i <= num_warnings; ++i) {
-    switch (lua_geti(state, tbl_idx, static_cast<lua_Integer>(i))) {
-    case LUA_TSTRING:
-      str += " -";
-      str += lua_tolstring(state, -1, nullptr);
-      break;
-    default: // TODO: propogate error up
-      lua_pushstring(state, "Incorrect type in `warnings` table");
+  lua_getfield(state, compiler_idx, "warnings");
+  auto const warnings_idx = lua_absindex(state, -1);
+
+  lua_pushnil(state);
+  while (lua_next(state, warnings_idx) != 0) {
+    if (lua_type(state, -1) != LUA_TSTRING) {
+      lua_pushstring(
+          state,
+          "Incorrect type in `warnings` table"); // TODO: update this to include
+                                                 // the found type
       lua_error(state);
-      return str;
+      return "";
     }
-    --tbl_idx;
+    str += " -";
+    str += lua_tolstring(state, -1, nullptr);
+    lua_pop(state, 1);
   }
-  lua_pop(state, 3 + static_cast<int>(num_warnings));
+
+  lua_getfield(state, compiler_idx, "opt_args");
+  auto const opt_arg_idx = lua_absindex(state, -1);
+
+  lua_pushnil(state);
+  while (lua_next(state, opt_arg_idx) != 0) {
+    if (lua_type(state, -1) != LUA_TSTRING) {
+      lua_pushstring(state, "Incorrect type in `opt_args` table");
+      lua_error(state);
+      return "";
+    }
+    str += ' ';
+    str += lua_tolstring(state, -1, nullptr);
+
+    lua_pop(state, 1);
+  }
+
+  lua_pop(state, 4);
   return str;
 }
 
@@ -700,8 +746,16 @@ auto install_exe(lua_State *state) -> int {
     return lua_error(state);
   }
 
-  auto main_mod = Module::make(Module::EXE, state);
+  auto maybe_main_mod = Module::make(Module::EXE, state);
+  if (!maybe_main_mod.ok()) {
+    auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
+                                maybe_main_mod.err());
 
+    lua_pushstring(state, msg.c_str());
+    return lua_error(state);
+  }
+
+  auto main_mod = maybe_main_mod.get();
   auto ec = std::error_code{};
   if (fs::create_directories(
           fs::path(
@@ -762,8 +816,6 @@ auto install_exe(lua_State *state) -> int {
 }
 
 auto install_static(lua_State *L) -> int {
-  fn_print();
-
   auto num_args = lua_gettop(L);
   if (num_args != 1) {
     lua_pushstring(L, "Too many arguments");
@@ -777,18 +829,58 @@ auto install_static(lua_State *L) -> int {
   auto const install_command = string(lua_tolstring(L, -1, nullptr));
 
   expr_dbg(install_command);
-
-  exit_fn_print();
   return 0;
+}
+
+auto run(lua_State *L) noexcept -> int {
+  auto const num_args = lua_gettop(L);
+  if (num_args != 1) {
+    lua_pushstring(L, "Too many args to function run");
+    return lua_error(L);
+  }
+
+  lua_getfield(L, -1, "path");
+  LUA_ASSERT(L, lua_type(L, -1), LUA_TSTRING,
+             "Expected type of exe.path to be string [in function Run]");
+  auto const exe_path = string_view(lua_tolstring(L, -1, nullptr));
+
+  lua_getfield(L, -2, "args");
+  switch (auto t = lua_type(L, -1)) {
+  case LUA_TNIL:
+    // nothing to do either type is explicitly nil, or field is undefined so
+    // which is fine bc it's an optional field
+    break;
+  case LUA_TTABLE:
+    // TODO: concatinate all these strings
+    break;
+  default:
+    lua_pushfstring(
+        L,
+        "Expected type of exe.args to either be `nil` "
+        "(undefined) or a table (array), found [%s] [in function Run]",
+        lua_typename(L, t));
+    return lua_error(L);
+  }
+
+  std::cout << "[" << exe_path << "]\n";
+  std::cout.flush();
+
+  system(exe_path.data());
+
+  lua_pushnil(L);
+  return 1;
 }
 } // namespace
 
+// TODO: add error handling to verify that clang++ exists in the users path
+// or it'd be better if we just find absolute path to the right version of clang
+// then use that as the first argument, truthfully that's what we're going to
+// have to do when we're trying to create a compile_commands.json for better lsp
+// integration
 auto clang(lua_State *state) -> int {
-  fn_print();
-
-  auto num_args = lua_gettop(state);
+  auto const num_args = lua_gettop(state);
   if (num_args != 1) {
-    lua_pushstring(state, "Too many arguments");
+    lua_pushstring(state, "Expected one argument to the clang function");
     return lua_error(state);
   }
   auto constexpr compiler_field = string_view{"clang++"};
@@ -799,26 +891,64 @@ auto clang(lua_State *state) -> int {
       string_view{"Wpedantic"},
   }};
 
+  // check that the input argument is the right type
+  LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
+             "Expected type passed into clang function to be a table");
+
+  auto const arg_idx = lua_absindex(state, -1);
+
   lua_createtable(state, 0, 3); // tbl
+  auto const ret_tbl_idx = lua_absindex(state, -1);
 
   lua_pushstring(state, compiler_field.data());
-  lua_setfield(state, -2,
-               "compiler"); // setfield pops the value from the stack :)
+  lua_setfield(state, ret_tbl_idx, "compiler");
 
   lua_pushstring(state, opt_level.data());
-  lua_setfield(state, -2, "optimize");
+  lua_setfield(state, ret_tbl_idx, "optimize");
 
   lua_createtable(state, 3, 0);
   auto constexpr table_idx = int{-2};
   for (auto idx = lua_Integer{1}; auto const warning : warnings) {
     lua_pushstring(state, warning.data());
-    lua_seti(state, table_idx, idx); // pops the val from the stack :)
+    lua_seti(state, table_idx, idx);
     ++idx;
   }
 
-  lua_setfield(state, -2, "warnings");
+  lua_setfield(state, ret_tbl_idx, "warnings");
 
-  exit_fn_print();
+  lua_createtable(state, 0, 0);
+
+  lua_pushnil(state);
+  for (auto i = lua_Integer{1}; lua_next(state, arg_idx) != 0; ++i) {
+    switch (lua_type(state, -2)) {
+    case LUA_TNUMBER: {
+      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
+                 "Expected value type to be a string, found something else in "
+                 "the clang argument");
+      lua_seti(state, -3,
+               i); // treat the value as just being passed to the function
+    } break;
+    case LUA_TSTRING: {
+      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
+                 "Expected value type to be a string, found something else in "
+                 "the clang argument");
+      // combine both the key and value into the argument
+      lua_pushfstring(state, "-%s=%s", lua_tolstring(state, -2, nullptr),
+                      lua_tolstring(state, -1, nullptr));
+      lua_seti(state, -4, i);
+      lua_pop(state, 1); // pop the value from the stack
+    } break;
+    default:
+      lua_pushstring(
+          state,
+          "While *yes* key's into a table can have any type, please refrain "
+          "from using anything other than a number (i.e. passing an array), or "
+          "a string for a key+value pair item, or a combination of the two");
+      return lua_error(state);
+    }
+  }
+
+  lua_setfield(state, ret_tbl_idx, "opt_args");
 
   return 1;
 }
@@ -826,9 +956,6 @@ auto clang(lua_State *state) -> int {
 auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
     -> void {
   lua_createtable(state, 0, 2);
-
-  lua_pushstring(state, ".");
-  lua_setfield(state, -2, "install_dir");
 
   lua_pushcfunction(state, install_exe);
   lua_setfield(state, -2, "install_exe");
@@ -838,4 +965,13 @@ auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
 
   // TODO: add the functions install_dynamic
 }
+
+auto make_runner_obj(lua_State *state, std::string_view const runner_obj)
+    -> void {
+  lua_createtable(state, 0, 1);
+
+  lua_pushcfunction(state, run);
+  lua_setfield(state, -2, "run");
+}
 } // namespace luamake_builtins
+#undef LUA_ASSERT

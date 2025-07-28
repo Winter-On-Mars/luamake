@@ -12,6 +12,9 @@ auto clang(lua_State *state) -> int;
 
 auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
     -> void;
+
+auto make_runner_obj(lua_State *state, std::string_view const runner_obj)
+    -> void;
 } // namespace luamake_builtins
 
 #endif

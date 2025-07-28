@@ -1,5 +1,4 @@
 #include <array>
-#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -106,7 +105,6 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
 }
 
 auto Type::run() const noexcept -> exit_t {
-  fn_print();
   switch (type_t) {
   case UNKNOWN_ARG:
     return help();
@@ -187,6 +185,10 @@ auto Type::run() const noexcept -> exit_t {
     return exit_t::lua_vm_error; // internal service error
   }
 
+  // TODO: change this to just use the fs::exists function
+  // could probably run some tests to see which is faster
+  // also we can try to have a compatability layer so you don't
+  // need as modern of a compiler, i.e. one that doesn't support c++20
   auto *lm_lua = fopen((fs::current_path() / "luamake.lua").c_str(), "r");
   if (lm_lua == nullptr) {
     ferror_message("unable to discover `luamake.lua` in current dir at [%s]" NL
@@ -246,7 +248,6 @@ auto Type::run() const noexcept -> exit_t {
 
 static auto build(user_func_config const *const c) noexcept -> exit_t {
   using enum exit_t;
-  fn_print();
 
   lua_pushcfunction(c->state, luamake_builtins::clang);
   lua_setglobal(c->state, "Clang");
@@ -298,7 +299,6 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
 
 static auto new_proj(char const *project_name, proj_t const type) noexcept
     -> exit_t {
-  fn_print();
   auto const project_root = fs::current_path() / project_name;
 
   if (fs::exists(project_root)) {
@@ -515,7 +515,6 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
 }
 
 static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
-  fn_print();
   auto *luamake_file = fopen("./luamake.lua", "w");
   if (luamake_file == nullptr) {
     ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
@@ -610,7 +609,6 @@ static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
 }
 
 static auto clean() noexcept -> exit_t {
-  fn_print();
   // remove everything from ./build
   // where `.` is the dir that luamake is being called from
 
@@ -654,8 +652,6 @@ static auto clean() noexcept -> exit_t {
 }
 
 static auto test(user_func_config const *const c) noexcept -> exit_t {
-  fn_print();
-
   luamake_builtins::make_builder_obj(c->state, BUILDER_OBJ);
   lua_pushboolean(c->state, true);
   lua_setfield(c->state, -2, TESTING_MACRO);
@@ -671,8 +667,6 @@ static auto test(user_func_config const *const c) noexcept -> exit_t {
 }
 
 static auto run(user_func_config const *const c) noexcept -> exit_t {
-  fn_print();
-
   auto build_res = build(c);
   if (build_res != exit_t::ok) {
     error_message("Occurred during build phase of run");
@@ -687,13 +681,34 @@ static auto run(user_func_config const *const c) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  // TODO: create `config` object, then call run_fn, and return if there's any
-  // errors
-  return exit_t::internal_error;
+  auto runner_t = lua_getglobal(c->state, RUNNER_OBJ);
+  switch (runner_t) {
+  case LUA_TNIL:
+    lua_pop(c->state, 1);
+    luamake_builtins::make_runner_obj(c->state, RUNNER_OBJ);
+    break;
+  case LUA_TTABLE:
+    break;
+  default:
+    ferror_message("`runner` object was defined, but it's type was expected to "
+                   "be table, got [%s]",
+                   lua_typename(c->state, lua_type(c->state, -1)));
+    return exit_t::config_error;
+  };
+
+  if (lua_pcall(c->state, 1, 0, 0) != LUA_OK) {
+    auto const err_message = lua_tolstring(c->state, -1, nullptr);
+    ferror_message("While in the lua vm, Run function" NL "\t[%s]",
+                   err_message);
+    return exit_t::lua_vm_error;
+  }
+
+  (void)lua_gc(c->state, LUA_GCSTOP);
+
+  return exit_t::ok;
 }
 
 static auto help() noexcept -> exit_t {
-  fn_print();
   // clang-format off
   printf(
       "Usage: luamake [options]?" NL
