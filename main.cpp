@@ -9,6 +9,7 @@
 extern "C" {
 #include "lua/lauxlib.h"
 #include "lua/lua.h"
+#include "lua/lualib.h"
 }
 
 #include "common.hpp"
@@ -185,6 +186,8 @@ auto Type::run() const noexcept -> exit_t {
     return exit_t::lua_vm_error; // internal service error
   }
 
+  luaL_openlibs(state);
+
   // TODO: change this to just use the fs::exists function
   // could probably run some tests to see which is faster
   // also we can try to have a compatability layer so you don't
@@ -360,25 +363,25 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
                   "    }" NL
                   "}" NL},
       string_view{"function Build(builder)" NL
-                  "    builder.install_dir = \"build\"" NL
                   "    local dlib = {" NL
                   "        root = \"src/dyn.cpp\"," NL
                   "        compiler = Clang({})," NL
                   "        name = \"a\"," NL
                   "        version = \"0.0.1\"," NL
+                  "        install_dir = \"build\"," NL
                   "    }" NL
                   "    builder.install_dynamic(dlib)" NL
                   "end" NL
                   },
       string_view{"function Build(builder)" NL
-                  "    builder.install_dir = \"build\"" NL
                   "    local slib = {" NL
                   "        root = \"src/static.cpp\"," NL
                   "        compiler = Clang({})," NL
                   "        name = \"a\"," NL
                   "        version = \"0.0.1\"," NL
+                  "        install_dir = \"build\"," NL
                   "    }" NL
-                  "    builder.install_static(dlib)" NL
+                  "    builder.install_static(slib)" NL
                   "end" NL
                   },
       // clang-format on
