@@ -32,6 +32,12 @@ extern "C" {
     return lua_error((L));                                                     \
   }
 
+#define LUA_ASSERT_FORMAT(L, name, A, B, fmt, ...)                             \
+  if (auto const name = A; (name) != (B)) {                                    \
+    lua_pushfstring((L), fmt, __VA_ARGS__);                                    \
+    return lua_error((L));                                                     \
+  }
+
 namespace luamake_builtins {
 using std::pair, std::array, std::string, std::string_view, std::vector;
 
@@ -746,6 +752,11 @@ auto install_exe(lua_State *state) -> int {
     return lua_error(state);
   }
 
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `install_exe` to be of type "
+                    "table, found [%s]",
+                    lua_typename(state, ret_t));
+
   auto maybe_main_mod = Module::make(Module::EXE, state);
   if (!maybe_main_mod.ok()) {
     auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
@@ -815,20 +826,62 @@ auto install_exe(lua_State *state) -> int {
   }
 }
 
-auto install_static(lua_State *L) -> int {
-  auto num_args = lua_gettop(L);
+auto install_static(lua_State *state) -> int {
+  auto const num_args = lua_gettop(state);
   if (num_args != 1) {
-    lua_pushstring(L, "Too many arguments");
-    return lua_error(L);
+    lua_pushstring(state, "Too many arguments");
+    return lua_error(state);
   }
 
-  lua_getfield(L, -1, "name");
-  auto const name = string(lua_tolstring(L, -1, nullptr));
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `install_static` "
+                    "to be of type table, found [%s]",
+                    lua_typename(state, ret_t));
 
-  lua_getfield(L, -2, "invoke_command");
-  auto const install_command = string(lua_tolstring(L, -1, nullptr));
+  auto maybe_static_mod = Module::make(Module::STATIC, state);
+  if (!maybe_static_mod.ok()) {
+    auto const err_msg =
+        std::visit([](auto &&e) { return e.error(); }, maybe_static_mod.err());
+    lua_pushstring(state, err_msg.c_str());
+    return lua_error(state);
+  }
 
-  expr_dbg(install_command);
+  auto static_mod = maybe_static_mod.get();
+
+  auto ec = std::error_code{};
+  if (fs::create_directories(fs::path(
+          std::format("{}/{}.o", static_mod.install_dir(), static_mod.name())));
+      ec) {
+    std::cerr << ec.message() << '\n';
+    lua_pushstring(state, "Unable to create directory");
+    return lua_error(state);
+  }
+  ec.clear();
+
+  auto maybe_static_root = SourceFile::make(static_mod.root());
+  switch (maybe_static_root) {
+  case decltype(maybe_static_root)::OK: {
+    auto static_root = maybe_static_root.get();
+    auto compiled_files = compile(static_mod, &static_root);
+    auto const invoked_command =
+        std::format("ar crs {}/lib{}.a {}", static_mod.install_dir(),
+                    static_mod.name(), compiled_files);
+    std::cout << '[' << invoked_command << "]\n";
+    std::cout.flush();
+    if (system(invoked_command.c_str()) != 0) {
+      lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
+      return lua_error(state);
+    } else {
+      return 0;
+    }
+  } break;
+  case decltype(maybe_static_root)::ERR:
+    auto const msg =
+        std::visit([](auto &&e) { return e.error(); }, maybe_static_root.err());
+    lua_pushstring(state, msg.c_str());
+    return lua_error(state);
+  }
+
   return 0;
 }
 
