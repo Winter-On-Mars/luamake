@@ -128,7 +128,8 @@ private:
   struct M {
     Module_t type;
     char const *name;
-    fs::path root;
+    fs::path root; // TOOD: have this field be a union of a vector<fs::path> and
+                   // fs::path
     std::string compiler;
     char const *install_dir;
     // other module deps
@@ -136,6 +137,7 @@ private:
   M m;
 };
 
+// TODO: update error handling
 auto Module::make(Module_t &&type, lua_State *state) noexcept
     -> Result<Module, ModuleErr> {
   using Ok = Result<Module, ModuleErr>::Ok;
@@ -148,6 +150,7 @@ auto Module::make(Module_t &&type, lua_State *state) noexcept
     return Err(MissingField("name"));
   ret_t.m.name = lua_tolstring(state, -1, nullptr);
 
+  // TODO: switch on type, and parse this field different
   lua_getfield(state, -2, "root");
   if (lua_type(state, -1) == LUA_TNIL)
     return Err(MissingField("root"));
@@ -923,6 +926,20 @@ auto run(lua_State *L) noexcept -> int {
   lua_pushnil(L);
   return 1;
 }
+
+auto link_static(lua_State *state) noexcept -> int {
+  LUA_ASSERT_FORMAT(state, num_args, lua_gettop(state), 3,
+                    "Expected 3 arguments to the link static function [to] "
+                    "'[from] [args]?', found [%d] arguments",
+                    num_args);
+  for (int i = -1; i >= 3; --i) {
+    LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, i), LUA_TTABLE,
+                      "Expected type of argument to be table, found [%s]",
+                      lua_typename(state, arg_t));
+  }
+
+  return 0;
+}
 } // namespace
 
 // TODO: add error handling to verify that clang++ exists in the users path
@@ -930,7 +947,7 @@ auto run(lua_State *L) noexcept -> int {
 // then use that as the first argument, truthfully that's what we're going to
 // have to do when we're trying to create a compile_commands.json for better lsp
 // integration
-auto clang(lua_State *state) -> int {
+auto clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
     lua_pushstring(state, "Expected one argument to the clang function");
@@ -950,11 +967,48 @@ auto clang(lua_State *state) -> int {
 
   auto const arg_idx = lua_absindex(state, -1);
 
+  auto const path_var = std::getenv("PATH");
+  if (path_var == nullptr) {
+    lua_pushstring(state, "Envroinment variable PATH not found, you're on your "
+                          "own with this one :)");
+    return lua_error(state);
+  }
+
+  // this could probably be optimized
+  auto string_fut =
+      std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
+        // TODO: find out if this changes based on os, and/ the shell running
+        // the command
+        auto constexpr path_separator = ':';
+        auto i = 0;
+
+        auto path_view = string_view{};
+        auto const *prev_path_end = path_var;
+        auto possible_path = fs::path();
+        while (path_var[i] != 0) {
+          // find next ':'
+          while (path_var[i] != 0 && path_var[i] != path_separator) {
+            ++i;
+          }
+          // i think this hack might not read the last variable in PATH (?)
+          if (path_var[i] == 0) {
+            break;
+          }
+          path_view = string_view{prev_path_end, &path_var[i]};
+          possible_path = fs::path(path_view) / compiler_field;
+
+          if (fs::exists(possible_path)) {
+            return possible_path;
+          }
+          ++i;
+          prev_path_end = &path_var[i];
+        }
+
+        return fs::path();
+      });
+
   lua_createtable(state, 0, 3); // tbl
   auto const ret_tbl_idx = lua_absindex(state, -1);
-
-  lua_pushstring(state, compiler_field.data());
-  lua_setfield(state, ret_tbl_idx, "compiler");
 
   lua_pushstring(state, opt_level.data());
   lua_setfield(state, ret_tbl_idx, "optimize");
@@ -1003,11 +1057,22 @@ auto clang(lua_State *state) -> int {
 
   lua_setfield(state, ret_tbl_idx, "opt_args");
 
+  // wait until the very end to let the async function run the longest, idk if
+  // this is a good thing i'm bad with async stuff
+  auto const path_to_compiler = string_fut.get();
+  if (path_to_compiler == fs::path()) {
+    lua_pushstring(state, "Unable to find clang++ binary.");
+    return lua_error(state);
+  }
+  lua_pushstring(state, path_to_compiler.c_str());
+  // lua_pushstring(state, compiler_field.data());
+  lua_setfield(state, ret_tbl_idx, "compiler");
+
   return 1;
 }
 
-auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
-    -> void {
+auto make_builder_obj(lua_State *state,
+                      std::string_view const builder_obj) noexcept -> void {
   lua_createtable(state, 0, 2);
 
   lua_pushcfunction(state, install_exe);
@@ -1019,8 +1084,8 @@ auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
   // TODO: add the functions install_dynamic
 }
 
-auto make_runner_obj(lua_State *state, std::string_view const runner_obj)
-    -> void {
+auto make_runner_obj(lua_State *state,
+                     std::string_view const runner_obj) noexcept -> void {
   lua_createtable(state, 0, 1);
 
   lua_pushcfunction(state, run);
