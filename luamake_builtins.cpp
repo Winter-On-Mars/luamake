@@ -2,13 +2,13 @@
 
 #include "common.hpp"
 #include "luamake_error.hpp"
-#include <limits>
 
 extern "C" {
 #include "lua/lua.h"
 }
 
 #include <array>
+#include <cassert>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +19,7 @@ extern "C" {
 #include <format>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -404,6 +405,8 @@ private:
     [[nodiscard]]
     auto append_dep(fs::path const &root, size_t const parent_idx) noexcept
         -> Opt<SourceFileErr>;
+    [[nodiscard]]
+    auto get_path(size_t const) const noexcept -> fs::path;
   } m;
 
   /*
@@ -523,7 +526,112 @@ auto SourceFile::M::append_path(fs::path const &path) noexcept
 auto SourceFile::M::append_dep(fs::path const &root,
                                size_t const parent_idx) noexcept
     -> Opt<SourceFileErr> {
-  return Opt<SourceFileErr>::None{};
+  using None = Opt<SourceFileErr>::None;
+  using Err = Opt<SourceFileErr>::Err;
+
+  auto file = File(root, File::READ);
+  if (!file)
+    return Err(FileDoesNotExist(root, get_path(parent_idx)));
+
+  auto maybe_file_content = SourceFile::get_file_content(file);
+  if (maybe_file_content == decltype(maybe_file_content)::ERR)
+    return Err(maybe_file_content.err());
+
+  auto &&[fcontent, _, fsize] = maybe_file_content.get();
+
+  auto const root_idx = num_files;
+  assert(root_idx < std::numeric_limits<unsigned int>::max());
+  deps[parent_idx].push_back(static_cast<unsigned int>(root_idx));
+  ++num_files;
+
+  auto &&[start, end] = append_path(root);
+  auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
+    return fnv1a(fsize, fcontent);
+  });
+  auto const ftype = SourceFile::determine_file_type(root.extension());
+  if (ftype == SourceFile::HEADER) {
+    auto constexpr potential_extensions = array<string_view, 2>{{".cpp", ".c"}};
+    auto const potential_impl = (root.parent_path() / root.stem()).string();
+    for (auto const &potential_extension : potential_extensions) {
+      auto const possible_path =
+          fs::path(potential_impl + potential_extension.data());
+      if (fs::exists(possible_path)) {
+        if (auto m_error = append_dep(possible_path, root_idx); !m_error.ok()) {
+          return Err(m_error.get());
+        }
+      }
+    }
+    // HOL
+  }
+
+  types[root_idx] = ftype;
+  files[root_idx].start = start;
+  files[root_idx].end = end;
+
+  auto constexpr include_prefix = string_view{"#include"};
+  auto const potential_include_dirs = get_include_paths();
+
+  auto in_string = false;
+
+  for (auto const *ch = fcontent; *ch != 0; ++ch) {
+    auto const is_hash = *ch == '#';
+    in_string = *ch == '"';
+    if (is_hash && !in_string &&
+        strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
+      ch += include_prefix.size();
+      ch = skip_ws(ch);
+
+      switch (*ch) {
+      case '"': {
+        ++ch;
+        auto const *end_of_include_string = ch;
+        while (*end_of_include_string != 0 && *end_of_include_string != '"') {
+          ++end_of_include_string;
+        }
+
+        if (*end_of_include_string == 0)
+          return Err(NonTerminatedString(root));
+
+        auto const include_string_size = end_of_include_string - ch;
+        if (include_string_size == 0)
+          return Err(EmptyFileName(root));
+
+        auto const include_file =
+            fs::path(string_view{ch, end_of_include_string});
+
+        if (include_file.stem() == root.stem()) {
+          auto const include_f_ext =
+              SourceFile::determine_file_type(include_file.extension());
+          auto const path_ext =
+              SourceFile::determine_file_type(root.extension());
+          if (include_f_ext == HEADER && path_ext == IMPL) {
+            continue; // ignore this path
+          }
+        }
+
+        auto const dep_path = root.parent_path() / include_file;
+
+        if (auto m_error = append_dep(dep_path, root_idx); !m_error.ok())
+          return Err(m_error.get());
+      } break;
+      case '<': {
+        // TODO: global include
+      } break;
+      default: {
+        std::cerr << "unknown char [" << *ch << "]\n";
+      } break;
+      }
+    }
+  }
+
+  hashes[root_idx] = hash_fut.get();
+
+  return None{};
+}
+
+auto SourceFile::M::get_path(size_t const idx) const noexcept -> fs::path {
+  auto &&[start, end] = files[idx];
+  return fs::path(all_paths.buffer + start, all_paths.buffer + end);
 }
 
 /*
@@ -609,6 +717,7 @@ std::back_inserter(res.m.deps));
 }
 */
 
+// TODO: extract the commonality between this function and append_dep
 auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
     -> Result<SourceFile, SourceFileErr> {
   using Ok = Result<SourceFile, SourceFileErr>::Ok;
@@ -618,19 +727,19 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
   if (!file)
     return Err(FileDoesNotExist(root, parent));
 
-  auto maybe_fsize = SourceFile::get_file_content(file);
-  if (maybe_fsize == decltype(maybe_fsize)::ERR) {
-    return Err(maybe_fsize.err());
+  auto maybe_file_content = SourceFile::get_file_content(file);
+  if (maybe_file_content == decltype(maybe_file_content)::ERR) {
+    return Err(maybe_file_content.err());
   }
 
-  auto &&[fcontent, fsize, _] = maybe_fsize.get();
+  auto &&[fcontent, _, fsize] = maybe_file_content.get();
   auto maybe_m = M::make();
   if (maybe_m == decltype(maybe_m)::ERR)
     return Err(maybe_m.err());
   auto m = maybe_m.get();
 
   auto const root_idx = m.num_files;
-  m.num_files++;
+  m.num_files++; // this could cause some off by 1 errors when error reported
   auto &&[start, end] = m.append_path(root);
   auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
     return fnv1a(fsize, fcontent);
@@ -642,8 +751,9 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
     for (auto const &potential_extension : potential_extensions) {
       auto const possible_path =
           fs::path(potential_impl + potential_extension.data());
-      if (fs::exists(fs::path(possible_path))) {
-        if (auto m_error = m.append_dep(possible_path, root_idx); m_error) {
+      if (fs::exists(possible_path)) {
+        if (auto m_error = m.append_dep(possible_path, root_idx);
+            m_error == decltype(m_error)::ERR) {
           return Err(m_error.get());
         }
       }
@@ -717,6 +827,9 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
         // TODO: return malformed #include directive
         break;
       }
+    } else {
+      /* TODO: to speed things up we can try skipping ws, as well as like
+       * continuous words + symbols */
     }
   }
 
@@ -772,7 +885,7 @@ auto SourceFile::display_impl(std::ostream &out, unsigned int const depth,
     display_impl(out, depth + 1, dep_idx);
   }
 
-  out << "]\n";
+  out << indents << "]\n";
 
   out << indents << "}\n";
 }
@@ -1337,8 +1450,7 @@ auto clang(lua_State *state) noexcept -> int {
   // this could probably be optimized
   auto string_fut =
       std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
-        // TODO: find out if this changes based on os, and/ the shell running
-        // the command
+        // TODO: change this to ';' when on windows platforms :)
         auto constexpr path_separator = ':';
         auto i = 0;
 
