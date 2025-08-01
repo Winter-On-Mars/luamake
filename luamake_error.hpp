@@ -61,12 +61,12 @@ template <class Error> struct Opt final {
   };
 
   enum Type : unsigned char {
-    OK,
+    NONE,
     ERR,
   };
 
   auto constexpr ok() const noexcept -> bool { return e == nullptr; }
-  constexpr operator Type() const noexcept { return ok() ? OK : ERR; }
+  constexpr operator Type() const noexcept { return ok() ? NONE : ERR; }
 
   auto get() noexcept -> Error { return *e; }
 
