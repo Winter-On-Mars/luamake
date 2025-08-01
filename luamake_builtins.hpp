@@ -8,13 +8,13 @@ extern "C" {
 }
 
 namespace luamake_builtins {
-auto clang(lua_State *state) -> int;
+auto clang(lua_State *state) noexcept -> int;
 
-auto make_builder_obj(lua_State *state, std::string_view const builder_obj)
-    -> void;
+auto make_builder_obj(lua_State *state,
+                      std::string_view const builder_obj) noexcept -> void;
 
-auto make_runner_obj(lua_State *state, std::string_view const runner_obj)
-    -> void;
+auto make_runner_obj(lua_State *state,
+                     std::string_view const runner_obj) noexcept -> void;
 } // namespace luamake_builtins
 
 #endif
