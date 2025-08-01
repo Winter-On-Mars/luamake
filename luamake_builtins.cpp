@@ -927,26 +927,27 @@ auto run(lua_State *L) noexcept -> int {
   return 1;
 }
 
+// TODO: finish this function
 auto link_static(lua_State *state) noexcept -> int {
   LUA_ASSERT_FORMAT(state, num_args, lua_gettop(state), 3,
-                    "Expected 3 arguments to the link static function [to] "
-                    "'[from] [args]?', found [%d] arguments",
+                    "Expected 3 arguments to the link static function '[to]"
+                    "[from][args]?', found [%d] arguments",
                     num_args);
-  for (int i = -1; i >= 3; --i) {
+  for (int i = -1; i >= -3; --i) {
     LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, i), LUA_TTABLE,
                       "Expected type of argument to be table, found [%s]",
                       lua_typename(state, arg_t));
+  }
+
+  if (true) {
+    lua_pushstring(state, "function is not fully implimented :)");
+    return lua_error(state);
   }
 
   return 0;
 }
 } // namespace
 
-// TODO: add error handling to verify that clang++ exists in the users path
-// or it'd be better if we just find absolute path to the right version of clang
-// then use that as the first argument, truthfully that's what we're going to
-// have to do when we're trying to create a compile_commands.json for better lsp
-// integration
 auto clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -1080,6 +1081,9 @@ auto make_builder_obj(lua_State *state,
 
   lua_pushcfunction(state, install_static);
   lua_setfield(state, -2, "install_static");
+
+  lua_pushcfunction(state, link_static);
+  lua_setfield(state, -2, "link_static");
 
   // TODO: add the functions install_dynamic
 }
