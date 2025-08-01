@@ -2,6 +2,7 @@
 
 #include "common.hpp"
 #include "luamake_error.hpp"
+#include <limits>
 
 extern "C" {
 #include "lua/lua.h"
@@ -13,10 +14,12 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <endian.h>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <future>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -90,6 +93,9 @@ auto constexpr fnv1a(size_t size, char const *buffer) noexcept -> size_t {
 
   return hash;
 }
+
+struct Compiler;
+struct CompilationPool;
 
 struct MissingField final {
   string_view field_name;
@@ -268,15 +274,25 @@ struct MalformedInclude final {
   };
 };
 
-struct CFileAPIError final {
+struct CFileAPI final {
   string message;
-  explicit CFileAPIError(string const &message) noexcept : message(message) {}
+  explicit CFileAPI(string const &message) noexcept : message(message) {}
   auto error() const noexcept -> string { return message; }
 };
 
+struct MemoryAlloc final {
+  char const *message;
+  explicit MemoryAlloc(char const *const message) noexcept : message(message) {}
+  auto error() const noexcept -> string {
+    return std::format("Error while allocating memory in function [{}]",
+                       message);
+  }
+};
+
+// TODO: rename this to dep_tree
 using SourceFileErr =
     std::variant<EmptyFileName, FileDoesNotExist, NonTerminatedString,
-                 MalformedInclude, CFileAPIError>;
+                 MalformedInclude, CFileAPI, MemoryAlloc>;
 
 struct SourceFile final {
   enum SourceFile_t : unsigned char {
@@ -296,15 +312,13 @@ struct SourceFile final {
   SourceFile(SourceFile &&) = default;
   SourceFile &operator=(SourceFile &&) = default;
 
-  ~SourceFile() noexcept {
-    for (auto *sf : m.deps) {
-      delete sf;
-    }
-  }
+  ~SourceFile() noexcept = default;
 
   // displays the function in a pseudo json format
-  auto display(std::ostream &out, int const depth = 0) const noexcept -> void;
+  auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
+      -> void;
 
+  /*
   // TODO: add better error handling
   auto serialize(fs::path const &path) const noexcept -> void;
 
@@ -313,14 +327,10 @@ struct SourceFile final {
   [[nodiscard(
       "We spent all this time deserializing you better use the result")]]
   static auto deserialize(fs::path const &path) noexcept -> SourceFile;
-
-  auto path() const noexcept -> fs::path { return m.path; }
-  auto deps() const noexcept -> vector<SourceFile *> { return m.deps; }
-  auto type() const noexcept -> SourceFile_t { return m.type; }
+  */
 
   [[nodiscard]]
-  static auto determine_file_type(fs::path const &ext) noexcept
-      -> SourceFile_t {
+  static auto determine_file_type(fs::path &&ext) noexcept -> SourceFile_t {
     if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".c") {
       return IMPL;
     }
@@ -331,29 +341,192 @@ struct SourceFile final {
   }
 
 private:
+  struct OwnedString final {
+    char *buffer;
+    size_t size;
+    size_t capacity;
+
+    explicit OwnedString(char *buffer, size_t size) noexcept;
+    constexpr OwnedString() noexcept;
+
+    constexpr OwnedString(OwnedString &&that) noexcept;
+
+    constexpr auto operator=(OwnedString &&that) noexcept -> OwnedString &;
+
+    ~OwnedString() noexcept;
+
+    OwnedString(OwnedString const &) = delete;
+    OwnedString &operator=(OwnedString const &) = delete;
+
+    auto append(string &&) noexcept -> void;
+  };
+
+#if false
   struct M final {
     SourceFile_t type;
     fs::path path;
     vector<SourceFile *> deps;
     size_t hash;
   } m;
+#endif
 
+  // a parallel array for all of the source files
+  // NOTE: this could be pushed further, and we could have a
+  // memory allocator as a part of this struct, then just
+  // clearing the memory allocator would act as the destructor
+  struct M final {
+    struct StringViews final {
+      unsigned int start;
+      unsigned int end;
+    };
+
+    size_t num_files;
+    size_t cap_files;
+    OwnedString all_paths;
+    // all of these are arrays
+    /*
+    SourceFile_t *types;
+    StringViews *files;
+    vector<int> *deps;
+    size_t *hashes;
+    */
+    std::unique_ptr<SourceFile_t[]> types;
+    std::unique_ptr<StringViews[]> files;
+    std::unique_ptr<vector<unsigned int>[]> deps;
+    std::unique_ptr<size_t[]> hashes;
+
+    [[nodiscard]]
+    static auto make(size_t const num_files = 8) noexcept
+        -> Result<M, SourceFileErr>;
+    [[nodiscard]]
+    auto append_path(fs::path const &) noexcept
+        -> pair<unsigned int, unsigned int>;
+    [[nodiscard]]
+    auto append_dep(fs::path const &root, size_t const parent_idx) noexcept
+        -> Opt<SourceFileErr>;
+  } m;
+
+  /*
   static auto analyze_dep(fs::path const &path, fs::path const &parent,
                           FILE *file, char const *fcontent) noexcept
       -> Result<decltype(SourceFile::M::deps), SourceFileErr>;
 
   static auto read_and_report_fsize(FILE *file) noexcept
       -> Result<pair<char const *, size_t>, SourceFileErr>;
+      */
 
+  static auto get_file_content(FILE *file) noexcept
+      -> Result<OwnedString, SourceFileErr>;
+
+  auto display_impl(std::ostream &out, unsigned int const depth,
+                    unsigned int const idx) const noexcept -> void;
+  /*
   auto serialize_impl(File &file) const noexcept -> void;
 
   static auto deserialize_impl(File &file) noexcept -> SourceFile;
+  */
 
   SourceFile() = default;
   SourceFile(SourceFile::M &&m) noexcept : m(std::move(m)) {}
   friend Result<SourceFile, SourceFileErr>;
+  friend Compiler;
+  friend CompilationPool;
 };
 
+SourceFile::OwnedString::OwnedString(char *buffer, size_t size) noexcept
+    : buffer(buffer), size(0), capacity(size) {}
+constexpr SourceFile::OwnedString::OwnedString() noexcept
+    : buffer(nullptr), size(0), capacity(0) {}
+
+constexpr SourceFile::OwnedString::OwnedString(
+    SourceFile::OwnedString &&that) noexcept
+    : buffer(that.buffer), size(that.size), capacity(that.capacity) {
+  that.buffer = nullptr;
+  that.size = 0;
+  that.capacity = 0;
+}
+
+constexpr auto
+SourceFile::OwnedString::operator=(SourceFile::OwnedString &&that) noexcept
+    -> SourceFile::OwnedString & {
+  buffer = that.buffer;
+  size = that.size;
+  capacity = that.capacity;
+  return *this;
+}
+
+SourceFile::OwnedString::~OwnedString() noexcept {
+  if (buffer != nullptr)
+    free((void *)buffer);
+}
+
+auto SourceFile::OwnedString::append(string &&str) noexcept -> void {
+  auto const str_len = str.length();
+  if (!(size < capacity - str_len)) {
+    /* resize */
+    auto next_cap = 3 * (capacity + str_len) / 2;
+    buffer = (char *)realloc(buffer, next_cap * sizeof(char));
+    if (buffer == nullptr) {
+      std::cerr << "Unable to realloc [" << next_cap << "] bytes needed\n";
+      std::terminate();
+    }
+    capacity = next_cap;
+  }
+  memcpy(buffer + size, str.data(), str_len);
+  size += str_len;
+}
+
+auto SourceFile::M::make(size_t const num_files) noexcept
+    -> Result<SourceFile::M, SourceFileErr> {
+  using Ok = Result<SourceFile::M, SourceFileErr>::Ok;
+  using Err = Result<SourceFile::M, SourceFileErr>::Err;
+
+  try {
+    auto const paths_size = num_files * (sizeof(char) * 15 + 1);
+    auto *paths = (char *)malloc(paths_size);
+    if (paths == nullptr)
+      return Err(CFileAPI(strerror(errno)));
+    memset(paths, 0, paths_size);
+
+    auto types = std::make_unique<SourceFile_t[]>(num_files);
+    auto files = std::make_unique<StringViews[]>(num_files);
+    auto deps = std::make_unique<vector<unsigned int>[]>(num_files);
+    auto hashes = std::make_unique<size_t[]>(num_files);
+
+    return Ok(M{0, num_files, OwnedString(paths, paths_size), std::move(types),
+                std::move(files), std::move(deps), std::move(hashes)});
+  } catch (std::exception const &e) {
+    return Err(MemoryAlloc(e.what()));
+  }
+}
+
+auto SourceFile::M::append_path(fs::path const &path) noexcept
+    -> pair<unsigned int, unsigned int> {
+  auto start = all_paths.size;
+  all_paths.append(path.string());
+  auto end = all_paths.size;
+
+  if (start >= std::numeric_limits<unsigned int>::max() ||
+      end >= std::numeric_limits<unsigned int>::max()) {
+    std::cerr << std::format(
+        "Damn you have a lot of path strings, more than [{}], idk see about "
+        "opening an issue to change how the indexing work, increasing the size "
+        "of the StringViews class?",
+        std::numeric_limits<unsigned int>::max());
+    std::terminate();
+  }
+
+  return std::make_pair(static_cast<unsigned int>(start),
+                        static_cast<unsigned int>(end));
+}
+
+auto SourceFile::M::append_dep(fs::path const &root,
+                               size_t const parent_idx) noexcept
+    -> Opt<SourceFileErr> {
+  return Opt<SourceFileErr>::None{};
+}
+
+/*
 auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
     -> Result<SourceFile, SourceFileErr> {
   using Ok = Result<SourceFile, SourceFileErr>::Ok;
@@ -372,11 +545,10 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
 
     auto hash_fut = std::async(
         std::launch::async,
-        [](size_t size, char const *fcontent) { return fnv1a(size, fcontent); },
-        fsize, fcontent);
+        [](size_t size, char const *fcontent) { return fnv1a(size, fcontent);
+}, fsize, fcontent);
 
-    auto const ext = res.m.path.extension();
-    res.m.type = SourceFile::determine_file_type(ext);
+    res.m.type = SourceFile::determine_file_type(res.m.path.extension());
 
     if (res.m.type == HEADER) {
       // try to open impl file
@@ -409,14 +581,14 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
       }
     }
 
-    auto opt_deps = SourceFile::analyze_dep(res.m.path, parent, file, fcontent);
-    switch (opt_deps) {
-    case decltype(opt_deps)::OK: {
+    auto opt_deps = SourceFile::analyze_dep(res.m.path, parent, file,
+fcontent); switch (opt_deps) { case decltype(opt_deps)::OK: {
       // have to move the new deps over, otherwise we'll be clobbering the
       // impl deps
       auto tmp_dep = std::move(opt_deps.get());
       res.m.deps.reserve(res.m.deps.size() + tmp_dep.size());
-      std::move(tmp_dep.begin(), tmp_dep.end(), std::back_inserter(res.m.deps));
+      std::move(tmp_dep.begin(), tmp_dep.end(),
+std::back_inserter(res.m.deps));
 
       // make sure the hashing is finished
       hash_fut.wait();
@@ -435,16 +607,143 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
     return Err(maybe_fsize.err());
   }
 }
+*/
 
-auto SourceFile::display(std::ostream &out, int const depth) const noexcept
-    -> void {
-  auto const indents = [](int const depth) -> string {
-    auto res = string(static_cast<size_t>(depth), '\t');
+auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
+    -> Result<SourceFile, SourceFileErr> {
+  using Ok = Result<SourceFile, SourceFileErr>::Ok;
+  using Err = Result<SourceFile, SourceFileErr>::Err;
+
+  auto file = File(root, File::READ);
+  if (!file)
+    return Err(FileDoesNotExist(root, parent));
+
+  auto maybe_fsize = SourceFile::get_file_content(file);
+  if (maybe_fsize == decltype(maybe_fsize)::ERR) {
+    return Err(maybe_fsize.err());
+  }
+
+  auto &&[fcontent, fsize, _] = maybe_fsize.get();
+  auto maybe_m = M::make();
+  if (maybe_m == decltype(maybe_m)::ERR)
+    return Err(maybe_m.err());
+  auto m = maybe_m.get();
+
+  auto const root_idx = m.num_files;
+  m.num_files++;
+  auto &&[start, end] = m.append_path(root);
+  auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
+    return fnv1a(fsize, fcontent);
+  });
+  auto const ftype = SourceFile::determine_file_type(root.extension());
+  if (ftype == SourceFile::HEADER) {
+    auto constexpr potential_extensions = array<string_view, 2>{{".cpp", ".c"}};
+    auto const potential_impl = (root.parent_path() / root.stem()).string();
+    for (auto const &potential_extension : potential_extensions) {
+      auto const possible_path =
+          fs::path(potential_impl + potential_extension.data());
+      if (fs::exists(fs::path(possible_path))) {
+        if (auto m_error = m.append_dep(possible_path, root_idx); m_error) {
+          return Err(m_error.get());
+        }
+      }
+    }
+    // if those fail then it's probably a HOL, maybe we could report that as a
+    // warning(?)
+  }
+
+  // write down the path name
+  m.files[root_idx].start = start;
+  m.files[root_idx].end = end;
+
+  // append type
+  m.types[root_idx] = ftype;
+
+  // analyze the deps of this file
+  auto constexpr include_prefix = string_view{"#include"};
+  auto const potential_include_dirs = get_include_paths();
+
+  // TODO: also have a flag for checking if we're in a comment or not
+  auto in_string = false;
+
+  for (auto const *ch = fcontent; *ch != 0; ++ch) {
+    auto const is_hash = *ch == '#';
+    in_string = *ch == '"';
+    if (is_hash && !in_string &&
+        strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
+      ch += include_prefix.size();
+      ch = skip_ws(ch);
+
+      switch (*ch) {
+      case '"': {
+        ++ch;
+        auto const *end_of_include_string = ch;
+        while (*end_of_include_string != 0 && *end_of_include_string != '"') {
+          ++end_of_include_string;
+        }
+
+        if (*end_of_include_string == 0)
+          return Err(NonTerminatedString(root));
+
+        auto const include_string_size = end_of_include_string - ch;
+        if (include_string_size == 0)
+          return Err(EmptyFileName(root));
+
+        auto const include_file =
+            fs::path(string_view{ch, end_of_include_string});
+
+        if (include_file.stem() == root.stem()) {
+          auto const include_f_ext =
+              SourceFile::determine_file_type(include_file.extension());
+          auto const path_ext =
+              SourceFile::determine_file_type(root.extension());
+          if (include_f_ext == HEADER && path_ext == IMPL) {
+            continue; // ignore this path
+          }
+        }
+
+        auto const dep_path = root.parent_path() / include_file;
+
+        if (auto m_error = m.append_dep(dep_path, root_idx); m_error) {
+          return Err(m_error.get());
+        }
+
+      } break;
+      case '<': {
+        // TODO: global module include
+      } break;
+      default:
+        std::cerr << "unknown char [" << *ch << "]\n";
+        // TODO: return malformed #include directive
+        break;
+      }
+    }
+  }
+
+  // get the hash last
+  m.hashes[root_idx] = hash_fut.get();
+
+  return Ok(std::move(m));
+}
+
+auto SourceFile::display(std::ostream &out,
+                         unsigned int const depth) const noexcept -> void {
+  out << "All string = [" << m.all_paths.buffer << "]\n";
+  out.flush();
+  display_impl(out, depth, 0);
+}
+
+auto SourceFile::display_impl(std::ostream &out, unsigned int const depth,
+                              unsigned int const idx) const noexcept -> void {
+
+  auto const indents = [](auto const depth) -> string {
+    auto res = string(depth, '\t');
     return res;
   }(depth);
+
   out << indents << "{\n";
   out << indents << "\"type\":\"";
-  switch (m.type) {
+  switch (m.types[idx]) {
   case IMPL:
     out << "IMPL";
     break;
@@ -460,22 +759,25 @@ auto SourceFile::display(std::ostream &out, int const depth) const noexcept
   };
   out << "\",\n";
 
-  // path already include the ""
-  out << indents << "\"path\":" << m.path << ",\n";
-  out << std::hex << indents << "\"hash\":" << m.hash << ",\n";
+  out << indents << "\"path\":\""
+      << string_view{m.all_paths.buffer + m.files[idx].start,
+                     m.all_paths.buffer + m.files[idx].end}
+      << "\",\n";
+
+  out << std::hex << indents << "\"hash\":" << m.hashes[idx] << ",\n";
 
   out << indents << "\"deps\":[\n";
-  for (int i = 0; auto const &sf_ptr : m.deps) {
-    sf_ptr->display(out, depth + 1);
-    if (i != m.deps.size() - 1)
-      out << ",\n";
-    ++i;
+
+  for (auto const dep_idx : m.deps[idx]) {
+    display_impl(out, depth + 1, dep_idx);
   }
-  out << indents << "]\n";
+
+  out << "]\n";
 
   out << indents << "}\n";
 }
 
+/*
 auto SourceFile::serialize(fs::path const &path) const noexcept -> void {
   auto outfile = File(path, File::WRITE | File::BINARY);
   if (outfile == nullptr) {
@@ -523,7 +825,8 @@ auto SourceFile::analyze_dep(fs::path const &path, fs::path const &parent,
         // TODO: local include
         ++ch;
         auto const *end_of_include_string = ch;
-        while (*end_of_include_string != 0 && *end_of_include_string != '"') {
+        while (*end_of_include_string != 0 && *end_of_include_string != '"')
+{
           ++end_of_include_string;
         }
 
@@ -602,7 +905,36 @@ auto SourceFile::read_and_report_fsize(FILE *file) noexcept
   fcontent[fsize] = 0;
   return Ok(std::make_pair(fcontent, fsize));
 }
+*/
 
+auto SourceFile::get_file_content(FILE *file) noexcept
+    -> Result<OwnedString, SourceFileErr> {
+  using Ok = Result<OwnedString, SourceFileErr>::Ok;
+  using Err = Result<OwnedString, SourceFileErr>::Err;
+  if (fseek(file, 0, SEEK_END) == -1)
+    return Err(CFileAPI(strerror(errno)));
+
+  auto const _fsize = ftell(file);
+  if (_fsize == -1)
+    return Err(CFileAPI(strerror(errno)));
+
+  auto fsize = static_cast<size_t>(_fsize);
+  rewind(file);
+
+  auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
+  if (fcontent == nullptr)
+    return Err(CFileAPI(strerror(errno)));
+
+  if (auto const amount_read = fread(fcontent, sizeof(char), fsize, file);
+      amount_read != fsize) {
+    free(fcontent);
+    return Err(CFileAPI(strerror(errno)));
+  }
+  fcontent[fsize] = 0;
+  return Ok(OwnedString(fcontent, fsize));
+}
+
+/*
 auto SourceFile::serialize_impl(File &file) const noexcept -> void {
   file.write(&m.type, sizeof(decltype(M::type)), 1);
 
@@ -645,7 +977,9 @@ auto SourceFile::deserialize_impl(File &file) noexcept -> SourceFile {
 
   return sf;
 }
+*/
 
+#if false
 // sort of a thread pool like structure that is just for compiling
 struct CompilationPool final {
   CompilationPool(Module const &mod,
@@ -749,17 +1083,21 @@ auto CompilationPool::get() noexcept -> string {
   return result;
 }
 
-[[nodiscard]]
-auto compile(Module const &mod, SourceFile const *sf) noexcept -> string {
-  auto res = string();
+struct Compiler final {
+  [[nodiscard]]
+  static auto compile(Module const &mod, SourceFile const *sf) noexcept
+      -> string {
+    auto res = string();
 
-  auto tp = CompilationPool(mod);
-  tp.add_task(sf);
-  tp.run();
-  res = tp.get();
+    auto tp = CompilationPool(mod);
+    tp.add_task(sf);
+    tp.run();
+    res = tp.get();
 
-  return res;
-}
+    return res;
+  }
+};
+#endif
 
 auto install_exe(lua_State *state) -> int {
   using Result = Result<SourceFile, SourceFileErr>;
@@ -796,12 +1134,15 @@ auto install_exe(lua_State *state) -> int {
   }
   ec.clear();
 
-  // TODO: build dep tree
   auto maybe_exe_root = SourceFile::make(main_mod.root());
   switch (maybe_exe_root) {
   case Result::OK: {
     auto exe_root = maybe_exe_root.get();
+    exe_root.display(std::cout);
+    std::cout.flush();
+    return 0;
 
+    /*
     // TODO: there is an error where if you have the following situation
     //   A.h/cpp
     //  /       \
@@ -814,7 +1155,8 @@ auto install_exe(lua_State *state) -> int {
     // we also need to reverse the tree to make caching files actually work
     // that is when a file is changed we only recompile all of the dependent
     // files instead of the entire project compile the objects :)
-    auto const actually_compiled_files = compile(main_mod, &exe_root);
+    auto const actually_compiled_files = Compiler::compile(main_mod,
+    &exe_root);
 
     // because of the format of `actually_compiled_files` for the best
     // formatting of the command there shouldn't be a space between it and the
@@ -832,6 +1174,7 @@ auto install_exe(lua_State *state) -> int {
     } else {
       return 0;
     }
+    */
   } break;
   case Result::ERR: {
     auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
@@ -843,6 +1186,7 @@ auto install_exe(lua_State *state) -> int {
   }
 }
 
+#if false
 auto install_static(lua_State *state) -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -879,7 +1223,7 @@ auto install_static(lua_State *state) -> int {
   switch (maybe_static_root) {
   case decltype(maybe_static_root)::OK: {
     auto static_root = maybe_static_root.get();
-    auto compiled_files = compile(static_mod, &static_root);
+    auto compiled_files = Compiler::compile(static_mod, &static_root);
     auto const invoked_command =
         std::format("ar crs {}/lib{}.a {}", static_mod.install_dir(),
                     static_mod.name(), compiled_files);
@@ -901,6 +1245,7 @@ auto install_static(lua_State *state) -> int {
 
   return 0;
 }
+#endif
 
 auto run(lua_State *L) noexcept -> int {
   auto const num_args = lua_gettop(L);
@@ -1093,8 +1438,10 @@ auto make_builder_obj(lua_State *state,
   lua_pushcfunction(state, install_exe);
   lua_setfield(state, -2, "install_exe");
 
+#if false
   lua_pushcfunction(state, install_static);
   lua_setfield(state, -2, "install_static");
+#endif
 
   lua_pushcfunction(state, link_static);
   lua_setfield(state, -2, "link_static");
