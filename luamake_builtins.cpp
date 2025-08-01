@@ -288,90 +288,7 @@ struct SourceFile final {
 
   static auto make(fs::path const &root,
                    fs::path const &parent = fs::current_path()) noexcept
-      -> Result<SourceFile, SourceFileErr> {
-    using Ok = Result<SourceFile, SourceFileErr>::Ok;
-    using Err = Result<SourceFile, SourceFileErr>::Err;
-
-    auto file = File(root, File::READ);
-    if (!file)
-      return Err(FileDoesNotExist(root, parent));
-
-    auto maybe_fsize = SourceFile::read_and_report_fsize(file);
-    switch (maybe_fsize) {
-    case decltype(maybe_fsize)::OK: {
-      auto &&[fcontent, fsize] = maybe_fsize.get();
-      auto res = SourceFile();
-      res.m.path = root;
-
-      auto hash_fut = std::async(
-          std::launch::async,
-          [](size_t size, char const *fcontent) {
-            return fnv1a(size, fcontent);
-          },
-          fsize, fcontent);
-
-      auto const ext = res.m.path.extension();
-      res.m.type = SourceFile::determine_file_type(ext);
-
-      if (res.m.type == HEADER) {
-        // try to open impl file
-        auto const potential_impl =
-            (res.m.path.parent_path() / res.m.path.stem()).string();
-        if (fs::exists(fs::path(potential_impl + ".cpp"))) {
-          auto maybe_impl =
-              SourceFile::make(fs::path(potential_impl + ".cpp"), res.m.path);
-          switch (maybe_impl) {
-          case decltype(maybe_impl)::OK: {
-            res.m.deps.emplace_back(new SourceFile(maybe_impl.get()));
-          } break;
-          case decltype(maybe_impl)::ERR:
-            free((void *)fcontent);
-            return Err(maybe_impl.err());
-          }
-        } else if (fs::exists(fs::path(potential_impl + ".c"))) {
-          auto maybe_impl =
-              SourceFile::make(fs::path(potential_impl + ".c"), res.m.path);
-          switch (maybe_impl) {
-          case decltype(maybe_impl)::OK: {
-            res.m.deps.emplace_back(new SourceFile(maybe_impl.get()));
-          } break;
-          case decltype(maybe_impl)::ERR:
-            free((void *)fcontent);
-            return Err(maybe_impl.err());
-          }
-        } else {
-          // idk probably a header only library
-        }
-      }
-
-      auto opt_deps =
-          SourceFile::analyze_dep(res.m.path, parent, file, fcontent);
-      switch (opt_deps) {
-      case decltype(opt_deps)::OK: {
-        // have to move the new deps over, otherwise we'll be clobbering the
-        // impl deps
-        auto tmp_dep = std::move(opt_deps.get());
-        res.m.deps.reserve(res.m.deps.size() + tmp_dep.size());
-        std::move(tmp_dep.begin(), tmp_dep.end(),
-                  std::back_inserter(res.m.deps));
-
-        // make sure the hashing is finished
-        hash_fut.wait();
-        res.m.hash = hash_fut.get();
-
-        // clean up and return
-        free((void *)fcontent);
-        return Ok(std::move(res));
-      } break;
-      case decltype(opt_deps)::ERR:
-        free((void *)fcontent);
-        return Err(opt_deps.err());
-      }
-    } break;
-    case decltype(maybe_fsize)::ERR:
-      return Err(maybe_fsize.err());
-    }
-  }
+      -> Result<SourceFile, SourceFileErr>;
 
   SourceFile(SourceFile const &) = delete;
   SourceFile &operator=(SourceFile const &) = delete;
@@ -386,69 +303,16 @@ struct SourceFile final {
   }
 
   // displays the function in a pseudo json format
-  auto display(std::ostream &out, int const depth = 0) const noexcept -> void {
-    auto const indents = [](int const depth) -> string {
-      auto res = string(static_cast<size_t>(depth), '\t');
-      return res;
-    }(depth);
-    out << indents << "{\n";
-    out << indents << "\"type\":\"";
-    switch (m.type) {
-    case IMPL:
-      out << "IMPL";
-      break;
-    case HEADER:
-      out << "HEADER";
-      break;
-    case SYSTEM:
-      out << "SYSTEM";
-      break;
-    case MISC:
-      out << "MISC";
-      break;
-    };
-    out << "\",\n";
-
-    // path already include the ""
-    out << indents << "\"path\":" << m.path << ",\n";
-    out << std::hex << indents << "\"hash\":" << m.hash << ",\n";
-
-    out << indents << "\"deps\":[\n";
-    for (int i = 0; auto const &sf_ptr : m.deps) {
-      sf_ptr->display(out, depth + 1);
-      if (i != m.deps.size() - 1)
-        out << ",\n";
-      ++i;
-    }
-    out << indents << "]\n";
-
-    out << indents << "}\n";
-  }
+  auto display(std::ostream &out, int const depth = 0) const noexcept -> void;
 
   // TODO: add better error handling
-  auto serialize(fs::path const &path) const noexcept -> void {
-    auto outfile = File(path, File::WRITE | File::BINARY);
-    if (outfile == nullptr) {
-      return;
-    }
-
-    serialize_impl(outfile);
-    outfile.flush();
-  }
+  auto serialize(fs::path const &path) const noexcept -> void;
 
   // TODO: we're just assuming that the path is well constructed
   // so add some error handling to this function
   [[nodiscard(
       "We spent all this time deserializing you better use the result")]]
-  static auto deserialize(fs::path const &path) noexcept -> SourceFile {
-    auto file = File(path, File::READ | File::BINARY);
-    if (file == nullptr) {
-      std::cerr << "unable to open serialization file [" << path << "]\n";
-      std::terminate();
-    }
-
-    return SourceFile::deserialize_impl(file);
-  }
+  static auto deserialize(fs::path const &path) noexcept -> SourceFile;
 
   auto path() const noexcept -> fs::path { return m.path; }
   auto deps() const noexcept -> vector<SourceFile *> { return m.deps; }
@@ -472,165 +336,315 @@ private:
     fs::path path;
     vector<SourceFile *> deps;
     size_t hash;
-    // TODO:
-    // std::thread hashing_thread;
-    // std::thread dep_analyzer_thread;
   } m;
 
   static auto analyze_dep(fs::path const &path, fs::path const &parent,
                           FILE *file, char const *fcontent) noexcept
-      -> Result<decltype(SourceFile::M::deps), SourceFileErr> {
-    using Ok = Result<decltype(SourceFile::M::deps), SourceFileErr>::Ok;
-    using Err = Result<decltype(SourceFile::M::deps), SourceFileErr>::Err;
-
-    auto res = vector<SourceFile *>();
-    res.reserve(4);
-
-    auto constexpr include_prefix = string_view{"#include"};
-    auto const potential_include_dirs = get_include_paths();
-
-    auto in_string = false;
-
-    for (auto const *ch = fcontent; *ch != 0; ++ch) {
-      auto const is_hash = *ch == '#';
-      in_string = *ch == '"';
-      if (is_hash && !in_string &&
-          strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
-        ch += include_prefix.size();
-        ch = skip_ws(ch);
-
-        switch (*ch) {
-        case '"': {
-          // TODO: local include
-          ++ch;
-          auto const *end_of_include_string = ch;
-          while (*end_of_include_string != 0 && *end_of_include_string != '"') {
-            ++end_of_include_string;
-          }
-
-          if (*end_of_include_string == 0) {
-            return Err(NonTerminatedString(path));
-          }
-
-          auto const include_string_size = end_of_include_string - ch;
-          switch (include_string_size) {
-          case 0: {
-            return Err(EmptyFileName(path));
-          } break;
-          default: {
-            auto const include_file =
-                fs::path(string_view{ch, end_of_include_string});
-            if (include_file.stem() == path.stem()) {
-              auto const include_f_ext =
-                  determine_file_type(include_file.extension());
-              auto const path_ext = determine_file_type(path.extension());
-              if (include_f_ext == HEADER && path_ext == IMPL) {
-                continue;
-                // ignore this path
-              }
-            }
-            auto const dep_path = path.parent_path() / include_file;
-
-            auto sf = SourceFile::make(dep_path, path);
-            switch (sf) {
-            case decltype(sf)::OK: {
-              auto *_sf = new SourceFile(sf.get());
-              res.emplace_back(_sf);
-            } break;
-            case decltype(sf)::ERR: {
-              return Err(sf.err());
-            } break;
-            }
-          } break;
-          }
-        } break;
-        case '<': {
-          // std::cout << "found global [" << ch << "]\n";
-          // std::cout.flush();
-          // TODO: global/module include
-        } break;
-        default: {
-          std::cerr << "unknown char [" << *ch << "]\n";
-          // TODO: report error malformed #include directive
-        } break;
-        }
-      }
-    }
-    return Ok(std::move(res));
-  }
+      -> Result<decltype(SourceFile::M::deps), SourceFileErr>;
 
   static auto read_and_report_fsize(FILE *file) noexcept
-      -> Result<pair<char const *, size_t>, SourceFileErr> {
-    using Ok = Result<pair<char const *, size_t>, SourceFileErr>::Ok;
-    using Err = Result<pair<char const *, size_t>, SourceFileErr>::Err;
-    if (fseek(file, 0, SEEK_END) == -1)
-      return Err(CFileAPIError(strerror(errno)));
+      -> Result<pair<char const *, size_t>, SourceFileErr>;
 
-    auto const _fsize = ftell(file);
-    if (_fsize == -1)
-      return Err(CFileAPIError(strerror(errno)));
+  auto serialize_impl(File &file) const noexcept -> void;
 
-    auto fsize = static_cast<size_t>(_fsize);
-    rewind(file);
-
-    auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
-    if (fcontent == nullptr)
-      return Err(CFileAPIError(strerror(errno)));
-
-    if (auto const amount_read = fread(fcontent, sizeof(char), fsize, file);
-        amount_read != fsize)
-      return Err(CFileAPIError(strerror(errno)));
-    fcontent[fsize] = 0;
-    return Ok(std::make_pair(fcontent, fsize));
-  }
-
-  auto serialize_impl(File &file) const noexcept -> void {
-    file.write(&m.type, sizeof(decltype(M::type)), 1);
-
-    file.write(&m.hash, sizeof(decltype(M::hash)), 1);
-
-    // i hope this doesn't alloc that'd be annoying
-    auto const path_len = m.path.string().size();
-    file.write(&path_len, sizeof(decltype(path_len)), 1);
-
-    file.write(m.path.c_str(), sizeof(char), path_len);
-
-    auto const deps_size = m.deps.size();
-    file.write(&deps_size, sizeof(decltype(M::deps.size())), 1);
-
-    for (auto const &dep : m.deps) {
-      dep->serialize_impl(file);
-    }
-  }
-
-  static auto deserialize_impl(File &file) noexcept -> SourceFile {
-    auto sf = SourceFile();
-    file.read(&sf.m.type, sizeof(decltype(M::type)), 1);
-
-    file.read(&sf.m.hash, sizeof(decltype(M::hash)), 1);
-
-    auto string_len = decltype(M::path.string().size()){};
-    file.read(&string_len, sizeof(decltype(string_len)), 1);
-    auto *buffer = (char *)malloc(string_len + 1);
-    file.read(buffer, sizeof(char), string_len);
-    buffer[string_len] = 0;
-    sf.m.path = fs::path(buffer);
-    free(buffer);
-
-    auto num_deps = decltype(M::deps.size()){};
-    file.read(&num_deps, sizeof(num_deps), 1);
-    sf.m.deps.reserve(num_deps);
-
-    for (auto i = decltype(num_deps){}; i < num_deps; ++i)
-      sf.m.deps.emplace_back(new SourceFile(deserialize_impl(file)));
-
-    return sf;
-  }
+  static auto deserialize_impl(File &file) noexcept -> SourceFile;
 
   SourceFile() = default;
   SourceFile(SourceFile::M &&m) noexcept : m(std::move(m)) {}
   friend Result<SourceFile, SourceFileErr>;
 };
+
+auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
+    -> Result<SourceFile, SourceFileErr> {
+  using Ok = Result<SourceFile, SourceFileErr>::Ok;
+  using Err = Result<SourceFile, SourceFileErr>::Err;
+
+  auto file = File(root, File::READ);
+  if (!file)
+    return Err(FileDoesNotExist(root, parent));
+
+  auto maybe_fsize = SourceFile::read_and_report_fsize(file);
+  switch (maybe_fsize) {
+  case decltype(maybe_fsize)::OK: {
+    auto &&[fcontent, fsize] = maybe_fsize.get();
+    auto res = SourceFile();
+    res.m.path = root;
+
+    auto hash_fut = std::async(
+        std::launch::async,
+        [](size_t size, char const *fcontent) { return fnv1a(size, fcontent); },
+        fsize, fcontent);
+
+    auto const ext = res.m.path.extension();
+    res.m.type = SourceFile::determine_file_type(ext);
+
+    if (res.m.type == HEADER) {
+      // try to open impl file
+      auto const potential_impl =
+          (res.m.path.parent_path() / res.m.path.stem()).string();
+      if (fs::exists(fs::path(potential_impl + ".cpp"))) {
+        auto maybe_impl =
+            SourceFile::make(fs::path(potential_impl + ".cpp"), res.m.path);
+        switch (maybe_impl) {
+        case decltype(maybe_impl)::OK: {
+          res.m.deps.emplace_back(new SourceFile(maybe_impl.get()));
+        } break;
+        case decltype(maybe_impl)::ERR:
+          free((void *)fcontent);
+          return Err(maybe_impl.err());
+        }
+      } else if (fs::exists(fs::path(potential_impl + ".c"))) {
+        auto maybe_impl =
+            SourceFile::make(fs::path(potential_impl + ".c"), res.m.path);
+        switch (maybe_impl) {
+        case decltype(maybe_impl)::OK: {
+          res.m.deps.emplace_back(new SourceFile(maybe_impl.get()));
+        } break;
+        case decltype(maybe_impl)::ERR:
+          free((void *)fcontent);
+          return Err(maybe_impl.err());
+        }
+      } else {
+        // idk probably a header only library
+      }
+    }
+
+    auto opt_deps = SourceFile::analyze_dep(res.m.path, parent, file, fcontent);
+    switch (opt_deps) {
+    case decltype(opt_deps)::OK: {
+      // have to move the new deps over, otherwise we'll be clobbering the
+      // impl deps
+      auto tmp_dep = std::move(opt_deps.get());
+      res.m.deps.reserve(res.m.deps.size() + tmp_dep.size());
+      std::move(tmp_dep.begin(), tmp_dep.end(), std::back_inserter(res.m.deps));
+
+      // make sure the hashing is finished
+      hash_fut.wait();
+      res.m.hash = hash_fut.get();
+
+      // clean up and return
+      free((void *)fcontent);
+      return Ok(std::move(res));
+    } break;
+    case decltype(opt_deps)::ERR:
+      free((void *)fcontent);
+      return Err(opt_deps.err());
+    }
+  } break;
+  case decltype(maybe_fsize)::ERR:
+    return Err(maybe_fsize.err());
+  }
+}
+
+auto SourceFile::display(std::ostream &out, int const depth) const noexcept
+    -> void {
+  auto const indents = [](int const depth) -> string {
+    auto res = string(static_cast<size_t>(depth), '\t');
+    return res;
+  }(depth);
+  out << indents << "{\n";
+  out << indents << "\"type\":\"";
+  switch (m.type) {
+  case IMPL:
+    out << "IMPL";
+    break;
+  case HEADER:
+    out << "HEADER";
+    break;
+  case SYSTEM:
+    out << "SYSTEM";
+    break;
+  case MISC:
+    out << "MISC";
+    break;
+  };
+  out << "\",\n";
+
+  // path already include the ""
+  out << indents << "\"path\":" << m.path << ",\n";
+  out << std::hex << indents << "\"hash\":" << m.hash << ",\n";
+
+  out << indents << "\"deps\":[\n";
+  for (int i = 0; auto const &sf_ptr : m.deps) {
+    sf_ptr->display(out, depth + 1);
+    if (i != m.deps.size() - 1)
+      out << ",\n";
+    ++i;
+  }
+  out << indents << "]\n";
+
+  out << indents << "}\n";
+}
+
+auto SourceFile::serialize(fs::path const &path) const noexcept -> void {
+  auto outfile = File(path, File::WRITE | File::BINARY);
+  if (outfile == nullptr) {
+    return;
+  }
+
+  serialize_impl(outfile);
+  outfile.flush();
+}
+
+auto SourceFile::deserialize(fs::path const &path) noexcept -> SourceFile {
+  auto file = File(path, File::READ | File::BINARY);
+  if (file == nullptr) {
+    std::cerr << "unable to open serialization file [" << path << "]\n";
+    std::terminate();
+  }
+
+  return SourceFile::deserialize_impl(file);
+}
+
+auto SourceFile::analyze_dep(fs::path const &path, fs::path const &parent,
+                             FILE *file, char const *fcontent) noexcept
+    -> Result<decltype(SourceFile::M::deps), SourceFileErr> {
+  using Ok = Result<decltype(SourceFile::M::deps), SourceFileErr>::Ok;
+  using Err = Result<decltype(SourceFile::M::deps), SourceFileErr>::Err;
+
+  auto res = vector<SourceFile *>();
+  res.reserve(4);
+
+  auto constexpr include_prefix = string_view{"#include"};
+  auto const potential_include_dirs = get_include_paths();
+
+  auto in_string = false;
+
+  for (auto const *ch = fcontent; *ch != 0; ++ch) {
+    auto const is_hash = *ch == '#';
+    in_string = *ch == '"';
+    if (is_hash && !in_string &&
+        strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
+      ch += include_prefix.size();
+      ch = skip_ws(ch);
+
+      switch (*ch) {
+      case '"': {
+        // TODO: local include
+        ++ch;
+        auto const *end_of_include_string = ch;
+        while (*end_of_include_string != 0 && *end_of_include_string != '"') {
+          ++end_of_include_string;
+        }
+
+        if (*end_of_include_string == 0) {
+          return Err(NonTerminatedString(path));
+        }
+
+        auto const include_string_size = end_of_include_string - ch;
+        switch (include_string_size) {
+        case 0: {
+          return Err(EmptyFileName(path));
+        } break;
+        default: {
+          auto const include_file =
+              fs::path(string_view{ch, end_of_include_string});
+          if (include_file.stem() == path.stem()) {
+            auto const include_f_ext =
+                determine_file_type(include_file.extension());
+            auto const path_ext = determine_file_type(path.extension());
+            if (include_f_ext == HEADER && path_ext == IMPL) {
+              continue;
+              // ignore this path
+            }
+          }
+          auto const dep_path = path.parent_path() / include_file;
+
+          auto sf = SourceFile::make(dep_path, path);
+          switch (sf) {
+          case decltype(sf)::OK: {
+            auto *_sf = new SourceFile(sf.get());
+            res.emplace_back(_sf);
+          } break;
+          case decltype(sf)::ERR: {
+            return Err(sf.err());
+          } break;
+          }
+        } break;
+        }
+      } break;
+      case '<': {
+        // std::cout << "found global [" << ch << "]\n";
+        // std::cout.flush();
+        // TODO: global/module include
+      } break;
+      default: {
+        std::cerr << "unknown char [" << *ch << "]\n";
+        // TODO: report error malformed #include directive
+      } break;
+      }
+    }
+  }
+  return Ok(std::move(res));
+}
+
+auto SourceFile::read_and_report_fsize(FILE *file) noexcept
+    -> Result<pair<char const *, size_t>, SourceFileErr> {
+  using Ok = Result<pair<char const *, size_t>, SourceFileErr>::Ok;
+  using Err = Result<pair<char const *, size_t>, SourceFileErr>::Err;
+  if (fseek(file, 0, SEEK_END) == -1)
+    return Err(CFileAPIError(strerror(errno)));
+
+  auto const _fsize = ftell(file);
+  if (_fsize == -1)
+    return Err(CFileAPIError(strerror(errno)));
+
+  auto fsize = static_cast<size_t>(_fsize);
+  rewind(file);
+
+  auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
+  if (fcontent == nullptr)
+    return Err(CFileAPIError(strerror(errno)));
+
+  if (auto const amount_read = fread(fcontent, sizeof(char), fsize, file);
+      amount_read != fsize)
+    return Err(CFileAPIError(strerror(errno)));
+  fcontent[fsize] = 0;
+  return Ok(std::make_pair(fcontent, fsize));
+}
+
+auto SourceFile::serialize_impl(File &file) const noexcept -> void {
+  file.write(&m.type, sizeof(decltype(M::type)), 1);
+
+  file.write(&m.hash, sizeof(decltype(M::hash)), 1);
+
+  // i hope this doesn't alloc that'd be annoying
+  auto const path_len = m.path.string().size();
+  file.write(&path_len, sizeof(decltype(path_len)), 1);
+
+  file.write(m.path.c_str(), sizeof(char), path_len);
+
+  auto const deps_size = m.deps.size();
+  file.write(&deps_size, sizeof(decltype(M::deps.size())), 1);
+
+  for (auto const &dep : m.deps) {
+    dep->serialize_impl(file);
+  }
+}
+
+auto SourceFile::deserialize_impl(File &file) noexcept -> SourceFile {
+  auto sf = SourceFile();
+  file.read(&sf.m.type, sizeof(decltype(M::type)), 1);
+
+  file.read(&sf.m.hash, sizeof(decltype(M::hash)), 1);
+
+  auto string_len = decltype(M::path.string().size()){};
+  file.read(&string_len, sizeof(decltype(string_len)), 1);
+  auto *buffer = (char *)malloc(string_len + 1);
+  file.read(buffer, sizeof(char), string_len);
+  buffer[string_len] = 0;
+  sf.m.path = fs::path(buffer);
+  free(buffer);
+
+  auto num_deps = decltype(M::deps.size()){};
+  file.read(&num_deps, sizeof(num_deps), 1);
+  sf.m.deps.reserve(num_deps);
+
+  for (auto i = decltype(num_deps){}; i < num_deps; ++i)
+    sf.m.deps.emplace_back(new SourceFile(deserialize_impl(file)));
+
+  return sf;
+}
 
 // sort of a thread pool like structure that is just for compiling
 struct CompilationPool final {
