@@ -47,4 +47,41 @@ private:
   std::unique_ptr<Error> e;
 };
 
+template <class Error> struct Opt final {
+  struct None final {
+    constexpr None() noexcept {}
+  };
+
+  struct Err final {
+    constexpr Err(Error &&e) noexcept : e(std::move(e)) {}
+
+  private:
+    Error e;
+    friend Opt<Error>;
+  };
+
+  enum Type : unsigned char {
+    OK,
+    ERR,
+  };
+
+  auto constexpr ok() const noexcept -> bool { return e == nullptr; }
+  constexpr operator Type() const noexcept { return ok() ? OK : ERR; }
+
+  auto get() noexcept -> Error { return *e; }
+
+  Opt() = delete;
+  Opt(Opt const &) = delete;
+  Opt &operator=(Opt const &) = delete;
+
+  constexpr Opt(None &&) noexcept : e(nullptr) {}
+  constexpr Opt(Err &&err) noexcept : e(std::make_unique<Error>(err.e)) {}
+
+  constexpr Opt(Opt &&) = default;
+  constexpr Opt &operator=(Opt &&) = default;
+
+private:
+  std::unique_ptr<Error> e;
+};
+
 #endif // !__LUAMAKE_ERROR_HPP
