@@ -373,15 +373,6 @@ private:
     auto append(string &&) noexcept -> void;
   };
 
-#if false
-  struct M final {
-    SourceFile_t type;
-    fs::path path;
-    vector<SourceFile *> deps;
-    size_t hash;
-  } m;
-#endif
-
   // a parallel array for all of the source files
   // NOTE: this could be pushed further, and we could have a
   // memory allocator as a part of this struct, then just
