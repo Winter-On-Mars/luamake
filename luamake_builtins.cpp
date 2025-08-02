@@ -46,6 +46,8 @@ extern "C" {
 namespace luamake_builtins {
 using std::pair, std::array, std::string, std::string_view, std::vector;
 
+using uint = unsigned int;
+
 namespace {
 // TODO: fill this out
 // read user luamake.lua to find module dependency
@@ -928,7 +930,6 @@ auto SourceFile::deserialize_impl(File &file) noexcept -> SourceFile {
 }
 */
 
-#if false
 // sort of a thread pool like structure that is just for compiling
 struct CompilationPool final {
   CompilationPool(Module const &mod,
@@ -941,7 +942,7 @@ struct CompilationPool final {
 
   ~CompilationPool() noexcept = default;
 
-  auto add_task(SourceFile const *) noexcept -> void;
+  auto add_task(SourceFile const &) noexcept -> void;
 
   auto run() noexcept -> void;
 
@@ -973,10 +974,17 @@ auto CompilationPool::run() noexcept -> void {
     workers.emplace_back([this]() { _thread_loop(); });
 }
 
-auto CompilationPool::add_task(SourceFile const *sf) noexcept -> void {
-  remaining_tasks.push_back(sf->path());
-  for (auto const &dep : sf->deps())
-    add_task(dep);
+auto CompilationPool::add_task(SourceFile const &sf) noexcept -> void {
+  // this is a really hacky solution to fix the issues of compiling the same
+  // source multiple times, this is probably where that hash set solution would
+  // probably make things faster :)
+  auto lowest = uint{0};
+  for (auto i = size_t{}; i < sf.m.num_files; ++i) {
+    if (sf.m.types[i] == SourceFile::IMPL && sf.m.files[i].start >= lowest) {
+      remaining_tasks.push_back(fs::path(sf.m.get_path(i)));
+      lowest = sf.m.files[i].start + 1;
+    }
+  }
 }
 
 auto CompilationPool::busy() noexcept -> bool {
@@ -1034,7 +1042,7 @@ auto CompilationPool::get() noexcept -> string {
 
 struct Compiler final {
   [[nodiscard]]
-  static auto compile(Module const &mod, SourceFile const *sf) noexcept
+  static auto compile(Module const &mod, SourceFile const &sf) noexcept
       -> string {
     auto res = string();
 
@@ -1046,7 +1054,6 @@ struct Compiler final {
     return res;
   }
 };
-#endif
 
 auto install_exe(lua_State *state) -> int {
   using Result = Result<SourceFile, SourceFileErr>;
@@ -1089,23 +1096,8 @@ auto install_exe(lua_State *state) -> int {
     auto exe_root = maybe_exe_root.get();
     exe_root.display(std::cout);
     std::cout.flush();
-    return 0;
 
-    /*
-    // TODO: there is an error where if you have the following situation
-    //   A.h/cpp
-    //  /       \
-    // B.h/cpp   C.h/cpp
-    // \        /
-    //  main.cpp
-    // then A.cpp will be compiled twice, causing a linking error
-    // the way to fix this is to order the dep tree in topological order
-    // i.e. we need to topologically sort the dep tree so that it's linearized
-    // we also need to reverse the tree to make caching files actually work
-    // that is when a file is changed we only recompile all of the dependent
-    // files instead of the entire project compile the objects :)
-    auto const actually_compiled_files = Compiler::compile(main_mod,
-    &exe_root);
+    auto const actually_compiled_files = Compiler::compile(main_mod, exe_root);
 
     // because of the format of `actually_compiled_files` for the best
     // formatting of the command there shouldn't be a space between it and the
@@ -1123,7 +1115,6 @@ auto install_exe(lua_State *state) -> int {
     } else {
       return 0;
     }
-    */
   } break;
   case Result::ERR: {
     auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
