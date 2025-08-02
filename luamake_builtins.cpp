@@ -26,6 +26,7 @@ extern "C" {
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -94,6 +95,16 @@ auto constexpr fnv1a(size_t size, char const *buffer) noexcept -> size_t {
 
   return hash;
 }
+
+#if false
+// helper function for displaying every byte of the string_view
+auto display_string_view(string_view const str) noexcept -> void {
+  for (auto i = size_t{}; i != str.length(); ++i) {
+    std::cout << str[i] << '-';
+  }
+  std::cout.flush();
+}
+#endif
 
 struct Compiler;
 struct CompilationPool;
@@ -375,6 +386,8 @@ private:
   // NOTE: this could be pushed further, and we could have a
   // memory allocator as a part of this struct, then just
   // clearing the memory allocator would act as the destructor
+  // TODO: if performance becomes an issue, it might be good to switch this to a
+  // hash set for the `find` function
   struct M final {
     struct StringViews final {
       unsigned int start;
@@ -407,6 +420,9 @@ private:
         -> Opt<SourceFileErr>;
     [[nodiscard]]
     auto get_path(size_t const) const noexcept -> fs::path;
+    [[nodiscard]]
+    auto find(string_view const string) const noexcept
+        -> std::tuple<bool, unsigned int, unsigned int>;
   } m;
 
   /*
@@ -465,9 +481,9 @@ SourceFile::OwnedString::~OwnedString() noexcept {
 
 auto SourceFile::OwnedString::append(string &&str) noexcept -> void {
   auto const str_len = str.length();
-  if (!(size < capacity - str_len)) {
+  if (!(size < capacity - str_len - 1)) {
     /* resize */
-    auto next_cap = 3 * (capacity + str_len) / 2;
+    auto next_cap = 3 * (capacity + str_len + 1) / 2;
     buffer = (char *)realloc(buffer, next_cap * sizeof(char));
     if (buffer == nullptr) {
       std::cerr << "Unable to realloc [" << next_cap << "] bytes needed\n";
@@ -477,6 +493,8 @@ auto SourceFile::OwnedString::append(string &&str) noexcept -> void {
   }
   memcpy(buffer + size, str.data(), str_len);
   size += str_len;
+  buffer[size] = 0;
+  ++size;
 }
 
 auto SourceFile::M::make(size_t const num_files) noexcept
@@ -505,6 +523,9 @@ auto SourceFile::M::make(size_t const num_files) noexcept
 
 auto SourceFile::M::append_path(fs::path const &path) noexcept
     -> pair<unsigned int, unsigned int> {
+  if (auto &&[found, start, end] = find(path.c_str()); found) {
+    return std::make_pair(start, end);
+  }
   auto start = all_paths.size;
   all_paths.append(path.string());
   auto end = all_paths.size;
@@ -632,6 +653,34 @@ auto SourceFile::M::append_dep(fs::path const &root,
 auto SourceFile::M::get_path(size_t const idx) const noexcept -> fs::path {
   auto &&[start, end] = files[idx];
   return fs::path(all_paths.buffer + start, all_paths.buffer + end);
+}
+
+// this could (and probably should (if possible)) be rewritten to use the files
+// array(?)
+auto SourceFile::M::find(string_view const path) const noexcept
+    -> std::tuple<bool, unsigned int, unsigned int> {
+  auto const *start = all_paths.buffer;
+  auto const *current = all_paths.buffer;
+  auto end = size_t{};
+
+  while (end != all_paths.size) {
+    if (all_paths.buffer[end] == 0) {
+      current = all_paths.buffer + end;
+      // check
+      auto const path_view = string_view{start, current};
+      if (path_view.size() == path.size() &&
+          *path_view.data() == *path.data() &&
+          strncmp(path_view.data(), path.data(), path_view.size()) == 0) {
+        return std::make_tuple(
+            true, static_cast<unsigned int>(start - all_paths.buffer),
+            static_cast<unsigned int>(end));
+      }
+      start = current + 1;
+    }
+    ++end;
+  }
+
+  return std::make_tuple(false, 0, 0);
 }
 
 /*
@@ -841,7 +890,8 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
 
 auto SourceFile::display(std::ostream &out,
                          unsigned int const depth) const noexcept -> void {
-  out << "All string = [" << m.all_paths.buffer << "]\n";
+  out << "All string = [" << string_view{m.all_paths.buffer, m.all_paths.size}
+      << "]\n";
   out.flush();
   display_impl(out, depth, 0);
 }
