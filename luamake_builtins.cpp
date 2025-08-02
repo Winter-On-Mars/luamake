@@ -397,13 +397,6 @@ private:
     size_t num_files;
     size_t cap_files;
     OwnedString all_paths;
-    // all of these are arrays
-    /*
-    SourceFile_t *types;
-    StringViews *files;
-    vector<int> *deps;
-    size_t *hashes;
-    */
     std::unique_ptr<SourceFile_t[]> types;
     std::unique_ptr<StringViews[]> files;
     std::unique_ptr<vector<unsigned int>[]> deps;
@@ -425,15 +418,8 @@ private:
         -> std::tuple<bool, unsigned int, unsigned int>;
   } m;
 
-  /*
-  static auto analyze_dep(fs::path const &path, fs::path const &parent,
-                          FILE *file, char const *fcontent) noexcept
-      -> Result<decltype(SourceFile::M::deps), SourceFileErr>;
-
-  static auto read_and_report_fsize(FILE *file) noexcept
-      -> Result<pair<char const *, size_t>, SourceFileErr>;
-      */
-
+  // this should probably returned a FixedString, we don't need the size and
+  // capacity
   static auto get_file_content(FILE *file) noexcept
       -> Result<OwnedString, SourceFileErr>;
 
@@ -683,89 +669,6 @@ auto SourceFile::M::find(string_view const path) const noexcept
   return std::make_tuple(false, 0, 0);
 }
 
-/*
-auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
-    -> Result<SourceFile, SourceFileErr> {
-  using Ok = Result<SourceFile, SourceFileErr>::Ok;
-  using Err = Result<SourceFile, SourceFileErr>::Err;
-
-  auto file = File(root, File::READ);
-  if (!file)
-    return Err(FileDoesNotExist(root, parent));
-
-  auto maybe_fsize = SourceFile::read_and_report_fsize(file);
-  switch (maybe_fsize) {
-  case decltype(maybe_fsize)::OK: {
-    auto &&[fcontent, fsize] = maybe_fsize.get();
-    auto res = SourceFile();
-    res.m.path = root;
-
-    auto hash_fut = std::async(
-        std::launch::async,
-        [](size_t size, char const *fcontent) { return fnv1a(size, fcontent);
-}, fsize, fcontent);
-
-    res.m.type = SourceFile::determine_file_type(res.m.path.extension());
-
-    if (res.m.type == HEADER) {
-      // try to open impl file
-      auto const potential_impl =
-          (res.m.path.parent_path() / res.m.path.stem()).string();
-      if (fs::exists(fs::path(potential_impl + ".cpp"))) {
-        auto maybe_impl =
-            SourceFile::make(fs::path(potential_impl + ".cpp"), res.m.path);
-        switch (maybe_impl) {
-        case decltype(maybe_impl)::OK: {
-          res.m.deps.emplace_back(new SourceFile(maybe_impl.get()));
-        } break;
-        case decltype(maybe_impl)::ERR:
-          free((void *)fcontent);
-          return Err(maybe_impl.err());
-        }
-      } else if (fs::exists(fs::path(potential_impl + ".c"))) {
-        auto maybe_impl =
-            SourceFile::make(fs::path(potential_impl + ".c"), res.m.path);
-        switch (maybe_impl) {
-        case decltype(maybe_impl)::OK: {
-          res.m.deps.emplace_back(new SourceFile(maybe_impl.get()));
-        } break;
-        case decltype(maybe_impl)::ERR:
-          free((void *)fcontent);
-          return Err(maybe_impl.err());
-        }
-      } else {
-        // idk probably a header only library
-      }
-    }
-
-    auto opt_deps = SourceFile::analyze_dep(res.m.path, parent, file,
-fcontent); switch (opt_deps) { case decltype(opt_deps)::OK: {
-      // have to move the new deps over, otherwise we'll be clobbering the
-      // impl deps
-      auto tmp_dep = std::move(opt_deps.get());
-      res.m.deps.reserve(res.m.deps.size() + tmp_dep.size());
-      std::move(tmp_dep.begin(), tmp_dep.end(),
-std::back_inserter(res.m.deps));
-
-      // make sure the hashing is finished
-      hash_fut.wait();
-      res.m.hash = hash_fut.get();
-
-      // clean up and return
-      free((void *)fcontent);
-      return Ok(std::move(res));
-    } break;
-    case decltype(opt_deps)::ERR:
-      free((void *)fcontent);
-      return Err(opt_deps.err());
-    }
-  } break;
-  case decltype(maybe_fsize)::ERR:
-    return Err(maybe_fsize.err());
-  }
-}
-*/
-
 // TODO: extract the commonality between this function and append_dep
 auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
     -> Result<SourceFile, SourceFileErr> {
@@ -959,114 +862,6 @@ auto SourceFile::deserialize(fs::path const &path) noexcept -> SourceFile {
   }
 
   return SourceFile::deserialize_impl(file);
-}
-
-auto SourceFile::analyze_dep(fs::path const &path, fs::path const &parent,
-                             FILE *file, char const *fcontent) noexcept
-    -> Result<decltype(SourceFile::M::deps), SourceFileErr> {
-  using Ok = Result<decltype(SourceFile::M::deps), SourceFileErr>::Ok;
-  using Err = Result<decltype(SourceFile::M::deps), SourceFileErr>::Err;
-
-  auto res = vector<SourceFile *>();
-  res.reserve(4);
-
-  auto constexpr include_prefix = string_view{"#include"};
-  auto const potential_include_dirs = get_include_paths();
-
-  auto in_string = false;
-
-  for (auto const *ch = fcontent; *ch != 0; ++ch) {
-    auto const is_hash = *ch == '#';
-    in_string = *ch == '"';
-    if (is_hash && !in_string &&
-        strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
-      ch += include_prefix.size();
-      ch = skip_ws(ch);
-
-      switch (*ch) {
-      case '"': {
-        // TODO: local include
-        ++ch;
-        auto const *end_of_include_string = ch;
-        while (*end_of_include_string != 0 && *end_of_include_string != '"')
-{
-          ++end_of_include_string;
-        }
-
-        if (*end_of_include_string == 0) {
-          return Err(NonTerminatedString(path));
-        }
-
-        auto const include_string_size = end_of_include_string - ch;
-        switch (include_string_size) {
-        case 0: {
-          return Err(EmptyFileName(path));
-        } break;
-        default: {
-          auto const include_file =
-              fs::path(string_view{ch, end_of_include_string});
-          if (include_file.stem() == path.stem()) {
-            auto const include_f_ext =
-                determine_file_type(include_file.extension());
-            auto const path_ext = determine_file_type(path.extension());
-            if (include_f_ext == HEADER && path_ext == IMPL) {
-              continue;
-              // ignore this path
-            }
-          }
-          auto const dep_path = path.parent_path() / include_file;
-
-          auto sf = SourceFile::make(dep_path, path);
-          switch (sf) {
-          case decltype(sf)::OK: {
-            auto *_sf = new SourceFile(sf.get());
-            res.emplace_back(_sf);
-          } break;
-          case decltype(sf)::ERR: {
-            return Err(sf.err());
-          } break;
-          }
-        } break;
-        }
-      } break;
-      case '<': {
-        // std::cout << "found global [" << ch << "]\n";
-        // std::cout.flush();
-        // TODO: global/module include
-      } break;
-      default: {
-        std::cerr << "unknown char [" << *ch << "]\n";
-        // TODO: report error malformed #include directive
-      } break;
-      }
-    }
-  }
-  return Ok(std::move(res));
-}
-
-auto SourceFile::read_and_report_fsize(FILE *file) noexcept
-    -> Result<pair<char const *, size_t>, SourceFileErr> {
-  using Ok = Result<pair<char const *, size_t>, SourceFileErr>::Ok;
-  using Err = Result<pair<char const *, size_t>, SourceFileErr>::Err;
-  if (fseek(file, 0, SEEK_END) == -1)
-    return Err(CFileAPIError(strerror(errno)));
-
-  auto const _fsize = ftell(file);
-  if (_fsize == -1)
-    return Err(CFileAPIError(strerror(errno)));
-
-  auto fsize = static_cast<size_t>(_fsize);
-  rewind(file);
-
-  auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
-  if (fcontent == nullptr)
-    return Err(CFileAPIError(strerror(errno)));
-
-  if (auto const amount_read = fread(fcontent, sizeof(char), fsize, file);
-      amount_read != fsize)
-    return Err(CFileAPIError(strerror(errno)));
-  fcontent[fsize] = 0;
-  return Ok(std::make_pair(fcontent, fsize));
 }
 */
 
