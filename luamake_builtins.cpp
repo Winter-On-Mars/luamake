@@ -1416,15 +1416,6 @@ struct Compiler final {
     pool.run();
     res = pool.get();
     return res;
-
-#if 0
-    auto tp = CompilationPool(&mod);
-    tp.add_task(mod.m.tree);
-    tp.run();
-    res = tp.get();
-
-    return res;
-#endif
   }
 };
 
