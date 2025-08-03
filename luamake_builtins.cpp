@@ -745,62 +745,112 @@ auto Module::DepTree::M::root_appends(fs::path const &root) noexcept
   auto constexpr include_prefix = string_view{"#include"};
   auto const potential_include_dirs = get_include_paths();
 
-  // TODO: also have a flag for checking if we're in a comment or not
-  auto in_string = false;
+  for (auto const *ch = fcontent; *ch != 0;) {
+    switch (*ch) {
+    case '#': // possible include
+    {
+      if (strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
+        ch += include_prefix.size();
+        ch = skip_ws(ch);
 
-  for (auto const *ch = fcontent; *ch != 0; ++ch) {
-    auto const is_hash = *ch == '#';
-    in_string = *ch == '"';
-    if (is_hash && !in_string &&
-        strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
-      ch += include_prefix.size();
-      ch = skip_ws(ch);
+        switch (*ch) {
+        case '"': {
+          ++ch;
+          auto const *end_of_include_string = ch;
+          while (*end_of_include_string != 0 && *end_of_include_string != '"') {
+            ++end_of_include_string;
+          }
 
-      switch (*ch) {
-      case '"': {
-        ++ch;
-        auto const *end_of_include_string = ch;
-        while (*end_of_include_string != 0 && *end_of_include_string != '"') {
-          ++end_of_include_string;
+          if (*end_of_include_string == 0)
+            return Err(NonTerminatedString(root));
+
+          auto const include_string_size = end_of_include_string - ch;
+          if (include_string_size == 0)
+            return Err(EmptyFileName(root));
+
+          auto const include_file =
+              fs::path(string_view{ch, end_of_include_string});
+
+          if (include_file.stem() == root.stem()) {
+            auto const include_f_ext =
+                DepTree::determine_file_type(include_file.extension());
+            auto const path_ext =
+                DepTree::determine_file_type(root.extension());
+            if (include_f_ext == HEADER && path_ext == IMPL) {
+              continue; // ignore this path
+            }
+          }
+
+          // TODO: this is where we potentially have to look in different paths
+          // if the file doesn't exist in the local dir
+          auto const dep_path = root.parent_path() / include_file;
+
+          if (auto m_error = append_dep(dep_path, root_idx); !m_error.ok())
+            return Err(m_error.get());
+        } break;
+        case '<': {
+          // TODO global include
+        } break;
+        default:
+          return Err(MalformedInclude(root));
         }
-
-        if (*end_of_include_string == 0)
-          return Err(NonTerminatedString(root));
-
-        auto const include_string_size = end_of_include_string - ch;
-        if (include_string_size == 0)
-          return Err(EmptyFileName(root));
-
-        auto const include_file =
-            fs::path(string_view{ch, end_of_include_string});
-
-        if (include_file.stem() == root.stem()) {
-          auto const include_f_ext =
-              DepTree::determine_file_type(include_file.extension());
-          auto const path_ext = DepTree::determine_file_type(root.extension());
-          if (include_f_ext == HEADER && path_ext == IMPL) {
-            continue; // ignore this path
+      } else {
+        ++ch;
+      }
+    } break;
+    case '/': // possible comment
+      ++ch;
+      switch (*ch) {
+      case 0:
+        return Err(NonTerminatedString(
+            root)); // this should be a different error type i'm just tired
+      case '/':     // advance to end of line
+        ++ch;
+        while (*ch != 0 && *ch != '\n')
+          ++ch;
+        if (*ch != 0)
+          ++ch; // ch (should) == '\n';
+        break;
+      case '*': { // advance until */
+        ++ch;
+        auto found_end = false;
+        while (!found_end) {
+          while (*ch != 0 && *ch != '*')
+            ++ch;
+          switch (*ch) {
+          case 0:
+            return Err(NonTerminatedString(root)); // not right error i'm tired
+          case '*': // check that next char is also a '/'
+            ++ch;
+            if (*ch != 0 && *ch == '/')
+              found_end = true;
+            break;
+          default:
+            ++ch;
+            break;
           }
         }
-
-        auto const dep_path = root.parent_path() / include_file;
-
-        if (auto m_error = append_dep(dep_path, root_idx); m_error) {
-          return Err(m_error.get());
-        }
-
       } break;
-      case '<': {
-        // TODO: global module include
-      } break;
-      default:
-        std::cerr << "unknown char [" << *ch << "]\n";
-        // TODO: return malformed #include directive
+      default: // probably a part of a math eq, or just a malformed file, idk
+               // ignoring :)
         break;
       }
-    } else {
-      /* TODO: to speed things up we can try skipping ws, as well as like
-       * continuous words + symbols */
+      break;
+    case '"': // string to move over
+      while (*ch != 0 && *ch != '"') {
+        ++ch;
+      }
+      if (*ch == 0) {
+        return Err(NonTerminatedString(root));
+      } else {
+        ++ch; // *ch (should) == '"'
+      }
+      break;
+    default:
+      while (*ch != 0 && skippable(*ch)) {
+        ++ch;
+      }
+      break;
     }
   }
 
