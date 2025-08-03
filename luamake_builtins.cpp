@@ -174,12 +174,11 @@ struct MemoryAlloc final {
   }
 };
 
-// TODO: rename this to dep_tree
-using SourceFileErr =
+using DepTreeErr =
     std::variant<EmptyFileName, FileDoesNotExist, NonTerminatedString,
                  MalformedInclude, CFileAPI, MemoryAlloc>;
 
-struct SourceFile final {
+struct DepTree final {
   enum SourceFile_t : unsigned char {
     IMPL,
     HEADER,
@@ -188,15 +187,15 @@ struct SourceFile final {
   };
 
   static auto make(vector<fs::path> const &root) noexcept
-      -> Result<SourceFile, SourceFileErr>;
+      -> Result<DepTree, DepTreeErr>;
 
-  SourceFile(SourceFile const &) = delete;
-  SourceFile &operator=(SourceFile const &) = delete;
+  DepTree(DepTree const &) = delete;
+  DepTree &operator=(DepTree const &) = delete;
 
-  SourceFile(SourceFile &&) = default;
-  SourceFile &operator=(SourceFile &&) = default;
+  DepTree(DepTree &&) = default;
+  DepTree &operator=(DepTree &&) = default;
 
-  ~SourceFile() noexcept = default;
+  ~DepTree() noexcept = default;
 
   // displays the function in a pseudo json format
   auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
@@ -267,15 +266,15 @@ private:
 
     [[nodiscard]]
     static auto make(size_t const num_files = 8) noexcept
-        -> Result<M, SourceFileErr>;
+        -> Result<M, DepTreeErr>;
     [[nodiscard]]
     auto append_path(fs::path const &) noexcept
         -> pair<unsigned int, unsigned int>;
     [[nodiscard]]
     auto append_dep(fs::path const &root, size_t const parent_idx) noexcept
-        -> Opt<SourceFileErr>;
+        -> Opt<DepTreeErr>;
     [[nodiscard]]
-    auto root_appends(fs::path const &root) noexcept -> Opt<SourceFileErr>;
+    auto root_appends(fs::path const &root) noexcept -> Opt<DepTreeErr>;
     [[nodiscard]]
     auto get_path(size_t const) const noexcept -> fs::path;
     [[nodiscard]]
@@ -286,7 +285,7 @@ private:
   // this should probably returned a FixedString, we don't need the size and
   // capacity
   static auto get_file_content(FILE *file) noexcept
-      -> Result<OwnedString, SourceFileErr>;
+      -> Result<OwnedString, DepTreeErr>;
 
   auto display_impl(std::ostream &out, unsigned int const depth,
                     unsigned int const idx) const noexcept -> void;
@@ -296,20 +295,20 @@ private:
   static auto deserialize_impl(File &file) noexcept -> SourceFile;
   */
 
-  SourceFile() = default;
-  SourceFile(SourceFile::M &&m) noexcept : m(std::move(m)) {}
-  friend Result<SourceFile, SourceFileErr>;
+  DepTree() = default;
+  DepTree(DepTree::M &&m) noexcept : m(std::move(m)) {}
+  friend Result<DepTree, DepTreeErr>;
   friend Compiler;
   friend CompilationPool;
 };
 
-SourceFile::OwnedString::OwnedString(char *buffer, size_t size) noexcept
+DepTree::OwnedString::OwnedString(char *buffer, size_t size) noexcept
     : buffer(buffer), size(0), capacity(size) {}
-constexpr SourceFile::OwnedString::OwnedString() noexcept
+constexpr DepTree::OwnedString::OwnedString() noexcept
     : buffer(nullptr), size(0), capacity(0) {}
 
-constexpr SourceFile::OwnedString::OwnedString(
-    SourceFile::OwnedString &&that) noexcept
+constexpr DepTree::OwnedString::OwnedString(
+    DepTree::OwnedString &&that) noexcept
     : buffer(that.buffer), size(that.size), capacity(that.capacity) {
   that.buffer = nullptr;
   that.size = 0;
@@ -317,20 +316,20 @@ constexpr SourceFile::OwnedString::OwnedString(
 }
 
 constexpr auto
-SourceFile::OwnedString::operator=(SourceFile::OwnedString &&that) noexcept
-    -> SourceFile::OwnedString & {
+DepTree::OwnedString::operator=(DepTree::OwnedString &&that) noexcept
+    -> DepTree::OwnedString & {
   buffer = that.buffer;
   size = that.size;
   capacity = that.capacity;
   return *this;
 }
 
-SourceFile::OwnedString::~OwnedString() noexcept {
+DepTree::OwnedString::~OwnedString() noexcept {
   if (buffer != nullptr)
     free((void *)buffer);
 }
 
-auto SourceFile::OwnedString::append(string &&str) noexcept -> void {
+auto DepTree::OwnedString::append(string &&str) noexcept -> void {
   auto const str_len = str.length();
   if (!(size < capacity - str_len - 1)) {
     /* resize */
@@ -348,10 +347,10 @@ auto SourceFile::OwnedString::append(string &&str) noexcept -> void {
   ++size;
 }
 
-auto SourceFile::M::make(size_t const num_files) noexcept
-    -> Result<SourceFile::M, SourceFileErr> {
-  using Ok = Result<SourceFile::M, SourceFileErr>::Ok;
-  using Err = Result<SourceFile::M, SourceFileErr>::Err;
+auto DepTree::M::make(size_t const num_files) noexcept
+    -> Result<DepTree::M, DepTreeErr> {
+  using Ok = Result<DepTree::M, DepTreeErr>::Ok;
+  using Err = Result<DepTree::M, DepTreeErr>::Err;
 
   try {
     auto const paths_size = num_files * (sizeof(char) * 15 + 1);
@@ -372,7 +371,7 @@ auto SourceFile::M::make(size_t const num_files) noexcept
   }
 }
 
-auto SourceFile::M::append_path(fs::path const &path) noexcept
+auto DepTree::M::append_path(fs::path const &path) noexcept
     -> pair<unsigned int, unsigned int> {
   if (auto &&[found, start, end] = find(path.c_str()); found) {
     return std::make_pair(start, end);
@@ -395,17 +394,17 @@ auto SourceFile::M::append_path(fs::path const &path) noexcept
                         static_cast<unsigned int>(end));
 }
 
-auto SourceFile::M::append_dep(fs::path const &root,
-                               size_t const parent_idx) noexcept
-    -> Opt<SourceFileErr> {
-  using None = Opt<SourceFileErr>::None;
-  using Err = Opt<SourceFileErr>::Err;
+auto DepTree::M::append_dep(fs::path const &root,
+                            size_t const parent_idx) noexcept
+    -> Opt<DepTreeErr> {
+  using None = Opt<DepTreeErr>::None;
+  using Err = Opt<DepTreeErr>::Err;
 
   auto file = File(root, File::READ);
   if (!file)
     return Err(FileDoesNotExist(root, get_path(parent_idx)));
 
-  auto maybe_file_content = SourceFile::get_file_content(file);
+  auto maybe_file_content = DepTree::get_file_content(file);
   if (maybe_file_content == decltype(maybe_file_content)::ERR)
     return Err(maybe_file_content.err());
 
@@ -420,8 +419,8 @@ auto SourceFile::M::append_dep(fs::path const &root,
   auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
     return fnv1a(fsize, fcontent);
   });
-  auto const ftype = SourceFile::determine_file_type(root.extension());
-  if (ftype == SourceFile::HEADER) {
+  auto const ftype = DepTree::determine_file_type(root.extension());
+  if (ftype == SourceFile_t::HEADER) {
     auto constexpr potential_extensions = array<string_view, 2>{{".cpp", ".c"}};
     auto const potential_impl = (root.parent_path() / root.stem()).string();
     for (auto const &potential_extension : potential_extensions) {
@@ -473,9 +472,8 @@ auto SourceFile::M::append_dep(fs::path const &root,
 
         if (include_file.stem() == root.stem()) {
           auto const include_f_ext =
-              SourceFile::determine_file_type(include_file.extension());
-          auto const path_ext =
-              SourceFile::determine_file_type(root.extension());
+              DepTree::determine_file_type(include_file.extension());
+          auto const path_ext = DepTree::determine_file_type(root.extension());
           if (include_f_ext == HEADER && path_ext == IMPL) {
             continue; // ignore this path
           }
@@ -502,15 +500,15 @@ auto SourceFile::M::append_dep(fs::path const &root,
 }
 
 // TODO: extract the commonality between this function and append_dep
-auto SourceFile::M::root_appends(fs::path const &root) noexcept
-    -> Opt<SourceFileErr> {
-  using None = Opt<SourceFileErr>::None;
-  using Err = Opt<SourceFileErr>::Err;
+auto DepTree::M::root_appends(fs::path const &root) noexcept
+    -> Opt<DepTreeErr> {
+  using None = Opt<DepTreeErr>::None;
+  using Err = Opt<DepTreeErr>::Err;
   auto file = File(root, File::READ);
   if (!file)
     return Err(FileDoesNotExist(root, fs::current_path()));
 
-  auto maybe_file_content = SourceFile::get_file_content(file);
+  auto maybe_file_content = DepTree::get_file_content(file);
   if (maybe_file_content == decltype(maybe_file_content)::ERR) {
     return Err(maybe_file_content.err());
   }
@@ -523,8 +521,8 @@ auto SourceFile::M::root_appends(fs::path const &root) noexcept
   auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
     return fnv1a(fsize, fcontent);
   });
-  auto const ftype = SourceFile::determine_file_type(root.extension());
-  if (ftype == SourceFile::HEADER) {
+  auto const ftype = DepTree::determine_file_type(root.extension());
+  if (ftype == SourceFile_t::HEADER) {
     auto constexpr potential_extensions = array<string_view, 2>{{".cpp", ".c"}};
     auto const potential_impl = (root.parent_path() / root.stem()).string();
     for (auto const &potential_extension : potential_extensions) {
@@ -583,9 +581,8 @@ auto SourceFile::M::root_appends(fs::path const &root) noexcept
 
         if (include_file.stem() == root.stem()) {
           auto const include_f_ext =
-              SourceFile::determine_file_type(include_file.extension());
-          auto const path_ext =
-              SourceFile::determine_file_type(root.extension());
+              DepTree::determine_file_type(include_file.extension());
+          auto const path_ext = DepTree::determine_file_type(root.extension());
           if (include_f_ext == HEADER && path_ext == IMPL) {
             continue; // ignore this path
           }
@@ -618,14 +615,14 @@ auto SourceFile::M::root_appends(fs::path const &root) noexcept
   return None{};
 }
 
-auto SourceFile::M::get_path(size_t const idx) const noexcept -> fs::path {
+auto DepTree::M::get_path(size_t const idx) const noexcept -> fs::path {
   auto &&[start, end] = files[idx];
   return fs::path(all_paths.buffer + start, all_paths.buffer + end);
 }
 
 // this could (and probably should (if possible)) be rewritten to use the files
 // array(?)
-auto SourceFile::M::find(string_view const path) const noexcept
+auto DepTree::M::find(string_view const path) const noexcept
     -> std::tuple<bool, unsigned int, unsigned int> {
   auto const *start = all_paths.buffer;
   auto const *current = all_paths.buffer;
@@ -651,10 +648,10 @@ auto SourceFile::M::find(string_view const path) const noexcept
   return std::make_tuple(false, 0, 0);
 }
 
-auto SourceFile::make(vector<fs::path> const &roots) noexcept
-    -> Result<SourceFile, SourceFileErr> {
-  using Ok = Result<SourceFile, SourceFileErr>::Ok;
-  using Err = Result<SourceFile, SourceFileErr>::Err;
+auto DepTree::make(vector<fs::path> const &roots) noexcept
+    -> Result<DepTree, DepTreeErr> {
+  using Ok = Result<DepTree, DepTreeErr>::Ok;
+  using Err = Result<DepTree, DepTreeErr>::Err;
 
   auto maybe_m = M::make();
   if (maybe_m == decltype(maybe_m)::ERR)
@@ -671,16 +668,16 @@ auto SourceFile::make(vector<fs::path> const &roots) noexcept
   return Ok(std::move(m));
 }
 
-auto SourceFile::display(std::ostream &out,
-                         unsigned int const depth) const noexcept -> void {
+auto DepTree::display(std::ostream &out,
+                      unsigned int const depth) const noexcept -> void {
   out << "All string = [" << string_view{m.all_paths.buffer, m.all_paths.size}
       << "]\n";
   out.flush();
   display_impl(out, depth, 0);
 }
 
-auto SourceFile::display_impl(std::ostream &out, unsigned int const depth,
-                              unsigned int const idx) const noexcept -> void {
+auto DepTree::display_impl(std::ostream &out, unsigned int const depth,
+                           unsigned int const idx) const noexcept -> void {
 
   auto const indents = [](auto const depth) -> string {
     auto res = string(depth, '\t');
@@ -745,10 +742,10 @@ auto SourceFile::deserialize(fs::path const &path) noexcept -> SourceFile {
 }
 */
 
-auto SourceFile::get_file_content(FILE *file) noexcept
-    -> Result<OwnedString, SourceFileErr> {
-  using Ok = Result<OwnedString, SourceFileErr>::Ok;
-  using Err = Result<OwnedString, SourceFileErr>::Err;
+auto DepTree::get_file_content(FILE *file) noexcept
+    -> Result<OwnedString, DepTreeErr> {
+  using Ok = Result<OwnedString, DepTreeErr>::Ok;
+  using Err = Result<OwnedString, DepTreeErr>::Err;
   if (fseek(file, 0, SEEK_END) == -1)
     return Err(CFileAPI(strerror(errno)));
 
@@ -1126,7 +1123,7 @@ struct CompilationPool final {
 
   ~CompilationPool() noexcept = default;
 
-  auto add_task(SourceFile const &) noexcept -> void;
+  auto add_task(DepTree const &) noexcept -> void;
 
   auto run() noexcept -> void;
 
@@ -1158,13 +1155,13 @@ auto CompilationPool::run() noexcept -> void {
     workers.emplace_back([this]() { _thread_loop(); });
 }
 
-auto CompilationPool::add_task(SourceFile const &sf) noexcept -> void {
+auto CompilationPool::add_task(DepTree const &sf) noexcept -> void {
   // this is a really hacky solution to fix the issues of compiling the same
   // source multiple times, this is probably where that hash set solution would
   // probably make things faster :)
   auto lowest = uint{0};
   for (auto i = size_t{}; i < sf.m.num_files; ++i) {
-    if (sf.m.types[i] == SourceFile::IMPL && sf.m.files[i].start >= lowest) {
+    if (sf.m.types[i] == DepTree::IMPL && sf.m.files[i].start >= lowest) {
       remaining_tasks.push_back(fs::path(sf.m.get_path(i)));
       lowest = sf.m.files[i].start + 1;
     }
@@ -1191,8 +1188,8 @@ auto CompilationPool::_thread_loop() noexcept -> void {
     remaining_tasks.pop_back();
     guard.unlock();
 
-    if (SourceFile::determine_file_type(this_path.extension()) ==
-        SourceFile::HEADER) {
+    if (DepTree::determine_file_type(this_path.extension()) ==
+        DepTree::HEADER) {
       continue;
     }
 
@@ -1226,8 +1223,7 @@ auto CompilationPool::get() noexcept -> string {
 
 struct Compiler final {
   [[nodiscard]]
-  static auto compile(Module const &mod, SourceFile const &sf) noexcept
-      -> string {
+  static auto compile(Module const &mod, DepTree const &sf) noexcept -> string {
     auto res = string();
 
     auto tp = CompilationPool(mod);
@@ -1240,7 +1236,7 @@ struct Compiler final {
 };
 
 auto install_exe(lua_State *state) noexcept -> int {
-  using Result = Result<SourceFile, SourceFileErr>;
+  using Result = Result<DepTree, DepTreeErr>;
   auto num_args = lua_gettop(state);
   if (num_args != 1) {
     lua_pushstring(state, "Too many arguments.");
@@ -1274,7 +1270,7 @@ auto install_exe(lua_State *state) noexcept -> int {
   }
   ec.clear();
 
-  auto maybe_exe_root = SourceFile::make(main_mod.roots());
+  auto maybe_exe_root = DepTree::make(main_mod.roots());
   switch (maybe_exe_root) {
   case Result::OK: {
     auto exe_root = maybe_exe_root.get();
@@ -1342,7 +1338,7 @@ auto install_static(lua_State *state) noexcept -> int {
   }
   ec.clear();
 
-  auto maybe_static_root = SourceFile::make(static_mod.roots());
+  auto maybe_static_root = DepTree::make(static_mod.roots());
   switch (maybe_static_root) {
   case decltype(maybe_static_root)::OK: {
     auto static_root = maybe_static_root.get();
