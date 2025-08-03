@@ -159,6 +159,10 @@ constexpr auto OwnedString::operator=(OwnedString &&that) noexcept
   buffer = that.buffer;
   size = that.size;
   capacity = that.capacity;
+
+  that.buffer = nullptr;
+  that.size = 0;
+  that.capacity = 0;
   return *this;
 }
 
@@ -191,10 +195,10 @@ struct StringViews final {
 };
 
 struct FixedString final {
-  char *buffer;
+  char const *buffer;
   size_t size;
 
-  explicit FixedString(char *buffer, size_t size) noexcept;
+  explicit FixedString(char const *buffer, size_t size) noexcept;
   constexpr FixedString() noexcept;
 
   constexpr FixedString(FixedString &&that) noexcept;
@@ -207,7 +211,7 @@ struct FixedString final {
   FixedString &operator=(FixedString const &) = delete;
 };
 
-FixedString::FixedString(char *buffer, size_t size) noexcept
+FixedString::FixedString(char const *buffer, size_t size) noexcept
     : buffer(buffer), size(size) {}
 
 constexpr FixedString::FixedString() noexcept : buffer(nullptr), size(0) {}
@@ -222,6 +226,9 @@ constexpr auto FixedString::operator=(FixedString &&that) noexcept
     -> FixedString & {
   buffer = that.buffer;
   size = that.size;
+
+  that.buffer = nullptr;
+  that.size = 0;
   return *this;
 }
 
@@ -250,11 +257,14 @@ struct FileDoesNotExist final {
       : name(fname), parent(parent) {}
 
   auto error() const noexcept -> string {
-    return string("Attempting to open file [") + name.string() +
-           string("] That does not exist") +
-           (parent == fs::current_path()
-                ? string(".")
-                : string(" depended on by ") + parent.string() + ".");
+    if (parent == fs::current_path()) {
+      return std::format("Attempting to open file [{}] that does not exist.",
+                         name.c_str());
+    } else {
+      return std::format("Attempting to open file [{}] that does not exist, "
+                         "depended on by [{}].",
+                         name.c_str(), parent.c_str());
+    }
   };
 };
 
@@ -264,8 +274,9 @@ struct NonTerminatedString final {
   explicit NonTerminatedString(fs::path const &fname) noexcept : name(fname) {}
 
   auto error() const noexcept -> string {
-    return string("File [") + name.string() +
-           string("] contains a non-terminating string in an include path.");
+    return std::format(
+        "File [{}] contains a non-terminating string in an include path.",
+        name.c_str());
   };
 };
 
@@ -275,8 +286,8 @@ struct MalformedInclude final {
   explicit MalformedInclude(fs::path const &fname) noexcept : name(fname) {}
 
   auto error() const noexcept -> string {
-    return string("File [") + name.string() +
-           "] contains a malformed include path";
+    return std::format("File [{}] contains a malformed include path",
+                       name.c_str());
   };
 };
 
@@ -535,16 +546,17 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
 auto Module::DepTree::M::append_dep(fs::path const &root,
                                     size_t const parent_idx) noexcept
     -> Opt<DepTreeErr> {
-  using None = Opt<DepTreeErr>::None;
-  using Err = Opt<DepTreeErr>::Err;
+  using Opt = Opt<DepTreeErr>;
+  using Err = Opt::Err;
 
   auto file = File(root, File::READ);
   if (!file)
     return Err(FileDoesNotExist(root, get_path(parent_idx)));
 
   auto maybe_file_content = DepTree::get_file_content(file);
-  if (maybe_file_content == decltype(maybe_file_content)::ERR)
-    return Err(maybe_file_content.err());
+  if (maybe_file_content == decltype(maybe_file_content)::ERR) {
+    return maybe_file_content;
+  }
 
   auto &&[fcontent, fsize] = maybe_file_content.get();
 
@@ -566,7 +578,7 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
         if (auto m_error = append_dep(possible_path, root_idx); !m_error.ok()) {
-          return Err(m_error.get());
+          return m_error;
         }
       }
     }
@@ -621,7 +633,7 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
           auto const dep_path = root.parent_path() / include_file;
 
           if (auto m_error = append_dep(dep_path, root_idx); !m_error.ok())
-            return Err(m_error.get());
+            return m_error;
         } break;
         case '<': {
           // TODO global include
@@ -691,21 +703,21 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
 
   hashes[root_idx] = hash_fut.get();
 
-  return None{};
+  return Opt();
 }
 
 // TODO: extract the commonality between this function and append_dep
 auto Module::DepTree::M::root_appends(fs::path const &root) noexcept
     -> Opt<DepTreeErr> {
-  using None = Opt<DepTreeErr>::None;
-  using Err = Opt<DepTreeErr>::Err;
+  using Opt = Opt<DepTreeErr>;
+  using Err = Opt::Err;
   auto file = File(root, File::READ);
   if (!file)
     return Err(FileDoesNotExist(root, fs::current_path()));
 
   auto maybe_file_content = DepTree::get_file_content(file);
   if (maybe_file_content == decltype(maybe_file_content)::ERR) {
-    return Err(maybe_file_content.err());
+    return maybe_file_content;
   }
 
   auto &&[fcontent, fsize] = maybe_file_content.get();
@@ -726,7 +738,7 @@ auto Module::DepTree::M::root_appends(fs::path const &root) noexcept
       if (fs::exists(possible_path)) {
         if (auto m_error = append_dep(possible_path, root_idx);
             m_error == decltype(m_error)::ERR) {
-          return Err(m_error.get());
+          return m_error;
         }
       }
     }
@@ -786,7 +798,7 @@ auto Module::DepTree::M::root_appends(fs::path const &root) noexcept
           auto const dep_path = root.parent_path() / include_file;
 
           if (auto m_error = append_dep(dep_path, root_idx); !m_error.ok())
-            return Err(m_error.get());
+            return m_error;
         } break;
         case '<': {
           // TODO global include
@@ -857,7 +869,7 @@ auto Module::DepTree::M::root_appends(fs::path const &root) noexcept
   // get the hash last
   hashes[root_idx] = hash_fut.get();
 
-  return None{};
+  return Opt();
 }
 
 auto Module::DepTree::M::get_path(size_t const idx) const noexcept -> fs::path {
@@ -1201,28 +1213,25 @@ auto Module::make(Module_t type, lua_State *state) noexcept
 
   lua_pop(state, 5);
 
-  ret_t.display(std::cout);
-
   return Ok(std::move(ret_t));
 }
 
 auto Module::gen_dep_tree() noexcept -> Opt<DepTreeErr> {
-  using None = Opt<DepTreeErr>::None;
-  using Err = Opt<DepTreeErr>::Err;
+  using Opt = Opt<DepTreeErr>;
 
   auto m_m = DepTree::M::make();
   if (m_m == decltype(m_m)::ERR)
-    return Err(m_m.err());
+    return m_m;
 
   m.tree = m_m.get();
   for (auto const &root : m.roots) {
     if (auto m_err = m.tree.m.root_appends(root);
         m_err == decltype(m_err)::ERR) {
-      return Err(m_err.get());
+      return m_err;
     }
   }
 
-  return None{};
+  return Opt();
 }
 
 auto Module::parse_compiler_table(lua_State *state) -> string {
@@ -1277,16 +1286,16 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
 
 // sort of a thread pool like structure that is just for compiling
 struct CompilationPool final {
-  CompilationPool(Module const &mod,
-                  size_t num_threads = std::thread::hardware_concurrency() -
-                                       1) noexcept
-      : mod(mod) {
+  CompilationPool(size_t num_threads) noexcept {
     workers.reserve(num_threads);
     remaining_tasks.reserve(8);
   }
 
   ~CompilationPool() noexcept = default;
 
+  auto init(Module const *const mod) noexcept -> void;
+
+private:
   // idk probably just have this take a module my const & (?)
   auto add_task(Module::DepTree const &) noexcept -> void;
 
@@ -1302,7 +1311,6 @@ struct CompilationPool final {
   CompilationPool(CompilationPool const &) = delete;
   CompilationPool &operator=(CompilationPool const &) = delete;
 
-private:
   auto _thread_loop() noexcept -> void;
 
   vector<std::thread> workers;
@@ -1312,8 +1320,15 @@ private:
   string result;
   std::mutex result_mtx;
 
-  Module const &mod;
+  Module const *mod;
+  friend Compiler;
 };
+
+static auto pool = CompilationPool(std::thread::hardware_concurrency() - 1);
+
+auto CompilationPool::init(Module const *const mod) noexcept -> void {
+  this->mod = mod;
+}
 
 auto CompilationPool::run() noexcept -> void {
   for (auto i = 0; i < workers.capacity(); ++i)
@@ -1362,14 +1377,14 @@ auto CompilationPool::_thread_loop() noexcept -> void {
     }
 
     auto const invoked_command = std::format(
-        "{} -c {} -o {}/{}.o/{}.o", mod.compiler(), this_path.c_str(),
-        mod.install_dir(), mod.name(), this_path.stem().c_str());
+        "{} -c {} -o {}/{}.o/{}.o", mod->compiler(), this_path.c_str(),
+        mod->install_dir(), mod->name(), this_path.stem().c_str());
     std::cout << "[" << invoked_command << "]\n";
     std::cout.flush();
     auto const res = system(invoked_command.c_str());
     if (res == 0) {
       auto res_lock = std::unique_lock(result_mtx);
-      result += std::format("{}/{}.o/{}.o ", mod.install_dir(), mod.name(),
+      result += std::format("{}/{}.o/{}.o ", mod->install_dir(), mod->name(),
                             this_path.stem().c_str());
     }
   }
@@ -1386,6 +1401,8 @@ auto CompilationPool::get() noexcept -> string {
   for (auto &worker : workers)
     worker.join();
 
+  mod = nullptr;
+
   return result;
 }
 
@@ -1394,12 +1411,20 @@ struct Compiler final {
   static auto compile(Module const &mod) noexcept -> string {
     auto res = string();
 
-    auto tp = CompilationPool(mod);
+    pool.init(&mod);
+    pool.add_task(mod.m.tree);
+    pool.run();
+    res = pool.get();
+    return res;
+
+#if 0
+    auto tp = CompilationPool(&mod);
     tp.add_task(mod.m.tree);
     tp.run();
     res = tp.get();
 
     return res;
+#endif
   }
 };
 
@@ -1417,8 +1442,9 @@ auto install_exe(lua_State *state) noexcept -> int {
 
   auto maybe_main_mod = Module::make(Module::EXE, state);
   if (!maybe_main_mod.ok()) {
-    auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
-                                maybe_main_mod.err());
+    auto const msg =
+        std::visit([](auto &&e) -> string { return e.error() + '\n'; },
+                   *maybe_main_mod.err().get());
 
     lua_pushstring(state, msg.c_str());
     return lua_error(state);
@@ -1439,7 +1465,8 @@ auto install_exe(lua_State *state) noexcept -> int {
 
   if (auto m_err = main_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
     auto const msg =
-        std::visit([](auto &&e) { return e.error() + '\n'; }, m_err.get());
+        std::visit([](auto &&e) -> string { return e.error() + '\n'; },
+                   *m_err.err().get());
     lua_pushstring(state, msg.c_str());
     return lua_error(state);
   }
@@ -1479,7 +1506,8 @@ auto install_static(lua_State *state) noexcept -> int {
   auto maybe_static_mod = Module::make(Module::STATIC, state);
   if (!maybe_static_mod.ok()) {
     auto const err_msg =
-        std::visit([](auto &&e) { return e.error(); }, maybe_static_mod.err());
+        std::visit([](auto &&e) -> string { return e.error() + '\n'; },
+                   *maybe_static_mod.err().get());
     lua_pushstring(state, err_msg.c_str());
     return lua_error(state);
   }
@@ -1497,8 +1525,8 @@ auto install_static(lua_State *state) noexcept -> int {
   ec.clear();
 
   if (auto m_err = static_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
-    auto const msg =
-        std::visit([](auto &&e) { return e.error() + '\n'; }, m_err.get());
+    auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
+                                *m_err.err().get());
     lua_pushstring(state, msg.c_str());
     return lua_error(state);
   }
