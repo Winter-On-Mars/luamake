@@ -7,6 +7,7 @@ extern "C" {
 #include "lua/lua.h"
 }
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cerrno>
@@ -115,12 +116,31 @@ struct MissingField final {
   string_view field_name;
   MissingField(string_view &&field_name) noexcept : field_name(field_name) {}
   auto error() const noexcept -> string {
-    return string("Required field [") + field_name.data() +
-           string("] could not be found when constructing a module.");
+    return std::format(
+        "Required field [{}] could not be found when constructing a module.",
+        field_name);
   }
 };
 
-using ModuleErr = std::variant<MissingField>;
+struct UnexpectedType final {
+  string_view field_name;
+  // idk why the lua_typename function needs a lua_State* but fine
+  lua_State *state;
+  int expected_type;
+  int found_type;
+  UnexpectedType(string_view &&field_name, lua_State *state, int expected_type,
+                 int found_type) noexcept
+      : field_name(field_name), state(state), expected_type(expected_type),
+        found_type(found_type) {}
+  auto error() const noexcept -> string {
+    return std::format("Required field [{}] found, but was of type {}, "
+                       "expected type {}, when constructing a module.",
+                       field_name, lua_typename(state, found_type),
+                       lua_typename(state, expected_type));
+  }
+};
+
+using ModuleErr = std::variant<MissingField, UnexpectedType>;
 
 struct Module final {
   enum Module_t {
@@ -129,7 +149,7 @@ struct Module final {
     DYNAMIC,
   };
 
-  static auto make(Module_t &&type, lua_State *state) noexcept
+  static auto make(Module_t type, lua_State *state) noexcept
       -> Result<Module, ModuleErr>;
 
   auto constexpr install_dir() const noexcept -> char const * {
@@ -138,55 +158,203 @@ struct Module final {
 
   auto constexpr name() const noexcept -> char const * { return m.name; }
 
-  auto root() const noexcept -> fs::path { return m.root; }
+  auto roots() const noexcept -> vector<fs::path> { return m.roots; }
 
   auto compiler() const noexcept -> std::string { return m.compiler; }
+
+  constexpr Module(Module &&) = default;
+  constexpr Module &operator=(Module &&) = default;
+  constexpr ~Module() noexcept = default;
+
+  Module(Module const &) = delete;
+  Module &operator=(Module const &) = delete;
 
 private:
   static auto parse_compiler_table(lua_State *state) -> string;
 
   struct M {
     Module_t type;
-    char const *name;
-    fs::path root; // TOOD: have this field be a union of a vector<fs::path> and
-                   // fs::path
+    // it *might* be a cool idea to have this as a union of
+    // vector<fs::path> and fs::path for better domain modeling, but
+    // unions are a bit of a pain to work with in c++
+    vector<fs::path> roots;
+    vector<fs::path> includes;
+    vector<fs::path> linking;
     std::string compiler;
+    char const *name;
     char const *install_dir;
-    // other module deps
-  };
-  M m;
+
+    [[my::helper]]
+    auto display(std::ostream &) const noexcept -> void;
+  } m;
+
+  constexpr Module(M &&m) noexcept : m(std::move(m)) {}
+  constexpr Module() noexcept = default;
+  friend Result<Module, ModuleErr>;
 };
 
+auto Module::M::display(std::ostream &out) const noexcept -> void {
+  auto _display = [&](auto x) { out << x; };
+
+  out << "type = ";
+  switch (type) {
+  case EXE:
+    out << "EXE";
+    break;
+  case STATIC:
+    out << "STATIC";
+    break;
+  case DYNAMIC:
+    out << "DYNAMIC";
+    break;
+  }
+
+  out << '\n';
+
+  out << "roots = [";
+  std::for_each(roots.begin(), roots.end(), _display);
+  out << "]\n";
+
+  out << "includes= [";
+  std::for_each(includes.begin(), includes.end(), _display);
+  out << "]\n";
+
+  out << "linking = [";
+  std::for_each(linking.begin(), linking.end(), _display);
+  out << "]\n";
+
+  out << "compiler = " << compiler << '\n';
+  out << "name = " << name << '\n';
+  out << "install_dir = " << install_dir << '\n';
+  out.flush();
+}
+
 // TODO: update error handling
-auto Module::make(Module_t &&type, lua_State *state) noexcept
+auto Module::make(Module_t type, lua_State *state) noexcept
     -> Result<Module, ModuleErr> {
   using Ok = Result<Module, ModuleErr>::Ok;
   using Err = Result<Module, ModuleErr>::Err;
-  auto ret_t = Module{};
-  ret_t.m.type = type;
+  auto ret_t = M{type};
 
-  lua_getfield(state, -1, "name");
-  if (lua_type(state, -1) == LUA_TNIL)
+  switch (auto const name_t = lua_getfield(state, -1, "name")) {
+  case LUA_TSTRING:
+    ret_t.name = lua_tolstring(state, -1, nullptr);
+    break;
+  case LUA_TNIL:
     return Err(MissingField("name"));
-  ret_t.m.name = lua_tolstring(state, -1, nullptr);
+  default:
+    return Err(UnexpectedType("name", state, LUA_TSTRING, name_t));
+  }
 
-  // TODO: switch on type, and parse this field different
-  lua_getfield(state, -2, "root");
-  if (lua_type(state, -1) == LUA_TNIL)
-    return Err(MissingField("root"));
-  ret_t.m.root = lua_tolstring(state, -1, nullptr);
+  switch (type) {
+  case EXE:
+    ret_t.roots.reserve(1);
+    switch (auto const root_t = lua_getfield(state, -2, "root")) {
+    case LUA_TSTRING:
+      ret_t.roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
+      break;
+    case LUA_TNIL:
+      return Err(MissingField("root"));
+    default:
+      return Err(UnexpectedType("root", state, LUA_TSTRING, root_t));
+    }
+    break;
+  case STATIC: {
+    switch (auto const root_t = lua_getfield(state, -2, "roots")) {
+    case LUA_TTABLE: {
+      auto const num_roots = lua_rawlen(state, -1);
+      auto const roots = lua_absindex(state, -1);
+      ret_t.roots.reserve(num_roots);
+      for (lua_pushnil(state); lua_next(state, roots) != 0;) {
+        if (auto const value_t = lua_type(state, -1); value_t != LUA_TSTRING) {
+          return Err(UnexpectedType("roots[i]", state, LUA_TSTRING, value_t));
+        }
+        ret_t.roots.push_back(lua_tolstring(state, -1, nullptr));
+        lua_pop(state, 1);
+      }
+    } break;
+    case LUA_TNIL:
+      return Err(MissingField("roots"));
+    default:
+      return Err(UnexpectedType("roots", state, LUA_TTABLE, root_t));
+    }
+  } break;
+  case DYNAMIC:
+    std::cerr << "Not currently implimented\n";
+    std::terminate();
+    break;
+  }
 
-  lua_getfield(state, -3, "compiler");
-  if (lua_type(state, -1) == LUA_TNIL)
+  switch (auto const compiler_t = lua_getfield(state, -3, "compiler")) {
+  case LUA_TTABLE:
+    ret_t.compiler = Module::parse_compiler_table(state);
+    break;
+  case LUA_TNIL:
     return Err(MissingField("compiler"));
-  ret_t.m.compiler = Module::parse_compiler_table(state);
+  default:
+    return Err(UnexpectedType("compiler", state, LUA_TTABLE, compiler_t));
+  }
 
-  lua_getfield(state, -4, "install_dir");
-  if (lua_type(state, -1) == LUA_TNIL)
+  switch (auto const install_dir_t = lua_getfield(state, -4, "install_dir")) {
+  case LUA_TSTRING:
+    ret_t.install_dir = lua_tolstring(state, -1, nullptr);
+    break;
+  case LUA_TNIL:
     return Err(MissingField("install_dir"));
-  ret_t.m.install_dir = lua_tolstring(state, -1, nullptr);
+  default:
+    return Err(
+        UnexpectedType("install_dir", state, LUA_TSTRING, install_dir_t));
+  }
 
-  lua_pop(state, 3);
+  switch (auto const include_t = lua_getfield(state, -5, "include")) {
+  case LUA_TTABLE: {
+    auto const len = lua_rawlen(state, -1);
+    ret_t.includes.reserve(len);
+    auto include = -1;
+    for (auto i = 1; i <= len; ++i) {
+      switch (auto const value_t = lua_geti(state, include, i)) {
+      case LUA_TSTRING:
+        ret_t.includes.push_back(lua_tolstring(state, -1, nullptr));
+        break;
+      default:
+        return Err(UnexpectedType("include[i]", state, LUA_TSTRING, value_t));
+      }
+      --include;
+    }
+    lua_pop(state, static_cast<int>(len));
+  } break;
+  case LUA_TNIL:
+    break;
+  default:
+    return Err(UnexpectedType("include", state, LUA_TTABLE, include_t));
+  }
+
+  switch (auto const linking_t = lua_getfield(state, -6, "linking")) {
+  case LUA_TTABLE: {
+    auto const len = lua_rawlen(state, -1);
+    ret_t.linking.reserve(len);
+    auto linking = -1;
+    for (auto i = 1; i <= len; ++i) {
+      switch (auto const value_t = lua_geti(state, linking, i)) {
+      case LUA_TSTRING:
+        ret_t.linking.push_back(lua_tolstring(state, -1, nullptr));
+        break;
+      default:
+        return Err(UnexpectedType("linking[i]", state, LUA_TSTRING, value_t));
+      }
+      --linking;
+    }
+    lua_pop(state, static_cast<int>(len));
+  } break;
+  case LUA_TNIL:
+    break;
+  default:
+    return Err(UnexpectedType("linking", state, LUA_TTABLE, linking_t));
+  }
+
+  lua_pop(state, 5);
+
+  ret_t.display(std::cout);
 
   return Ok(std::move(ret_t));
 }
@@ -316,8 +484,7 @@ struct SourceFile final {
     MISC,
   };
 
-  static auto make(fs::path const &root,
-                   fs::path const &parent = fs::current_path()) noexcept
+  static auto make(vector<fs::path> const &root) noexcept
       -> Result<SourceFile, SourceFileErr>;
 
   SourceFile(SourceFile const &) = delete;
@@ -404,6 +571,8 @@ private:
     [[nodiscard]]
     auto append_dep(fs::path const &root, size_t const parent_idx) noexcept
         -> Opt<SourceFileErr>;
+    [[nodiscard]]
+    auto root_appends(fs::path const &root) noexcept -> Opt<SourceFileErr>;
     [[nodiscard]]
     auto get_path(size_t const) const noexcept -> fs::path;
     [[nodiscard]]
@@ -629,48 +798,14 @@ auto SourceFile::M::append_dep(fs::path const &root,
   return None{};
 }
 
-auto SourceFile::M::get_path(size_t const idx) const noexcept -> fs::path {
-  auto &&[start, end] = files[idx];
-  return fs::path(all_paths.buffer + start, all_paths.buffer + end);
-}
-
-// this could (and probably should (if possible)) be rewritten to use the files
-// array(?)
-auto SourceFile::M::find(string_view const path) const noexcept
-    -> std::tuple<bool, unsigned int, unsigned int> {
-  auto const *start = all_paths.buffer;
-  auto const *current = all_paths.buffer;
-  auto end = size_t{};
-
-  while (end != all_paths.size) {
-    if (all_paths.buffer[end] == 0) {
-      current = all_paths.buffer + end;
-      // check
-      auto const path_view = string_view{start, current};
-      if (path_view.size() == path.size() &&
-          *path_view.data() == *path.data() &&
-          strncmp(path_view.data(), path.data(), path_view.size()) == 0) {
-        return std::make_tuple(
-            true, static_cast<unsigned int>(start - all_paths.buffer),
-            static_cast<unsigned int>(end));
-      }
-      start = current + 1;
-    }
-    ++end;
-  }
-
-  return std::make_tuple(false, 0, 0);
-}
-
 // TODO: extract the commonality between this function and append_dep
-auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
-    -> Result<SourceFile, SourceFileErr> {
-  using Ok = Result<SourceFile, SourceFileErr>::Ok;
-  using Err = Result<SourceFile, SourceFileErr>::Err;
-
+auto SourceFile::M::root_appends(fs::path const &root) noexcept
+    -> Opt<SourceFileErr> {
+  using None = Opt<SourceFileErr>::None;
+  using Err = Opt<SourceFileErr>::Err;
   auto file = File(root, File::READ);
   if (!file)
-    return Err(FileDoesNotExist(root, parent));
+    return Err(FileDoesNotExist(root, fs::current_path()));
 
   auto maybe_file_content = SourceFile::get_file_content(file);
   if (maybe_file_content == decltype(maybe_file_content)::ERR) {
@@ -678,14 +813,10 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
   }
 
   auto &&[fcontent, _, fsize] = maybe_file_content.get();
-  auto maybe_m = M::make();
-  if (maybe_m == decltype(maybe_m)::ERR)
-    return Err(maybe_m.err());
-  auto m = maybe_m.get();
 
-  auto const root_idx = m.num_files;
-  m.num_files++; // this could cause some off by 1 errors when error reported
-  auto &&[start, end] = m.append_path(root);
+  auto const root_idx = num_files;
+  num_files++; // this could cause some off by 1 errors when error reported
+  auto &&[start, end] = append_path(root);
   auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
     return fnv1a(fsize, fcontent);
   });
@@ -697,7 +828,7 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
       auto const possible_path =
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
-        if (auto m_error = m.append_dep(possible_path, root_idx);
+        if (auto m_error = append_dep(possible_path, root_idx);
             m_error == decltype(m_error)::ERR) {
           return Err(m_error.get());
         }
@@ -708,11 +839,11 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
   }
 
   // write down the path name
-  m.files[root_idx].start = start;
-  m.files[root_idx].end = end;
+  files[root_idx].start = start;
+  files[root_idx].end = end;
 
   // append type
-  m.types[root_idx] = ftype;
+  types[root_idx] = ftype;
 
   // analyze the deps of this file
   auto constexpr include_prefix = string_view{"#include"};
@@ -759,7 +890,7 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
 
         auto const dep_path = root.parent_path() / include_file;
 
-        if (auto m_error = m.append_dep(dep_path, root_idx); m_error) {
+        if (auto m_error = append_dep(dep_path, root_idx); m_error) {
           return Err(m_error.get());
         }
 
@@ -779,7 +910,60 @@ auto SourceFile::make(fs::path const &root, fs::path const &parent) noexcept
   }
 
   // get the hash last
-  m.hashes[root_idx] = hash_fut.get();
+  hashes[root_idx] = hash_fut.get();
+
+  return None{};
+}
+
+auto SourceFile::M::get_path(size_t const idx) const noexcept -> fs::path {
+  auto &&[start, end] = files[idx];
+  return fs::path(all_paths.buffer + start, all_paths.buffer + end);
+}
+
+// this could (and probably should (if possible)) be rewritten to use the files
+// array(?)
+auto SourceFile::M::find(string_view const path) const noexcept
+    -> std::tuple<bool, unsigned int, unsigned int> {
+  auto const *start = all_paths.buffer;
+  auto const *current = all_paths.buffer;
+  auto end = size_t{};
+
+  while (end != all_paths.size) {
+    if (all_paths.buffer[end] == 0) {
+      current = all_paths.buffer + end;
+      // check
+      auto const path_view = string_view{start, current};
+      if (path_view.size() == path.size() &&
+          *path_view.data() == *path.data() &&
+          strncmp(path_view.data(), path.data(), path_view.size()) == 0) {
+        return std::make_tuple(
+            true, static_cast<unsigned int>(start - all_paths.buffer),
+            static_cast<unsigned int>(end));
+      }
+      start = current + 1;
+    }
+    ++end;
+  }
+
+  return std::make_tuple(false, 0, 0);
+}
+
+auto SourceFile::make(vector<fs::path> const &roots) noexcept
+    -> Result<SourceFile, SourceFileErr> {
+  using Ok = Result<SourceFile, SourceFileErr>::Ok;
+  using Err = Result<SourceFile, SourceFileErr>::Err;
+
+  auto maybe_m = M::make();
+  if (maybe_m == decltype(maybe_m)::ERR)
+    return Err(maybe_m.err());
+
+  auto m = maybe_m.get();
+  for (auto const &root : roots) {
+    if (auto maybe_err = m.root_appends(root);
+        maybe_err == decltype(maybe_err)::ERR) {
+      return Err(maybe_err.get());
+    }
+  }
 
   return Ok(std::move(m));
 }
@@ -1055,7 +1239,7 @@ struct Compiler final {
   }
 };
 
-auto install_exe(lua_State *state) -> int {
+auto install_exe(lua_State *state) noexcept -> int {
   using Result = Result<SourceFile, SourceFileErr>;
   auto num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -1090,7 +1274,7 @@ auto install_exe(lua_State *state) -> int {
   }
   ec.clear();
 
-  auto maybe_exe_root = SourceFile::make(main_mod.root());
+  auto maybe_exe_root = SourceFile::make(main_mod.roots());
   switch (maybe_exe_root) {
   case Result::OK: {
     auto exe_root = maybe_exe_root.get();
@@ -1126,8 +1310,7 @@ auto install_exe(lua_State *state) -> int {
   }
 }
 
-#if false
-auto install_static(lua_State *state) -> int {
+auto install_static(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
     lua_pushstring(state, "Too many arguments");
@@ -1159,11 +1342,12 @@ auto install_static(lua_State *state) -> int {
   }
   ec.clear();
 
-  auto maybe_static_root = SourceFile::make(static_mod.root());
+  auto maybe_static_root = SourceFile::make(static_mod.roots());
   switch (maybe_static_root) {
   case decltype(maybe_static_root)::OK: {
     auto static_root = maybe_static_root.get();
-    auto compiled_files = Compiler::compile(static_mod, &static_root);
+
+    auto compiled_files = Compiler::compile(static_mod, static_root);
     auto const invoked_command =
         std::format("ar crs {}/lib{}.a {}", static_mod.install_dir(),
                     static_mod.name(), compiled_files);
@@ -1185,7 +1369,6 @@ auto install_static(lua_State *state) -> int {
 
   return 0;
 }
-#endif
 
 auto run(lua_State *L) noexcept -> int {
   auto const num_args = lua_gettop(L);
@@ -1222,30 +1405,184 @@ auto run(lua_State *L) noexcept -> int {
 
   system(exe_path.data());
 
-  lua_pushnil(L);
-  return 1;
+  return 0;
 }
 
-// TODO: finish this function
+// TODO: update this function to work with the static_lib.roots
 auto link_static(lua_State *state) noexcept -> int {
-  LUA_ASSERT_FORMAT(state, num_args, lua_gettop(state), 3,
-                    "Expected 3 arguments to the link static function '[to]"
-                    "[from][args]?', found [%d] arguments",
-                    num_args);
+  LUA_ASSERT_FORMAT(
+      state, num_args, lua_gettop(state), 3,
+      "Expected 3 arguments to the link static function '[static library]"
+      "[exe][args]?', found [%d] arguments",
+      num_args);
   for (int i = -1; i >= -3; --i) {
     LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, i), LUA_TTABLE,
                       "Expected type of argument to be table, found [%s]",
                       lua_typename(state, arg_t));
   }
 
-  if (true) {
-    lua_pushstring(state, "function is not fully implimented :)");
+  // going to ignore the args parameter for now, idk what would even go in it
+  // tbh
+  auto const slib_idx = lua_absindex(state, -3);
+  auto const exe_idx = lua_absindex(state, -2);
+
+  // check if there is already an include table
+  switch (auto const include_table_t =
+              lua_getfield(state, exe_idx, "include")) {
+  case LUA_TNIL:
+    lua_pop(state, 1);
+    lua_createtable(state, 1, 0); // include_tbl
+    break;
+  case LUA_TTABLE:
+    break;
+  default:
+    lua_pushstring(state,
+                   std::format("Found include field in [exe] table, but was "
+                               "of incorrect type. Expected [table] found {}",
+                               lua_typename(state, include_table_t))
+                       .c_str());
     return lua_error(state);
   }
+  auto const include_tbl = lua_absindex(state, -1);
 
+  // get slib.roots for the -I flag
+  switch (auto const roots_t = lua_getfield(state, slib_idx, "roots")) {
+  case LUA_TTABLE:
+    break;
+  case LUA_TNIL:
+    lua_pushstring(
+        state,
+        "Missing field [static library].roots in the `link_static` function");
+    return lua_error(state);
+  default:
+    lua_pushstring(
+        state,
+        std::format("In `link_static` function, expected type of field [static "
+                    "labrary].roots to be of type [table] found [{}]",
+                    lua_typename(state, roots_t))
+            .c_str());
+    return lua_error(state);
+  }
+  auto const roots = lua_absindex(state, -1);
+  // i'm just assuming that this table is an array, and that the user won't mess
+  // that up
+  auto init_include_tbl_len = lua_rawlen(state, -2);
+  for (lua_pushnil(state); lua_next(state, roots); ++init_include_tbl_len) {
+    LUA_ASSERT_FORMAT(
+        state, value_t, lua_type(state, -1), LUA_TSTRING,
+        "Expected value type in roots table to be a [string], found %s",
+        lua_typename(state, value_t));
+    auto const path = fs::path(lua_tolstring(state, -1, nullptr));
+    lua_pushstring(state, path.parent_path().c_str());
+    lua_seti(state, include_tbl,
+             static_cast<lua_Integer>(init_include_tbl_len) + 1);
+    lua_pop(state, 1); // still need to pop the original value from the stack
+  }
+
+  lua_pop(state, 1); // remove the roots table from the top of the stack
+
+  lua_setfield(state, exe_idx, "include");
+
+  // check if there's already a linking table in the object
+  switch (auto const linking_tbl_t = lua_getfield(state, exe_idx, "linking")) {
+  case LUA_TNIL:
+    lua_pop(state, 1);
+    lua_createtable(state, 1, 0); // include_tbl
+    break;
+  case LUA_TTABLE:
+    break;
+  default:
+    lua_pushstring(state,
+                   std::format("Found linking field in [exe], but was "
+                               "of incorrect type. Expected [table] found [{}]",
+                               lua_typename(state, linking_tbl_t))
+                       .c_str());
+    return lua_error(state);
+  }
+  // get slib.name and slib.install_dir for adding the archive to be linked
+  LUA_ASSERT_FORMAT(
+      state, name_t, lua_getfield(state, slib_idx, "name"), LUA_TSTRING,
+      "Expected type of [static library].name to be [string] found [%s]",
+      lua_typename(state, name_t));
+  LUA_ASSERT_FORMAT(
+      state, install_dir_t, lua_getfield(state, slib_idx, "install_dir"),
+      LUA_TSTRING,
+      "Expected type of [static library].root to be [string] found [%s]",
+      lua_typename(state, install_dir_t));
+  auto const link_format =
+      std::format("{}/lib{}.a", lua_tolstring(state, -1, nullptr),
+                  lua_tolstring(state, -2, nullptr));
+  lua_pop(state, 2);
+  lua_pushstring(state, link_format.c_str());
+
+  auto const link_tbl_len = lua_rawlen(state, -2);
+  lua_seti(state, -2, static_cast<lua_Integer>(link_tbl_len + 1));
+
+  lua_setfield(state, exe_idx, "linking");
   return 0;
 }
+
+auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
+  auto const indents = string(depth, '\t');
+  switch (auto const type = lua_type(state, -1)) {
+  case LUA_TNIL:
+    std::cout << "nil";
+    break;
+  case LUA_TSTRING:
+    std::cout << '"' << lua_tolstring(state, -1, nullptr) << '"';
+    break;
+  case LUA_TNUMBER:
+    std::cout << lua_tonumber(state, -1);
+    break;
+  case LUA_TBOOLEAN:
+    std::cout << (lua_toboolean(state, -1) ? "true" : "false");
+    break;
+  case LUA_TTABLE: {
+    std::cout << "{\n";
+    auto const tbl_idx = lua_absindex(state, -1);
+    for (lua_pushnil(state); lua_next(state, tbl_idx) != 0;) {
+      std::cout << indents;
+      switch (auto const key_t = lua_type(state, -2)) {
+      case LUA_TNUMBER:
+        std::cout << '[' << lua_tointeger(state, -2) << ']';
+        break;
+      case LUA_TSTRING:
+        std::cout << '[' << lua_tolstring(state, -2, nullptr) << ']';
+        break;
+      default:
+        std::cout << lua_typename(state, key_t);
+        break;
+      }
+
+      std::cout << ':';
+      dump_impl(state, depth + 1);
+
+      lua_pop(state, 1);
+    }
+    std::cout << indents << '}';
+  } break;
+  default:
+    std::cout << "Unable to display type of " << lua_typename(state, type);
+    break;
+  }
+  std::cout << '\n';
+}
 } // namespace
+
+auto dump(lua_State *state) noexcept -> int {
+  auto const num_args = lua_gettop(state);
+  if (num_args != 2) {
+    lua_pushstring(state, std::format("Expected 2 arguments to dump function, "
+                                      "[display string][value], found [{}]",
+                                      num_args)
+                              .c_str());
+    return lua_error(state);
+  }
+  // don't really care about type checking the args
+  std::cout << '[' << lua_tolstring(state, -2, nullptr) << "] = ";
+  dump_impl(state, 1);
+  return 0;
+}
 
 auto clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
@@ -1377,10 +1714,8 @@ auto make_builder_obj(lua_State *state,
   lua_pushcfunction(state, install_exe);
   lua_setfield(state, -2, "install_exe");
 
-#if false
   lua_pushcfunction(state, install_static);
   lua_setfield(state, -2, "install_static");
-#endif
 
   lua_pushcfunction(state, link_static);
   lua_setfield(state, -2, "link_static");
