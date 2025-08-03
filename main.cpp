@@ -211,6 +211,8 @@ auto Type::run() const noexcept -> exit_t {
 
   (void)lua_gc(state, LUA_GCSTOP);
 
+  lua_register(state, "Dump", luamake_builtins::dump);
+
   auto res = exit_t::ok;
   auto cfg = user_func_config{
       state,

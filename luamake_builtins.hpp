@@ -8,6 +8,8 @@ extern "C" {
 }
 
 namespace luamake_builtins {
+auto dump(lua_State *state) noexcept -> int;
+
 auto clang(lua_State *state) noexcept -> int;
 
 auto make_builder_obj(lua_State *state,
