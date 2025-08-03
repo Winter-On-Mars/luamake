@@ -109,6 +109,114 @@ auto display_string_view(string_view const str) noexcept -> void {
 }
 #endif
 
+struct OwnedString final {
+  char *buffer;
+  size_t size;
+  size_t capacity;
+
+  explicit OwnedString(char *buffer, size_t size) noexcept;
+  constexpr OwnedString() noexcept;
+
+  constexpr OwnedString(OwnedString &&that) noexcept;
+
+  constexpr auto operator=(OwnedString &&that) noexcept -> OwnedString &;
+
+  ~OwnedString() noexcept;
+
+  OwnedString(OwnedString const &) = delete;
+  OwnedString &operator=(OwnedString const &) = delete;
+
+  auto append(string &&) noexcept -> void;
+};
+
+OwnedString::OwnedString(char *buffer, size_t size) noexcept
+    : buffer(buffer), size(0), capacity(size) {}
+constexpr OwnedString::OwnedString() noexcept
+    : buffer(nullptr), size(0), capacity(0) {}
+
+constexpr OwnedString::OwnedString(OwnedString &&that) noexcept
+    : buffer(that.buffer), size(that.size), capacity(that.capacity) {
+  that.buffer = nullptr;
+  that.size = 0;
+  that.capacity = 0;
+}
+
+constexpr auto OwnedString::operator=(OwnedString &&that) noexcept
+    -> OwnedString & {
+  buffer = that.buffer;
+  size = that.size;
+  capacity = that.capacity;
+  return *this;
+}
+
+OwnedString::~OwnedString() noexcept {
+  if (buffer != nullptr)
+    free((void *)buffer);
+}
+
+auto OwnedString::append(string &&str) noexcept -> void {
+  auto const str_len = str.length();
+  if (!(size < capacity - str_len - 1)) {
+    /* resize */
+    auto next_cap = 3 * (capacity + str_len + 1) / 2;
+    buffer = (char *)realloc(buffer, next_cap * sizeof(char));
+    if (buffer == nullptr) {
+      std::cerr << "Unable to realloc [" << next_cap << "] bytes needed\n";
+      std::terminate();
+    }
+    capacity = next_cap;
+  }
+  memcpy(buffer + size, str.data(), str_len);
+  size += str_len;
+  buffer[size] = 0;
+  ++size;
+}
+
+struct StringViews final {
+  unsigned int start;
+  unsigned int end;
+};
+
+struct FixedString final {
+  char *buffer;
+  size_t size;
+
+  explicit FixedString(char *buffer, size_t size) noexcept;
+  constexpr FixedString() noexcept;
+
+  constexpr FixedString(FixedString &&that) noexcept;
+
+  constexpr auto operator=(FixedString &&that) noexcept -> FixedString &;
+
+  ~FixedString() noexcept;
+
+  FixedString(FixedString const &) = delete;
+  FixedString &operator=(FixedString const &) = delete;
+};
+
+FixedString::FixedString(char *buffer, size_t size) noexcept
+    : buffer(buffer), size(size) {}
+
+constexpr FixedString::FixedString() noexcept : buffer(nullptr), size(0) {}
+
+constexpr FixedString::FixedString(FixedString &&that) noexcept
+    : buffer(that.buffer), size(that.size) {
+  that.buffer = nullptr;
+  that.size = 0;
+}
+
+constexpr auto FixedString::operator=(FixedString &&that) noexcept
+    -> FixedString & {
+  buffer = that.buffer;
+  size = that.size;
+  return *this;
+}
+
+FixedString::~FixedString() noexcept {
+  if (buffer != nullptr)
+    free((void *)buffer);
+}
+
 struct Compiler;
 struct CompilationPool;
 
@@ -178,176 +286,193 @@ using DepTreeErr =
     std::variant<EmptyFileName, FileDoesNotExist, NonTerminatedString,
                  MalformedInclude, CFileAPI, MemoryAlloc>;
 
-struct DepTree final {
-  enum SourceFile_t : unsigned char {
-    IMPL,
-    HEADER,
-    SYSTEM,
-    MISC,
-  };
-
-  static auto make(vector<fs::path> const &root) noexcept
-      -> Result<DepTree, DepTreeErr>;
-
-  DepTree(DepTree const &) = delete;
-  DepTree &operator=(DepTree const &) = delete;
-
-  DepTree(DepTree &&) = default;
-  DepTree &operator=(DepTree &&) = default;
-
-  ~DepTree() noexcept = default;
-
-  // displays the function in a pseudo json format
-  auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
-      -> void;
-
-  /*
-  // TODO: add better error handling
-  auto serialize(fs::path const &path) const noexcept -> void;
-
-  // TODO: we're just assuming that the path is well constructed
-  // so add some error handling to this function
-  [[nodiscard(
-      "We spent all this time deserializing you better use the result")]]
-  static auto deserialize(fs::path const &path) noexcept -> SourceFile;
-  */
-
-  [[nodiscard]]
-  static auto determine_file_type(fs::path &&ext) noexcept -> SourceFile_t {
-    if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".c") {
-      return IMPL;
-    }
-    if (ext == ".hpp" || ext == ".hxx" || ext == ".hh" || ext == ".h") {
-      return HEADER;
-    }
-    return MISC;
+struct MissingField final {
+  string_view field_name;
+  MissingField(string_view &&field_name) noexcept : field_name(field_name) {}
+  auto error() const noexcept -> string {
+    return std::format(
+        "Required field [{}] could not be found when constructing a module.",
+        field_name);
   }
-
-private:
-  struct OwnedString final {
-    char *buffer;
-    size_t size;
-    size_t capacity;
-
-    explicit OwnedString(char *buffer, size_t size) noexcept;
-    constexpr OwnedString() noexcept;
-
-    constexpr OwnedString(OwnedString &&that) noexcept;
-
-    constexpr auto operator=(OwnedString &&that) noexcept -> OwnedString &;
-
-    ~OwnedString() noexcept;
-
-    OwnedString(OwnedString const &) = delete;
-    OwnedString &operator=(OwnedString const &) = delete;
-
-    auto append(string &&) noexcept -> void;
-  };
-
-  // a parallel array for all of the source files
-  // NOTE: this could be pushed further, and we could have a
-  // memory allocator as a part of this struct, then just
-  // clearing the memory allocator would act as the destructor
-  // TODO: if performance becomes an issue, it might be good to switch this to a
-  // hash set for the `find` function
-  struct M final {
-    struct StringViews final {
-      unsigned int start;
-      unsigned int end;
-    };
-
-    size_t num_files;
-    size_t cap_files;
-    OwnedString all_paths;
-    std::unique_ptr<SourceFile_t[]> types;
-    std::unique_ptr<StringViews[]> files;
-    std::unique_ptr<vector<unsigned int>[]> deps;
-    std::unique_ptr<size_t[]> hashes;
-
-    [[nodiscard]]
-    static auto make(size_t const num_files = 8) noexcept
-        -> Result<M, DepTreeErr>;
-    [[nodiscard]]
-    auto append_path(fs::path const &) noexcept
-        -> pair<unsigned int, unsigned int>;
-    [[nodiscard]]
-    auto append_dep(fs::path const &root, size_t const parent_idx) noexcept
-        -> Opt<DepTreeErr>;
-    [[nodiscard]]
-    auto root_appends(fs::path const &root) noexcept -> Opt<DepTreeErr>;
-    [[nodiscard]]
-    auto get_path(size_t const) const noexcept -> fs::path;
-    [[nodiscard]]
-    auto find(string_view const string) const noexcept
-        -> std::tuple<bool, unsigned int, unsigned int>;
-  } m;
-
-  // this should probably returned a FixedString, we don't need the size and
-  // capacity
-  static auto get_file_content(FILE *file) noexcept
-      -> Result<OwnedString, DepTreeErr>;
-
-  auto display_impl(std::ostream &out, unsigned int const depth,
-                    unsigned int const idx) const noexcept -> void;
-  /*
-  auto serialize_impl(File &file) const noexcept -> void;
-
-  static auto deserialize_impl(File &file) noexcept -> SourceFile;
-  */
-
-  DepTree() = default;
-  DepTree(DepTree::M &&m) noexcept : m(std::move(m)) {}
-  friend Result<DepTree, DepTreeErr>;
-  friend Compiler;
-  friend CompilationPool;
 };
 
-DepTree::OwnedString::OwnedString(char *buffer, size_t size) noexcept
-    : buffer(buffer), size(0), capacity(size) {}
-constexpr DepTree::OwnedString::OwnedString() noexcept
-    : buffer(nullptr), size(0), capacity(0) {}
-
-constexpr DepTree::OwnedString::OwnedString(
-    DepTree::OwnedString &&that) noexcept
-    : buffer(that.buffer), size(that.size), capacity(that.capacity) {
-  that.buffer = nullptr;
-  that.size = 0;
-  that.capacity = 0;
-}
-
-constexpr auto
-DepTree::OwnedString::operator=(DepTree::OwnedString &&that) noexcept
-    -> DepTree::OwnedString & {
-  buffer = that.buffer;
-  size = that.size;
-  capacity = that.capacity;
-  return *this;
-}
-
-DepTree::OwnedString::~OwnedString() noexcept {
-  if (buffer != nullptr)
-    free((void *)buffer);
-}
-
-auto DepTree::OwnedString::append(string &&str) noexcept -> void {
-  auto const str_len = str.length();
-  if (!(size < capacity - str_len - 1)) {
-    /* resize */
-    auto next_cap = 3 * (capacity + str_len + 1) / 2;
-    buffer = (char *)realloc(buffer, next_cap * sizeof(char));
-    if (buffer == nullptr) {
-      std::cerr << "Unable to realloc [" << next_cap << "] bytes needed\n";
-      std::terminate();
-    }
-    capacity = next_cap;
+struct UnexpectedType final {
+  string_view field_name;
+  // idk why the lua_typename function needs a lua_State* but fine
+  lua_State *state;
+  int expected_type;
+  int found_type;
+  UnexpectedType(string_view &&field_name, lua_State *state, int expected_type,
+                 int found_type) noexcept
+      : field_name(field_name), state(state), expected_type(expected_type),
+        found_type(found_type) {}
+  auto error() const noexcept -> string {
+    return std::format("Required field [{}] found, but was of type {}, "
+                       "expected type {}, when constructing a module.",
+                       field_name, lua_typename(state, found_type),
+                       lua_typename(state, expected_type));
   }
-  memcpy(buffer + size, str.data(), str_len);
-  size += str_len;
-  buffer[size] = 0;
-  ++size;
-}
+};
 
-auto DepTree::M::make(size_t const num_files) noexcept
+using ModuleErr = std::variant<MissingField, UnexpectedType>;
+
+struct Module final {
+  enum Module_t {
+    EXE,
+    STATIC,
+    DYNAMIC,
+  };
+
+  static auto make(Module_t type, lua_State *state) noexcept
+      -> Result<Module, ModuleErr>;
+
+  auto gen_dep_tree() noexcept -> Opt<DepTreeErr>;
+
+  auto constexpr install_dir() const noexcept -> char const * {
+    return m.install_dir;
+  }
+
+  auto constexpr name() const noexcept -> char const * { return m.name; }
+
+  auto roots() const noexcept -> vector<fs::path> { return m.roots; }
+
+  auto compiler() const noexcept -> std::string { return m.compiler; }
+
+  Module(Module &&) = default;
+  Module &operator=(Module &&) = default;
+  ~Module() noexcept = default;
+
+  Module(Module const &) = delete;
+  Module &operator=(Module const &) = delete;
+
+private:
+  static auto parse_compiler_table(lua_State *state) -> string;
+
+  // this is kinda stupid i'm not gonna lie, but this is the only
+  // way i can think to have DepTree be able to reference Module and vice versa
+  // without having to worry about pointer indirection
+  struct DepTree final {
+    enum SourceFile_t : unsigned char {
+      IMPL,
+      HEADER,
+      SYSTEM,
+      MISC,
+    };
+
+    DepTree(DepTree const &) = delete;
+    DepTree &operator=(DepTree const &) = delete;
+
+    DepTree(DepTree &&) = default;
+    DepTree &operator=(DepTree &&) = default;
+
+    ~DepTree() noexcept = default;
+
+    // displays the function in a pseudo json format
+    auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
+        -> void;
+
+    /*
+    // TODO: add better error handling
+    auto serialize(fs::path const &path) const noexcept -> void;
+
+    // TODO: we're just assuming that the path is well constructed
+    // so add some error handling to this function
+    [[nodiscard(
+        "We spent all this time deserializing you better use the result")]]
+    static auto deserialize(fs::path const &path) noexcept -> SourceFile;
+    */
+
+    [[nodiscard]]
+    static auto determine_file_type(fs::path &&ext) noexcept -> SourceFile_t {
+      if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".c") {
+        return IMPL;
+      }
+      if (ext == ".hpp" || ext == ".hxx" || ext == ".hh" || ext == ".h") {
+        return HEADER;
+      }
+      return MISC;
+    }
+
+  private:
+    // a parallel array for all of the source files
+    // NOTE: this could be pushed further, and we could have a
+    // memory allocator as a part of this struct, then just
+    // clearing the memory allocator would act as the destructor
+    // TODO: if performance becomes an issue, it might be good to switch this to
+    // a hash set for the `find` function
+    struct M final {
+      size_t num_files;
+      size_t cap_files;
+      OwnedString all_paths;
+      std::unique_ptr<SourceFile_t[]> types;
+      std::unique_ptr<StringViews[]> files;
+      std::unique_ptr<vector<unsigned int>[]> deps;
+      std::unique_ptr<size_t[]> hashes;
+
+      [[nodiscard]]
+      static auto make(size_t const num_files = 8) noexcept
+          -> Result<M, DepTreeErr>;
+      [[nodiscard]]
+      auto append_path(fs::path const &) noexcept
+          -> pair<unsigned int, unsigned int>;
+      [[nodiscard]]
+      auto append_dep(fs::path const &root, size_t const parent_idx) noexcept
+          -> Opt<DepTreeErr>;
+      [[nodiscard]]
+      auto root_appends(fs::path const &root) noexcept -> Opt<DepTreeErr>;
+      [[nodiscard]]
+      auto get_path(size_t const) const noexcept -> fs::path;
+      [[nodiscard]]
+      auto find(string_view const string) const noexcept
+          -> std::tuple<bool, unsigned int, unsigned int>;
+    } m;
+
+    // this should probably returned a FixedString, we don't need the size and
+    // capacity
+    static auto get_file_content(FILE *file) noexcept
+        -> Result<FixedString, DepTreeErr>;
+
+    auto display_impl(std::ostream &out, unsigned int const depth,
+                      unsigned int const idx) const noexcept -> void;
+    /*
+    auto serialize_impl(File &file) const noexcept -> void;
+
+    static auto deserialize_impl(File &file) noexcept -> SourceFile;
+    */
+
+    DepTree() = default;
+    DepTree(DepTree::M &&m) noexcept : m(std::move(m)) {}
+    friend Result<DepTree, DepTreeErr>;
+    friend Compiler;
+    friend CompilationPool;
+    friend Module;
+  };
+
+  struct M {
+    Module_t type;
+    // it *might* be a cool idea to have this as a union of
+    // vector<fs::path> and fs::path for better domain modeling, but
+    // unions are a bit of a pain to work with in c++
+    DepTree tree;
+    vector<fs::path> roots;
+    vector<fs::path> includes;
+    vector<fs::path> linking;
+    std::string compiler;
+    char const *name;
+    char const *install_dir;
+
+    [[remove]]
+    auto display(std::ostream &) const noexcept -> void;
+  } m;
+
+  Module(M &&m) noexcept : m(std::move(m)) {}
+  Module() noexcept = default;
+  friend Result<Module, ModuleErr>;
+  friend CompilationPool;
+  friend Compiler;
+};
+
+auto Module::DepTree::M::make(size_t const num_files) noexcept
     -> Result<DepTree::M, DepTreeErr> {
   using Ok = Result<DepTree::M, DepTreeErr>::Ok;
   using Err = Result<DepTree::M, DepTreeErr>::Err;
@@ -371,7 +496,7 @@ auto DepTree::M::make(size_t const num_files) noexcept
   }
 }
 
-auto DepTree::M::append_path(fs::path const &path) noexcept
+auto Module::DepTree::M::append_path(fs::path const &path) noexcept
     -> pair<unsigned int, unsigned int> {
   if (auto &&[found, start, end] = find(path.c_str()); found) {
     return std::make_pair(start, end);
@@ -394,8 +519,8 @@ auto DepTree::M::append_path(fs::path const &path) noexcept
                         static_cast<unsigned int>(end));
 }
 
-auto DepTree::M::append_dep(fs::path const &root,
-                            size_t const parent_idx) noexcept
+auto Module::DepTree::M::append_dep(fs::path const &root,
+                                    size_t const parent_idx) noexcept
     -> Opt<DepTreeErr> {
   using None = Opt<DepTreeErr>::None;
   using Err = Opt<DepTreeErr>::Err;
@@ -408,7 +533,7 @@ auto DepTree::M::append_dep(fs::path const &root,
   if (maybe_file_content == decltype(maybe_file_content)::ERR)
     return Err(maybe_file_content.err());
 
-  auto &&[fcontent, _, fsize] = maybe_file_content.get();
+  auto &&[fcontent, fsize] = maybe_file_content.get();
 
   auto const root_idx = num_files;
   assert(root_idx < std::numeric_limits<unsigned int>::max());
@@ -500,7 +625,7 @@ auto DepTree::M::append_dep(fs::path const &root,
 }
 
 // TODO: extract the commonality between this function and append_dep
-auto DepTree::M::root_appends(fs::path const &root) noexcept
+auto Module::DepTree::M::root_appends(fs::path const &root) noexcept
     -> Opt<DepTreeErr> {
   using None = Opt<DepTreeErr>::None;
   using Err = Opt<DepTreeErr>::Err;
@@ -513,7 +638,7 @@ auto DepTree::M::root_appends(fs::path const &root) noexcept
     return Err(maybe_file_content.err());
   }
 
-  auto &&[fcontent, _, fsize] = maybe_file_content.get();
+  auto &&[fcontent, fsize] = maybe_file_content.get();
 
   auto const root_idx = num_files;
   num_files++; // this could cause some off by 1 errors when error reported
@@ -615,14 +740,14 @@ auto DepTree::M::root_appends(fs::path const &root) noexcept
   return None{};
 }
 
-auto DepTree::M::get_path(size_t const idx) const noexcept -> fs::path {
+auto Module::DepTree::M::get_path(size_t const idx) const noexcept -> fs::path {
   auto &&[start, end] = files[idx];
   return fs::path(all_paths.buffer + start, all_paths.buffer + end);
 }
 
 // this could (and probably should (if possible)) be rewritten to use the files
 // array(?)
-auto DepTree::M::find(string_view const path) const noexcept
+auto Module::DepTree::M::find(string_view const path) const noexcept
     -> std::tuple<bool, unsigned int, unsigned int> {
   auto const *start = all_paths.buffer;
   auto const *current = all_paths.buffer;
@@ -648,36 +773,17 @@ auto DepTree::M::find(string_view const path) const noexcept
   return std::make_tuple(false, 0, 0);
 }
 
-auto DepTree::make(vector<fs::path> const &roots) noexcept
-    -> Result<DepTree, DepTreeErr> {
-  using Ok = Result<DepTree, DepTreeErr>::Ok;
-  using Err = Result<DepTree, DepTreeErr>::Err;
-
-  auto maybe_m = M::make();
-  if (maybe_m == decltype(maybe_m)::ERR)
-    return Err(maybe_m.err());
-
-  auto m = maybe_m.get();
-  for (auto const &root : roots) {
-    if (auto maybe_err = m.root_appends(root);
-        maybe_err == decltype(maybe_err)::ERR) {
-      return Err(maybe_err.get());
-    }
-  }
-
-  return Ok(std::move(m));
-}
-
-auto DepTree::display(std::ostream &out,
-                      unsigned int const depth) const noexcept -> void {
+auto Module::DepTree::display(std::ostream &out,
+                              unsigned int const depth) const noexcept -> void {
   out << "All string = [" << string_view{m.all_paths.buffer, m.all_paths.size}
       << "]\n";
   out.flush();
   display_impl(out, depth, 0);
 }
 
-auto DepTree::display_impl(std::ostream &out, unsigned int const depth,
-                           unsigned int const idx) const noexcept -> void {
+auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
+                                   unsigned int const idx) const noexcept
+    -> void {
 
   auto const indents = [](auto const depth) -> string {
     auto res = string(depth, '\t');
@@ -742,10 +848,10 @@ auto SourceFile::deserialize(fs::path const &path) noexcept -> SourceFile {
 }
 */
 
-auto DepTree::get_file_content(FILE *file) noexcept
-    -> Result<OwnedString, DepTreeErr> {
-  using Ok = Result<OwnedString, DepTreeErr>::Ok;
-  using Err = Result<OwnedString, DepTreeErr>::Err;
+auto Module::DepTree::get_file_content(FILE *file) noexcept
+    -> Result<FixedString, DepTreeErr> {
+  using Ok = decltype(get_file_content(file))::Ok;
+  using Err = decltype(get_file_content(file))::Err;
   if (fseek(file, 0, SEEK_END) == -1)
     return Err(CFileAPI(strerror(errno)));
 
@@ -766,7 +872,7 @@ auto DepTree::get_file_content(FILE *file) noexcept
     return Err(CFileAPI(strerror(errno)));
   }
   fcontent[fsize] = 0;
-  return Ok(OwnedString(fcontent, fsize));
+  return Ok(FixedString(fcontent, fsize));
 }
 
 /*
@@ -813,87 +919,6 @@ auto SourceFile::deserialize_impl(File &file) noexcept -> SourceFile {
   return sf;
 }
 */
-
-struct MissingField final {
-  string_view field_name;
-  MissingField(string_view &&field_name) noexcept : field_name(field_name) {}
-  auto error() const noexcept -> string {
-    return std::format(
-        "Required field [{}] could not be found when constructing a module.",
-        field_name);
-  }
-};
-
-struct UnexpectedType final {
-  string_view field_name;
-  // idk why the lua_typename function needs a lua_State* but fine
-  lua_State *state;
-  int expected_type;
-  int found_type;
-  UnexpectedType(string_view &&field_name, lua_State *state, int expected_type,
-                 int found_type) noexcept
-      : field_name(field_name), state(state), expected_type(expected_type),
-        found_type(found_type) {}
-  auto error() const noexcept -> string {
-    return std::format("Required field [{}] found, but was of type {}, "
-                       "expected type {}, when constructing a module.",
-                       field_name, lua_typename(state, found_type),
-                       lua_typename(state, expected_type));
-  }
-};
-
-using ModuleErr = std::variant<MissingField, UnexpectedType>;
-
-struct Module final {
-  enum Module_t {
-    EXE,
-    STATIC,
-    DYNAMIC,
-  };
-
-  static auto make(Module_t type, lua_State *state) noexcept
-      -> Result<Module, ModuleErr>;
-
-  auto constexpr install_dir() const noexcept -> char const * {
-    return m.install_dir;
-  }
-
-  auto constexpr name() const noexcept -> char const * { return m.name; }
-
-  auto roots() const noexcept -> vector<fs::path> { return m.roots; }
-
-  auto compiler() const noexcept -> std::string { return m.compiler; }
-
-  constexpr Module(Module &&) = default;
-  constexpr Module &operator=(Module &&) = default;
-  constexpr ~Module() noexcept = default;
-
-  Module(Module const &) = delete;
-  Module &operator=(Module const &) = delete;
-
-private:
-  static auto parse_compiler_table(lua_State *state) -> string;
-
-  struct M {
-    Module_t type;
-    // it *might* be a cool idea to have this as a union of
-    // vector<fs::path> and fs::path for better domain modeling, but
-    // unions are a bit of a pain to work with in c++
-    vector<fs::path> roots;
-    vector<fs::path> includes;
-    vector<fs::path> linking;
-    std::string compiler;
-    char const *name;
-    char const *install_dir;
-
-    [[my::helper]]
-    auto display(std::ostream &) const noexcept -> void;
-  } m;
-
-  constexpr Module(M &&m) noexcept : m(std::move(m)) {}
-  constexpr Module() noexcept = default;
-  friend Result<Module, ModuleErr>;
-};
 
 auto Module::M::display(std::ostream &out) const noexcept -> void {
   auto _display = [&](auto x) { out << x; };
@@ -1061,6 +1086,25 @@ auto Module::make(Module_t type, lua_State *state) noexcept
   return Ok(std::move(ret_t));
 }
 
+auto Module::gen_dep_tree() noexcept -> Opt<DepTreeErr> {
+  using None = Opt<DepTreeErr>::None;
+  using Err = Opt<DepTreeErr>::Err;
+
+  auto m_m = DepTree::M::make();
+  if (m_m == decltype(m_m)::ERR)
+    return Err(m_m.err());
+
+  m.tree = m_m.get();
+  for (auto const &root : m.roots) {
+    if (auto m_err = m.tree.m.root_appends(root);
+        m_err == decltype(m_err)::ERR) {
+      return Err(m_err.get());
+    }
+  }
+
+  return None{};
+}
+
 auto Module::parse_compiler_table(lua_State *state) -> string {
   auto str = string();
 
@@ -1123,7 +1167,8 @@ struct CompilationPool final {
 
   ~CompilationPool() noexcept = default;
 
-  auto add_task(DepTree const &) noexcept -> void;
+  // idk probably just have this take a module my const & (?)
+  auto add_task(Module::DepTree const &) noexcept -> void;
 
   auto run() noexcept -> void;
 
@@ -1155,13 +1200,14 @@ auto CompilationPool::run() noexcept -> void {
     workers.emplace_back([this]() { _thread_loop(); });
 }
 
-auto CompilationPool::add_task(DepTree const &sf) noexcept -> void {
+auto CompilationPool::add_task(Module::DepTree const &sf) noexcept -> void {
   // this is a really hacky solution to fix the issues of compiling the same
   // source multiple times, this is probably where that hash set solution would
   // probably make things faster :)
   auto lowest = uint{0};
   for (auto i = size_t{}; i < sf.m.num_files; ++i) {
-    if (sf.m.types[i] == DepTree::IMPL && sf.m.files[i].start >= lowest) {
+    if (sf.m.types[i] == Module::DepTree::IMPL &&
+        sf.m.files[i].start >= lowest) {
       remaining_tasks.push_back(fs::path(sf.m.get_path(i)));
       lowest = sf.m.files[i].start + 1;
     }
@@ -1188,8 +1234,10 @@ auto CompilationPool::_thread_loop() noexcept -> void {
     remaining_tasks.pop_back();
     guard.unlock();
 
-    if (DepTree::determine_file_type(this_path.extension()) ==
-        DepTree::HEADER) {
+    // TODO: see if we can remove this, i think we're only pushing back the IMPL
+    // files anyways so there's no need to check this here
+    if (Module::DepTree::determine_file_type(this_path.extension()) ==
+        Module::DepTree::HEADER) {
       continue;
     }
 
@@ -1223,11 +1271,11 @@ auto CompilationPool::get() noexcept -> string {
 
 struct Compiler final {
   [[nodiscard]]
-  static auto compile(Module const &mod, DepTree const &sf) noexcept -> string {
+  static auto compile(Module const &mod) noexcept -> string {
     auto res = string();
 
     auto tp = CompilationPool(mod);
-    tp.add_task(sf);
+    tp.add_task(mod.m.tree);
     tp.run();
     res = tp.get();
 
@@ -1236,7 +1284,6 @@ struct Compiler final {
 };
 
 auto install_exe(lua_State *state) noexcept -> int {
-  using Result = Result<DepTree, DepTreeErr>;
   auto num_args = lua_gettop(state);
   if (num_args != 1) {
     lua_pushstring(state, "Too many arguments.");
@@ -1270,39 +1317,30 @@ auto install_exe(lua_State *state) noexcept -> int {
   }
   ec.clear();
 
-  auto maybe_exe_root = DepTree::make(main_mod.roots());
-  switch (maybe_exe_root) {
-  case Result::OK: {
-    auto exe_root = maybe_exe_root.get();
-    exe_root.display(std::cout);
-    std::cout.flush();
-
-    auto const actually_compiled_files = Compiler::compile(main_mod, exe_root);
-
-    // because of the format of `actually_compiled_files` for the best
-    // formatting of the command there shouldn't be a space between it and the
-    // -o
-    auto const invoked_command = std::format(
-        "{} {}-o {}/{}", main_mod.compiler(), actually_compiled_files,
-        main_mod.install_dir(), main_mod.name());
-
-    std::cout << "[" << invoked_command << "]\n";
-    std::cout.flush();
-
-    if (system(invoked_command.c_str()) != 0) {
-      lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
-      return lua_error(state);
-    } else {
-      return 0;
-    }
-  } break;
-  case Result::ERR: {
-    auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
-                                maybe_exe_root.err());
-
+  if (auto m_err = main_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
+    auto const msg =
+        std::visit([](auto &&e) { return e.error() + '\n'; }, m_err.get());
     lua_pushstring(state, msg.c_str());
     return lua_error(state);
-  } break;
+  }
+
+  auto const actually_compiled_files = Compiler::compile(main_mod);
+
+  // because of the format of `actually_compiled_files` for the best
+  // formatting of the command there shouldn't be a space between it and the
+  // -o
+  auto const invoked_command =
+      std::format("{} {}-o {}/{}", main_mod.compiler(), actually_compiled_files,
+                  main_mod.install_dir(), main_mod.name());
+
+  std::cout << "[" << invoked_command << "]\n";
+  std::cout.flush();
+
+  if (system(invoked_command.c_str()) != 0) {
+    lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
+    return lua_error(state);
+  } else {
+    return 0;
   }
 }
 
@@ -1338,32 +1376,27 @@ auto install_static(lua_State *state) noexcept -> int {
   }
   ec.clear();
 
-  auto maybe_static_root = DepTree::make(static_mod.roots());
-  switch (maybe_static_root) {
-  case decltype(maybe_static_root)::OK: {
-    auto static_root = maybe_static_root.get();
-
-    auto compiled_files = Compiler::compile(static_mod, static_root);
-    auto const invoked_command =
-        std::format("ar crs {}/lib{}.a {}", static_mod.install_dir(),
-                    static_mod.name(), compiled_files);
-    std::cout << '[' << invoked_command << "]\n";
-    std::cout.flush();
-    if (system(invoked_command.c_str()) != 0) {
-      lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
-      return lua_error(state);
-    } else {
-      return 0;
-    }
-  } break;
-  case decltype(maybe_static_root)::ERR:
+  if (auto m_err = static_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
     auto const msg =
-        std::visit([](auto &&e) { return e.error(); }, maybe_static_root.err());
+        std::visit([](auto &&e) { return e.error() + '\n'; }, m_err.get());
     lua_pushstring(state, msg.c_str());
     return lua_error(state);
   }
 
-  return 0;
+  auto const compiled_files = Compiler::compile(static_mod);
+  auto const invoked_command =
+      std::format("ar crs {}/lib{}.a {}", static_mod.install_dir(),
+                  static_mod.name(), compiled_files);
+
+  std::cout << '[' << invoked_command << "]\n";
+  std::cout.flush();
+  if (system(invoked_command.c_str()) != 0) {
+    lua_pushstring(
+        state, std::format("Error compiling [{}]", invoked_command).c_str());
+    return lua_error(state);
+  } else {
+    return 0;
+  }
 }
 
 auto run(lua_State *L) noexcept -> int {
