@@ -449,6 +449,9 @@ private:
           -> std::tuple<bool, unsigned int, unsigned int>;
     } m;
 
+    // basically making the assumption that a project isn't gonna have
+    // size_t.max files in it, idk if that's even physically possible
+    // so this *seems like* a valid assumption
     static constexpr auto ROOT_IDX = static_cast<size_t>(-1);
 
     // this should probably returned a FixedString, we don't need the size and
@@ -543,15 +546,15 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
                         static_cast<unsigned int>(end));
 }
 
-auto Module::DepTree::M::append_dep(fs::path const &root,
+auto Module::DepTree::M::append_dep(fs::path const &dep,
                                     size_t const parent_idx) noexcept
     -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
   using Err = Opt::Err;
 
-  auto file = File(root, File::READ);
+  auto file = File(dep, File::READ);
   if (!file)
-    return Err(FileDoesNotExist(root, get_path(parent_idx)));
+    return Err(FileDoesNotExist(dep, get_path(parent_idx)));
 
   auto maybe_file_content = DepTree::get_file_content(file);
   if (maybe_file_content == decltype(maybe_file_content)::ERR) {
@@ -566,14 +569,14 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
     deps[parent_idx].push_back(static_cast<unsigned int>(root_idx));
   ++num_files;
 
-  auto &&[start, end] = append_path(root);
+  auto &&[start, end] = append_path(dep);
   auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
     return fnv1a(fsize, fcontent);
   });
-  auto const ftype = DepTree::determine_file_type(root.extension());
+  auto const ftype = DepTree::determine_file_type(dep.extension());
   if (ftype == SourceFile_t::HEADER) {
     auto constexpr potential_extensions = array<string_view, 2>{{".cpp", ".c"}};
-    auto const potential_impl = (root.parent_path() / root.stem()).string();
+    auto const potential_impl = (dep.parent_path() / dep.stem()).string();
     for (auto const &potential_extension : potential_extensions) {
       auto const possible_path =
           fs::path(potential_impl + potential_extension.data());
@@ -610,20 +613,19 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
           }
 
           if (*end_of_include_string == 0)
-            return Err(NonTerminatedString(root));
+            return Err(NonTerminatedString(dep));
 
           auto const include_string_size = end_of_include_string - ch;
           if (include_string_size == 0)
-            return Err(EmptyFileName(root));
+            return Err(EmptyFileName(dep));
 
           auto const include_file =
               fs::path(string_view{ch, end_of_include_string});
 
-          if (include_file.stem() == root.stem()) {
+          if (include_file.stem() == dep.stem()) {
             auto const include_f_ext =
                 DepTree::determine_file_type(include_file.extension());
-            auto const path_ext =
-                DepTree::determine_file_type(root.extension());
+            auto const path_ext = DepTree::determine_file_type(dep.extension());
             if (include_f_ext == HEADER && path_ext == IMPL) {
               continue; // ignore this path
             }
@@ -631,7 +633,8 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
 
           // TODO: this is where we potentially have to look in different paths
           // if the file doesn't exist in the local dir
-          auto const dep_path = root.parent_path() / include_file;
+          // could rename this to deps_dep lol
+          auto const dep_path = dep.parent_path() / include_file;
 
           if (auto m_error = append_dep(dep_path, root_idx); !m_error.ok())
             return m_error;
@@ -640,7 +643,7 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
           // TODO global include
         } break;
         default:
-          return Err(MalformedInclude(root));
+          return Err(MalformedInclude(dep));
         }
       } else {
         ++ch;
@@ -651,8 +654,8 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
       switch (*ch) {
       case 0:
         return Err(NonTerminatedString(
-            root)); // this should be a different error type i'm just tired
-      case '/':     // advance to end of line
+            dep)); // this should be a different error type i'm just tired
+      case '/':    // advance to end of line
         ++ch;
         while (*ch != 0 && *ch != '\n')
           ++ch;
@@ -667,7 +670,7 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
             ++ch;
           switch (*ch) {
           case 0:
-            return Err(NonTerminatedString(root)); // not right error i'm tired
+            return Err(NonTerminatedString(dep)); // not right error i'm tired
           case '*': // check that next char is also a '/'
             ++ch;
             if (*ch != 0 && *ch == '/')
@@ -689,7 +692,7 @@ auto Module::DepTree::M::append_dep(fs::path const &root,
         ++ch;
       }
       if (*ch == 0) {
-        return Err(NonTerminatedString(root));
+        return Err(NonTerminatedString(dep));
       } else {
         ++ch; // *ch (should) == '"'
       }
