@@ -28,6 +28,7 @@ extern "C" {
 #include <system_error>
 #include <thread>
 #include <tuple>
+#include <unistd.h>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -291,9 +292,9 @@ struct MalformedInclude final {
   };
 };
 
-struct CFileAPI final {
+struct CAPI final {
   string message;
-  explicit CFileAPI(string const &message) noexcept : message(message) {}
+  explicit CAPI(string const &message) noexcept : message(message) {}
   auto error() const noexcept -> string { return message; }
 };
 
@@ -308,7 +309,7 @@ struct MemoryAlloc final {
 
 using DepTreeErr =
     std::variant<EmptyFileName, FileDoesNotExist, NonTerminatedString,
-                 MalformedInclude, CFileAPI, MemoryAlloc>;
+                 MalformedInclude, CAPI, MemoryAlloc>;
 
 struct MissingField final {
   string_view field_name;
@@ -338,7 +339,7 @@ struct UnexpectedType final {
   }
 };
 
-using ModuleErr = std::variant<MissingField, UnexpectedType>;
+using ModuleErr = std::variant<MissingField, UnexpectedType, CAPI>;
 
 struct Module final {
   enum Module_t {
@@ -490,6 +491,8 @@ private:
 
     [[remove]]
     auto display(std::ostream &) const noexcept -> void;
+
+    auto append_include_paths(string_view const) noexcept -> Opt<ModuleErr>;
   } m;
 
   Module(M &&m) noexcept : m(std::move(m)) {}
@@ -508,7 +511,7 @@ auto Module::DepTree::M::make(size_t const num_files) noexcept
     auto const paths_size = num_files * (sizeof(char) * 15 + 1);
     auto *paths = (char *)malloc(paths_size);
     if (paths == nullptr)
-      return Err(CFileAPI(strerror(errno)));
+      return Err(CAPI(strerror(errno)));
     memset(paths, 0, paths_size);
 
     auto types = std::make_unique<SourceFile_t[]>(num_files);
@@ -825,23 +828,23 @@ auto Module::DepTree::get_file_content(FILE *file) noexcept
   using Ok = decltype(get_file_content(file))::Ok;
   using Err = decltype(get_file_content(file))::Err;
   if (fseek(file, 0, SEEK_END) == -1)
-    return Err(CFileAPI(strerror(errno)));
+    return Err(CAPI(strerror(errno)));
 
   auto const _fsize = ftell(file);
   if (_fsize == -1)
-    return Err(CFileAPI(strerror(errno)));
+    return Err(CAPI(strerror(errno)));
 
   auto fsize = static_cast<size_t>(_fsize);
   rewind(file);
 
   auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
   if (fcontent == nullptr)
-    return Err(CFileAPI(strerror(errno)));
+    return Err(CAPI(strerror(errno)));
 
   if (auto const amount_read = fread(fcontent, sizeof(char), fsize, file);
       amount_read != fsize) {
     free(fcontent);
-    return Err(CFileAPI(strerror(errno)));
+    return Err(CAPI(strerror(errno)));
   }
   fcontent[fsize] = 0;
   return Ok(FixedString(fcontent, fsize));
@@ -926,6 +929,40 @@ auto Module::M::display(std::ostream &out) const noexcept -> void {
   out << "name = " << name << '\n';
   out << "install_dir = " << install_dir << '\n';
   out.flush();
+}
+
+// this function is breaking things :), fix it, figue out how pipes work and
+// shit also because we have this now windows support is most likely borked :)
+auto Module::M::append_include_paths(string_view const compiler) noexcept
+    -> Opt<ModuleErr> {
+  using Opt = Opt<ModuleErr>;
+  using Err = Opt::Err;
+
+  int pipes[2] = {};
+  auto pid = vfork();
+  if (pid < 0) {
+    return Err(CAPI(strerror(errno)));
+  }
+  switch (pid) {
+  case 0: { // in child proc
+    auto const command_string =
+        std::format("{} -v -c -xc++ /dev/null",
+                    string_view{compiler.data(), compiler.find(' ')});
+
+    std::cerr << "running [" << command_string << "]\n";
+    dup2(pipes[1], STDERR_FILENO);
+    execl("/bin/sh", "-c", command_string.c_str(), nullptr);
+  } break;
+  default: { // in parent proc
+    auto constexpr buffer_size = 128;
+    char buffer[buffer_size + 1] = {};
+    buffer[buffer_size] = 0;
+    while (read(pipes[0], buffer, buffer_size) > 0) {
+      std::cerr << std::format("read some text [{}]\n", buffer);
+    }
+  } break;
+  }
+  return Opt();
 }
 
 auto Module::make(Module_t type, lua_State *state) noexcept
@@ -1031,25 +1068,7 @@ auto Module::make(Module_t type, lua_State *state) noexcept
   // the compiler command /usr/bin/clang-20 which this goes down into
   // displays into stderr not stdout, so idk we actually have to set up
   // our own pipes to read to and from it :)
-  /*
-  auto const command_string =
-      std::format("{} -v -c -xc++ /dev/null",
-                  string_view{ret_t.compiler.data(), ret_t.compiler.find(' ')});
-
-  std::cerr << "running [" << command_string << "]\n";
-  auto *child = popen(command_string.c_str(), "r");
-  auto constexpr buffer_size = 128 + 1;
-  char buffer[buffer_size] = {};
-  buffer[buffer_size - 1] = 0;
-  for (auto amount_read =
-           std::fgets(buffer, sizeof(char) * (buffer_size - 1), child);
-       amount_read != 0; amount_read = std::fgets(
-                             buffer, sizeof(char) * (buffer_size - 1), child)) {
-    std::cerr << "read 32 bytes from child, recieved [" << buffer << "]\n";
-  }
-  pclose(child);
-  */
-
+  ret_t.append_include_paths(ret_t.compiler);
   switch (auto const linking_t = lua_getfield(state, -6, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
