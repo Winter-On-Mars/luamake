@@ -1004,6 +1004,8 @@ auto Module::make(Module_t type, lua_State *state) noexcept
         UnexpectedType("install_dir", state, LUA_TSTRING, install_dir_t));
   }
 
+  // TODO: have an accumulator that tells us how many we have to pop from the
+  // stack auto num_pop = int{};
   switch (auto const include_t = lua_getfield(state, -5, "include")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
@@ -1026,6 +1028,27 @@ auto Module::make(Module_t type, lua_State *state) noexcept
   default:
     return Err(UnexpectedType("include", state, LUA_TTABLE, include_t));
   }
+  // the compiler command /usr/bin/clang-20 which this goes down into
+  // displays into stderr not stdout, so idk we actually have to set up
+  // our own pipes to read to and from it :)
+  /*
+  auto const command_string =
+      std::format("{} -v -c -xc++ /dev/null",
+                  string_view{ret_t.compiler.data(), ret_t.compiler.find(' ')});
+
+  std::cerr << "running [" << command_string << "]\n";
+  auto *child = popen(command_string.c_str(), "r");
+  auto constexpr buffer_size = 128 + 1;
+  char buffer[buffer_size] = {};
+  buffer[buffer_size - 1] = 0;
+  for (auto amount_read =
+           std::fgets(buffer, sizeof(char) * (buffer_size - 1), child);
+       amount_read != 0; amount_read = std::fgets(
+                             buffer, sizeof(char) * (buffer_size - 1), child)) {
+    std::cerr << "read 32 bytes from child, recieved [" << buffer << "]\n";
+  }
+  pclose(child);
+  */
 
   switch (auto const linking_t = lua_getfield(state, -6, "linking")) {
   case LUA_TTABLE: {
@@ -1618,36 +1641,50 @@ auto clang(lua_State *state) noexcept -> int {
     return lua_error(state);
   }
 
-  // this could probably be optimized
+  // this seems slow, should benchmark it to see if it's causing the massive
+  // slow down i'm noticing
   auto string_fut =
       std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
-        // TODO: change this to ';' when on windows platforms :)
-        auto constexpr path_separator = ':';
-        auto i = 0;
+#if defined(_WIN32)
+        auto constexpr path_sep = ';';
+#else
+        auto constexpr path_sep = ':';
+#endif
 
-        auto path_view = string_view{};
-        auto const *prev_path_end = path_var;
-        auto possible_path = fs::path();
-        while (path_var[i] != 0) {
-          // find next ':'
-          while (path_var[i] != 0 && path_var[i] != path_separator) {
-            ++i;
-          }
-          // i think this hack might not read the last variable in PATH (?)
-          if (path_var[i] == 0) {
-            break;
-          }
-          path_view = string_view{prev_path_end, &path_var[i]};
-          possible_path = fs::path(path_view) / compiler_field;
+        auto const *start = path_var;
+        auto const *end = start;
 
-          if (fs::exists(possible_path)) {
-            return possible_path;
+        auto path_part = fs::path();
+        auto ec = std::error_code{};
+        while (true) {
+          while (*end != 0 && *end != path_sep) {
+            ++end;
           }
-          ++i;
-          prev_path_end = &path_var[i];
+          switch (*end) {
+          case 0: {
+            path_part = fs::path(start, end) / compiler_field;
+            if (fs::exists(path_part, ec)) {
+              return path_part;
+            } else {
+              // unable to find binary
+              return fs::path();
+            }
+          } break;
+          case path_sep: {
+            path_part = fs::path(start, end) / compiler_field;
+            if (fs::exists(path_part, ec)) {
+              return path_part;
+            } else {
+              // binary is not is this directory
+              start = end + 1; // skip the part_sep
+              ++end;
+            }
+          } break;
+          default: {
+            return fs::path();
+          }
+          }
         }
-
-        return fs::path();
       });
 
   lua_createtable(state, 0, 3); // tbl
