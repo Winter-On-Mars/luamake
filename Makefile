@@ -1,7 +1,7 @@
 cc:=clang++
-cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -O3
+cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -O3 -fsanitize=address
 bin_name:=luamake_c# TODO: change this when the c rewrite is done
-linker:=mold
+linker:=lld # if someone has clang they should have lld, so this is better, even if mold is a better linker
 
 .PHONY: all, ncolor, dbg, clean_submod
 
