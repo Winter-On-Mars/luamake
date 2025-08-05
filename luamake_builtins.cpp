@@ -1654,7 +1654,6 @@ auto clang(lua_State *state) noexcept -> int {
         auto const *start = path_var;
         auto const *end = start;
 
-        auto path_part = fs::path();
         auto ec = std::error_code{};
         while (true) {
           while (*end != 0 && *end != path_sep) {
@@ -1662,18 +1661,16 @@ auto clang(lua_State *state) noexcept -> int {
           }
           switch (*end) {
           case 0: {
-            path_part = fs::path(start, end) / compiler_field;
-            if (fs::exists(path_part, ec)) {
-              return path_part;
+            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
+              return fs::path(start, end) / compiler_field;
             } else {
               // unable to find binary
               return fs::path();
             }
           } break;
           case path_sep: {
-            path_part = fs::path(start, end) / compiler_field;
-            if (fs::exists(path_part, ec)) {
-              return path_part;
+            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
+              return fs::path(start, end) / compiler_field;
             } else {
               // binary is not is this directory
               start = end + 1; // skip the part_sep
