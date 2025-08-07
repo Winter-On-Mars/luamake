@@ -44,7 +44,7 @@
   fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL, __VA_ARGS__)
 
 #define ASSERT_ERROR(expr)                                                     \
-  if (expr) {                                                                  \
+  if ((expr)) {                                                                \
     fprintf(stderr, ERROR "Fatel Error:" NORMAL " " #expr NL);                 \
     assert(false);                                                             \
   }
