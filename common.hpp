@@ -43,6 +43,12 @@
 #define fwarning_message(msg, ...)                                             \
   fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL, __VA_ARGS__)
 
+#define ASSERT_ERROR(expr)                                                     \
+  if (expr) {                                                                  \
+    fprintf(stderr, ERROR "Fatel Error:" NORMAL " " #expr NL);                 \
+    assert(false);                                                             \
+  }
+
 #define fn_print()                                                             \
   fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
 
