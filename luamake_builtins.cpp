@@ -79,6 +79,7 @@ auto skip_ws(char const *ch) noexcept -> char const * {
   return local;
 }
 
+// TODO: rename this function or move it into where it's actually used
 constexpr auto skippable(char const ch) noexcept -> bool {
   switch (ch) {
   case '#':
@@ -896,7 +897,7 @@ auto SourceFile::deserialize_impl(File &file) noexcept -> SourceFile {
 */
 
 auto Module::M::display(std::ostream &out) const noexcept -> void {
-  auto _display = [&](auto x) { out << x; };
+  auto _display = [&](auto x) { out << x << ", "; };
 
   out << "type = ";
   switch (type) {
@@ -938,28 +939,82 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
   using Opt = Opt<ModuleErr>;
   using Err = Opt::Err;
 
-  int pipes[2] = {};
-  auto pid = vfork();
+  auto _pipes = array<int, 2>{};
+  if (pipe(_pipes.data()) == -1) {
+    return Err(CAPI(strerror(errno)));
+  }
+  auto &&[read_pipe, write_pipe] = _pipes;
+  auto const pid = vfork();
   if (pid < 0) {
+    close(read_pipe);
+    close(write_pipe);
     return Err(CAPI(strerror(errno)));
   }
   switch (pid) {
   case 0: { // in child proc
+    // close reader
+    close(read_pipe);
     auto const command_string =
         std::format("{} -v -c -xc++ /dev/null",
                     string_view{compiler.data(), compiler.find(' ')});
 
-    std::cerr << "running [" << command_string << "]\n";
-    dup2(pipes[1], STDERR_FILENO);
-    execl("/bin/sh", "-c", command_string.c_str(), nullptr);
+    dup2(write_pipe, STDERR_FILENO);
+    if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
+      return Err(CAPI(strerror(errno)));
+    }
   } break;
   default: { // in parent proc
-    auto constexpr buffer_size = 128;
-    char buffer[buffer_size + 1] = {};
-    buffer[buffer_size] = 0;
-    while (read(pipes[0], buffer, buffer_size) > 0) {
-      std::cerr << std::format("read some text [{}]\n", buffer);
+    // there's probably a better way of doing this, but this is the most
+    // straightforward way i can think of
+    close(write_pipe);
+    auto constexpr buffer_size = sizeof(char) * size_t{2 << 8};
+    auto *const buffer = (char *)malloc(buffer_size + 1);
+    if (buffer == nullptr)
+      return Err(CAPI(strerror(errno)));
+    memset(buffer, 0, buffer_size + 1);
+
+    auto search_string = string();
+    search_string.reserve(256);
+    auto amount_read = read(read_pipe, buffer, buffer_size);
+    while (amount_read > 0) {
+      search_string.append(buffer, static_cast<size_t>(amount_read));
+      amount_read = read(read_pipe, buffer, buffer_size);
     }
+    free(buffer);
+    if (amount_read < 0) {
+      // idk error happened
+      std::cerr << "\terror occured :)\n";
+    }
+
+    // reached EOF
+
+    auto const include_start = search_string.find("#include <");
+    ASSERT_ERROR(include_start == search_string.npos);
+
+    auto const *start_path = search_string.data() + include_start;
+    while (*start_path != 0 && *start_path != '\n')
+      ++start_path;
+
+    ASSERT_ERROR(*start_path == 0);
+
+    start_path = skip_ws(start_path);
+    for (auto end_path = start_path; string_view{start_path, end_path} !=
+                                     string_view{"End of search list."};
+         end_path = start_path) {
+      while (*end_path != 0 && *end_path != '\n') {
+        ++end_path;
+      }
+      if (*end_path == 0)
+        break;
+      // there's probably a better way to do this, but idk this is fine for now
+      // :)
+      if (fs::exists(fs::path(string_view(start_path, end_path)))) {
+        includes.emplace_back(start_path, end_path);
+      }
+      start_path = skip_ws(end_path);
+    }
+
+    close(read_pipe);
   } break;
   }
   return Opt();
@@ -1041,12 +1096,11 @@ auto Module::make(Module_t type, lua_State *state) noexcept
         UnexpectedType("install_dir", state, LUA_TSTRING, install_dir_t));
   }
 
-  // TODO: have an accumulator that tells us how many we have to pop from the
-  // stack auto num_pop = int{};
+  ret_t.includes.reserve(10);
+  ret_t.includes.emplace_back(".");
   switch (auto const include_t = lua_getfield(state, -5, "include")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
-    ret_t.includes.reserve(len);
     auto include = -1;
     for (auto i = 1; i <= len; ++i) {
       switch (auto const value_t = lua_geti(state, include, i)) {
@@ -1065,9 +1119,6 @@ auto Module::make(Module_t type, lua_State *state) noexcept
   default:
     return Err(UnexpectedType("include", state, LUA_TTABLE, include_t));
   }
-  // the compiler command /usr/bin/clang-20 which this goes down into
-  // displays into stderr not stdout, so idk we actually have to set up
-  // our own pipes to read to and from it :)
   ret_t.append_include_paths(ret_t.compiler);
   switch (auto const linking_t = lua_getfield(state, -6, "linking")) {
   case LUA_TTABLE: {
@@ -1093,6 +1144,8 @@ auto Module::make(Module_t type, lua_State *state) noexcept
   }
 
   lua_pop(state, 5);
+
+  ret_t.display(std::cout);
 
   return Ok(std::move(ret_t));
 }
