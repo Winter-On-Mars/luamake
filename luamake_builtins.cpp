@@ -357,12 +357,11 @@ struct Module final {
   auto constexpr install_dir() const noexcept -> char const * {
     return m.install_dir;
   }
-
   auto constexpr name() const noexcept -> char const * { return m.name; }
-
   auto roots() const noexcept -> vector<fs::path> { return m.roots; }
-
   auto compiler() const noexcept -> std::string { return m.compiler; }
+  auto includes() const noexcept -> std::string;
+  auto links() const noexcept -> std::string;
 
   Module(Module &&) = default;
   Module &operator=(Module &&) = default;
@@ -442,8 +441,8 @@ private:
       auto append_path(fs::path const &) noexcept
           -> pair<unsigned int, unsigned int>;
       [[nodiscard]]
-      auto append_dep(fs::path const &root, size_t const parent_idx) noexcept
-          -> Opt<DepTreeErr>;
+      auto append_dep(fs::path const &root, vector<fs::path> const &includes,
+                      size_t const parent_idx) noexcept -> Opt<DepTreeErr>;
       [[nodiscard]]
       auto get_path(size_t const) const noexcept -> fs::path;
       [[nodiscard]]
@@ -551,6 +550,7 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
 }
 
 auto Module::DepTree::M::append_dep(fs::path const &dep,
+                                    vector<fs::path> const &includes,
                                     size_t const parent_idx) noexcept
     -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
@@ -585,7 +585,8 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
       auto const possible_path =
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
-        if (auto m_error = append_dep(possible_path, root_idx); !m_error.ok()) {
+        if (auto m_error = append_dep(possible_path, includes, root_idx);
+            !m_error.ok()) {
           return m_error;
         }
       }
@@ -635,13 +636,16 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
             }
           }
 
-          // TODO: this is where we potentially have to look in different paths
-          // if the file doesn't exist in the local dir
-          // could rename this to deps_dep lol
-          auto const dep_path = dep.parent_path() / include_file;
-
-          if (auto m_error = append_dep(dep_path, root_idx); !m_error.ok())
-            return m_error;
+          for (auto const &include_prefix : includes) {
+            auto const dep_path =
+                include_prefix / dep.parent_path() / include_file;
+            if (fs::exists(dep_path)) {
+              if (auto m_error = append_dep(dep_path, includes, root_idx);
+                  !m_error.ok()) {
+                return m_error;
+              }
+            }
+          }
         } break;
         case '<': {
           // TODO global include
@@ -954,9 +958,14 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
   case 0: { // in child proc
     // close reader
     close(read_pipe);
+    // TODO: calling into std::format here seems to be causing a memory leak
+    // i think b/c we call into execl, which replaces this exe with the called
+    // one that it results in a memory leak, so we have to find a better way of
+    // handling the child proc
     auto const command_string =
-        std::format("{} -v -c -xc++ /dev/null",
-                    string_view{compiler.data(), compiler.find(' ')});
+        std::format("{} -v -c -xc++ /dev/null -o {}/luamake_null.o",
+                    string_view{compiler.data(), compiler.find(' ')},
+                    fs::temp_directory_path().c_str());
 
     dup2(write_pipe, STDERR_FILENO);
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
@@ -1009,7 +1018,7 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
       // there's probably a better way to do this, but idk this is fine for now
       // :)
       if (fs::exists(fs::path(string_view(start_path, end_path)))) {
-        includes.emplace_back(start_path, end_path);
+        includes.emplace_back(fs::canonical(fs::path(start_path, end_path)));
       }
       start_path = skip_ws(end_path);
     }
@@ -1145,8 +1154,6 @@ auto Module::make(Module_t type, lua_State *state) noexcept
 
   lua_pop(state, 5);
 
-  ret_t.display(std::cout);
-
   return Ok(std::move(ret_t));
 }
 
@@ -1159,13 +1166,33 @@ auto Module::gen_dep_tree() noexcept -> Opt<DepTreeErr> {
 
   m.tree = m_m.get();
   for (auto const &root : m.roots) {
-    if (auto m_err = m.tree.m.append_dep(root, DepTree::ROOT_IDX);
+    if (auto m_err = m.tree.m.append_dep(root, m.includes, DepTree::ROOT_IDX);
         m_err == decltype(m_err)::ERR) {
       return m_err;
     }
   }
 
   return Opt();
+}
+
+auto Module::includes() const noexcept -> std::string {
+  auto res = string();
+  res.reserve(256); // idk random number can def be optimized :)
+  for (auto const &path : m.includes) {
+    res += std::format(" -I{}", path.string());
+  }
+  return res;
+}
+
+auto Module::links() const noexcept -> std::string {
+  // when we add dynamic library support, we'll have to worry about the -L flag
+  // and shit
+  auto res = string();
+  res.reserve(256); // idk random number can def be optimized :)
+  for (auto const &path : m.linking) {
+    res += std::format("{} ", path.string());
+  }
+  return res;
 }
 
 auto Module::parse_compiler_table(lua_State *state) -> string {
@@ -1219,25 +1246,21 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
 }
 
 // sort of a thread pool like structure that is just for compiling
+// TODO: update this to take advantage of the current layout for DepTree
+// i.e. relying on DepTree.types to determine what to compile
 struct CompilationPool final {
-  CompilationPool(size_t num_threads) noexcept {
-    workers.reserve(num_threads);
-    remaining_tasks.reserve(8);
-  }
+  CompilationPool(size_t num_threads) noexcept;
 
-  ~CompilationPool() noexcept = default;
+  ~CompilationPool() noexcept;
 
   auto init(Module const *const mod) noexcept -> void;
 
 private:
-  // idk probably just have this take a module my const & (?)
-  auto add_task(Module::DepTree const &) noexcept -> void;
-
-  auto run() noexcept -> void;
-
+  auto add_task(Module::DepTree const &) -> void;
+  auto run() -> void;
   auto busy() noexcept -> bool;
-
-  auto get() noexcept -> string;
+  auto get() -> string;
+  auto constexpr done() const noexcept -> bool { return mod == nullptr; }
 
   CompilationPool() = delete;
   CompilationPool(CompilationPool &&) = delete;
@@ -1249,93 +1272,124 @@ private:
 
   vector<std::thread> workers;
   vector<fs::path> remaining_tasks;
-  std::mutex queue_mtx;
+  std::mutex task_mtx;
 
-  string result;
+  string result = string();
   std::mutex result_mtx;
 
-  Module const *mod;
+  Module const *mod = nullptr;
+
   friend Compiler;
 };
 
-static auto pool = CompilationPool(std::thread::hardware_concurrency() - 1);
+CompilationPool::CompilationPool(size_t num_threads) noexcept {
+  workers.reserve(num_threads);
+}
+
+CompilationPool::~CompilationPool() noexcept {
+  {
+    auto lock = std::unique_lock(task_mtx);
+    mod = nullptr;
+  }
+  for (auto &thread : workers) {
+    if (thread.joinable()) // ?
+      thread.join();
+  }
+}
 
 auto CompilationPool::init(Module const *const mod) noexcept -> void {
   this->mod = mod;
 }
 
-auto CompilationPool::run() noexcept -> void {
-  for (auto i = 0; i < workers.capacity(); ++i)
+auto CompilationPool::run() -> void {
+  for (auto i = size_t{0}; i < workers.capacity(); ++i) {
     workers.emplace_back([this]() { _thread_loop(); });
+  }
+  for (auto &worker : workers) {
+    worker.join();
+  }
 }
 
-auto CompilationPool::add_task(Module::DepTree const &sf) noexcept -> void {
+auto CompilationPool::add_task(Module::DepTree const &sf) -> void {
+  auto lock = std::unique_lock(task_mtx);
   // this is a really hacky solution to fix the issues of compiling the same
   // source multiple times, this is probably where that hash set solution would
   // probably make things faster :)
   auto lowest = uint{0};
+  remaining_tasks.reserve(sf.m.num_files);
   for (auto i = size_t{}; i < sf.m.num_files; ++i) {
     if (sf.m.types[i] == Module::DepTree::IMPL &&
         sf.m.files[i].start >= lowest) {
-      remaining_tasks.push_back(fs::path(sf.m.get_path(i)));
+      remaining_tasks.push_back(sf.m.get_path(i));
       lowest = sf.m.files[i].start + 1;
     }
   }
 }
 
 auto CompilationPool::busy() noexcept -> bool {
+  // std::this_thread::sleep_for(std::chrono::nanoseconds(100));
   auto pool_busy = true;
   {
-    auto lock = std::unique_lock(queue_mtx);
+    auto lock = std::unique_lock(task_mtx);
     pool_busy = !remaining_tasks.empty();
   }
-  std::this_thread::sleep_for(std::chrono::nanoseconds(100));
   return pool_busy;
 }
 
 auto CompilationPool::_thread_loop() noexcept -> void {
-  while (true) {
-    auto guard = std::unique_lock(queue_mtx);
-    if (remaining_tasks.empty())
-      return;
+  try {
+    while (true) {
+      auto guard = std::unique_lock(task_mtx);
 
-    auto this_path = remaining_tasks.back();
-    remaining_tasks.pop_back();
-    guard.unlock();
+      if (done() || remaining_tasks.empty())
+        return;
 
-    // TODO: see if we can remove this, i think we're only pushing back the IMPL
-    // files anyways so there's no need to check this here
-    if (Module::DepTree::determine_file_type(this_path.extension()) ==
-        Module::DepTree::HEADER) {
-      continue;
+      auto this_path = remaining_tasks.back();
+      remaining_tasks.pop_back();
+      guard.unlock();
+
+      // TODO: see if we can remove this, i think we're only pushing back the
+      // IMPL files anyways so there's no need to check this here
+      if (Module::DepTree::determine_file_type(this_path.extension()) ==
+          Module::DepTree::HEADER) {
+        continue;
+      }
+
+      auto const include_path = mod->includes();
+
+      auto const invoked_command =
+          std::format("{} {} -c {} -o {}/{}.o/{}.o", mod->compiler(),
+                      include_path, this_path.c_str(), mod->install_dir(),
+                      mod->name(), this_path.stem().c_str());
+      std::cout << "[" << invoked_command << "]\n";
+      std::cout.flush();
+      auto const res = system(invoked_command.c_str());
+      if (res == 0) {
+        auto res_lock = std::unique_lock(result_mtx);
+        result += std::format("{}/{}.o/{}.o ", mod->install_dir(), mod->name(),
+                              this_path.stem().c_str());
+      }
     }
-
-    auto const invoked_command = std::format(
-        "{} -c {} -o {}/{}.o/{}.o", mod->compiler(), this_path.c_str(),
-        mod->install_dir(), mod->name(), this_path.stem().c_str());
-    std::cout << "[" << invoked_command << "]\n";
-    std::cout.flush();
-    auto const res = system(invoked_command.c_str());
-    if (res == 0) {
-      auto res_lock = std::unique_lock(result_mtx);
-      result += std::format("{}/{}.o/{}.o ", mod->install_dir(), mod->name(),
-                            this_path.stem().c_str());
-    }
+  } catch (std::exception const &e) {
+    std::cerr << "caught exception [" << e.what()
+              << "] in _thread_loop on thread [" << std::this_thread::get_id()
+              << "]";
+    return;
   }
 }
 
-auto CompilationPool::get() noexcept -> string {
+auto CompilationPool::get() -> string {
   while (busy()) {
     /* wait */
   }
 
-  // wait for all jobs to finish after we know everything has been queued
-  // this also cleans up all of the threads, so in the destructor we don't
-  // need to call join again
-  for (auto &worker : workers)
-    worker.join();
+  // idk if this is needed?
+  for (auto &worker : workers) {
+    if (worker.joinable())
+      worker.join();
+  }
 
-  mod = nullptr;
+  auto lock = std::unique_lock(result_mtx);
 
   return result;
 }
@@ -1344,6 +1398,10 @@ struct Compiler final {
   [[nodiscard]]
   static auto compile(Module const &mod) noexcept -> string {
     auto res = string();
+    auto pool = CompilationPool(std::thread::hardware_concurrency() - 1);
+    // pass this value to the _thread_loop function so we don't have to call it
+    // in each thread (plus we can make it a string_view so it shouldn't have to
+    // worry too much about memory allocations) auto includes = mod.includes();
 
     pool.init(&mod);
     pool.add_task(mod.m.tree);
@@ -1401,9 +1459,9 @@ auto install_exe(lua_State *state) noexcept -> int {
   // because of the format of `actually_compiled_files` for the best
   // formatting of the command there shouldn't be a space between it and the
   // -o
-  auto const invoked_command =
-      std::format("{} {}-o {}/{}", main_mod.compiler(), actually_compiled_files,
-                  main_mod.install_dir(), main_mod.name());
+  auto const invoked_command = std::format(
+      "{} -o {}/{} {} {}", main_mod.compiler(), main_mod.install_dir(),
+      main_mod.name(), actually_compiled_files, main_mod.links());
 
   std::cout << "[" << invoked_command << "]\n";
   std::cout.flush();
