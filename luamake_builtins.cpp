@@ -442,7 +442,7 @@ private:
           -> pair<unsigned int, unsigned int>;
       [[nodiscard]]
       auto append_dep(fs::path const &root, vector<fs::path> const &includes,
-                      size_t const parent_idx) noexcept -> Opt<DepTreeErr>;
+                      size_t const parent_idx) -> Opt<DepTreeErr>;
       [[nodiscard]]
       auto get_path(size_t const) const noexcept -> fs::path;
       [[nodiscard]]
@@ -556,10 +556,15 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
 // so if there's more there than we pro allocated then we run into an issue :)
 auto Module::DepTree::M::append_dep(fs::path const &dep,
                                     vector<fs::path> const &includes,
-                                    size_t const parent_idx) noexcept
+                                    size_t const parent_idx)
     -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
   using Err = Opt::Err;
+
+  auto constexpr limit = 25;
+  if (num_files >= limit) {
+    throw limit;
+  }
 
   auto file = File(dep, File::READ);
   if (!file)
@@ -1205,11 +1210,19 @@ auto Module::gen_dep_tree() noexcept -> Opt<DepTreeErr> {
     return m_m;
 
   m.tree = m_m.get();
-  for (auto const &root : m.roots) {
-    if (auto m_err = m.tree.m.append_dep(root, m.includes, DepTree::ROOT_IDX);
-        m_err == decltype(m_err)::ERR) {
-      return m_err;
+  try {
+    for (auto const &root : m.roots) {
+      if (auto m_err = m.tree.m.append_dep(root, m.includes, DepTree::ROOT_IDX);
+          m_err == decltype(m_err)::ERR) {
+        return m_err;
+      }
     }
+    return Opt();
+  } catch (int) {
+    std::cerr << "Debugging, too many files\n";
+    m.display(std::cout);
+    m.tree.display(std::cout);
+    std::terminate();
   }
 
   return Opt();
