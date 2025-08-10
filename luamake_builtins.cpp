@@ -514,7 +514,7 @@ auto Module::DepTree::M::make(size_t const num_files) noexcept
     auto *paths = (char *)malloc(paths_size);
     if (paths == nullptr)
       return Err(CAPI(strerror(errno)));
-    memset(paths, 0, paths_size);
+    std::memset(paths, 0, paths_size);
 
     auto types = std::make_unique<SourceFile_t[]>(num_files);
     auto files = std::make_unique<StringViews[]>(num_files);
@@ -577,7 +577,6 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
     }
   }
   auto const root_idx = num_files;
-  assert(root_idx < std::numeric_limits<unsigned int>::max());
   if (parent_idx != ROOT_IDX)
     deps[parent_idx].push_back(static_cast<unsigned int>(root_idx));
   ++num_files;
@@ -776,9 +775,14 @@ auto Module::DepTree::M::resize() noexcept -> Opt<DepTreeErr> {
     std::memmove(n_hashes.get(), hashes.get(), sizeof(size_t) * cap_files);
 
     auto n_deps = std::make_unique<vector<unsigned int>[]>(next_cap);
-    for (auto i = size_t{}; i < num_files; ++i) {
+    for (auto i = size_t{}; i < cap_files; ++i) {
       n_deps[i] = std::move(deps[i]);
     }
+
+    types = std::move(n_types);
+    files = std::move(n_files);
+    hashes = std::move(n_hashes);
+    deps = std::move(n_deps);
 
     cap_files = next_cap;
 
