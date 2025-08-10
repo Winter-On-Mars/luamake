@@ -530,11 +530,12 @@ auto Module::DepTree::M::make(size_t const num_files) noexcept
 
 auto Module::DepTree::M::append_path(fs::path const &path) noexcept
     -> pair<unsigned int, unsigned int> {
-  if (auto &&[found, start, end] = find(path.c_str()); found) {
+  auto const canonical_path = fs::canonical(path);
+  if (auto &&[found, start, end] = find(canonical_path.c_str()); found) {
     return std::make_pair(start, end);
   }
   auto start = all_paths.size;
-  all_paths.append(path.string());
+  all_paths.append(canonical_path.string());
   auto end = all_paths.size;
 
   if (start >= std::numeric_limits<unsigned int>::max() ||
