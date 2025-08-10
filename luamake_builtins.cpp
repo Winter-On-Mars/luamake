@@ -448,6 +448,8 @@ private:
       [[nodiscard]]
       auto find(string_view const string) const noexcept
           -> std::tuple<bool, unsigned int, unsigned int>;
+      [[nodiscard]]
+      auto resize() noexcept -> Opt<DepTreeErr>;
     } m;
 
     // basically making the assumption that a project isn't gonna have
@@ -549,6 +551,8 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
                         static_cast<unsigned int>(end));
 }
 
+// TODO: i don't think we ever actually resize any of the variables,
+// so if there's more there than we pro allocated then we run into an issue :)
 auto Module::DepTree::M::append_dep(fs::path const &dep,
                                     vector<fs::path> const &includes,
                                     size_t const parent_idx) noexcept
@@ -567,6 +571,11 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
 
   auto &&[fcontent, fsize] = maybe_file_content.get();
 
+  if (num_files == cap_files) {
+    if (auto m_error = resize(); !m_error.ok()) {
+      return m_error;
+    }
+  }
   auto const root_idx = num_files;
   assert(root_idx < std::numeric_limits<unsigned int>::max());
   if (parent_idx != ROOT_IDX)
@@ -751,6 +760,32 @@ auto Module::DepTree::M::find(string_view const path) const noexcept
   }
 
   return std::make_tuple(false, 0, 0);
+}
+
+auto Module::DepTree::M::resize() noexcept -> Opt<DepTreeErr> {
+  using None = Opt<DepTreeErr>;
+  using Err = Opt<DepTreeErr>::Err;
+  auto const next_cap = 3 * cap_files / 2;
+  try {
+    // these are basic types so we *should* just be able to memmov them
+    auto n_types = std::make_unique<SourceFile_t[]>(next_cap);
+    std::memmove(n_types.get(), types.get(), sizeof(SourceFile_t) * cap_files);
+    auto n_files = std::make_unique<StringViews[]>(next_cap);
+    std::memmove(n_files.get(), files.get(), sizeof(StringViews) * cap_files);
+    auto n_hashes = std::make_unique<size_t[]>(next_cap);
+    std::memmove(n_hashes.get(), hashes.get(), sizeof(size_t) * cap_files);
+
+    auto n_deps = std::make_unique<vector<unsigned int>[]>(next_cap);
+    for (auto i = size_t{}; i < num_files; ++i) {
+      n_deps[i] = std::move(deps[i]);
+    }
+
+    cap_files = next_cap;
+
+    return None();
+  } catch (std::exception const &e) {
+    return Err(MemoryAlloc(e.what()));
+  }
 }
 
 auto Module::DepTree::display(std::ostream &out,
