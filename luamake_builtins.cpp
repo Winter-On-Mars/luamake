@@ -988,6 +988,9 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
   using Opt = Opt<ModuleErr>;
   using Err = Opt::Err;
 
+  // add running the command echo | clang -dE -E - to get the list of predefined
+  // macros, and throw them in a hash map
+
   auto _pipes = array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
     return Err(CAPI(strerror(errno)));
@@ -1038,6 +1041,7 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
     if (amount_read < 0) {
       // idk error happened
       std::cerr << "\terror occured :)\n";
+      std::terminate();
     }
 
     // reached EOF
