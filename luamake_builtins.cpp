@@ -2,6 +2,8 @@
 
 #include "common.hpp"
 #include "luamake_error.hpp"
+#include <unordered_map>
+#include <unordered_set>
 
 extern "C" {
 #include "lua/lua.h"
@@ -478,6 +480,19 @@ private:
     friend Module;
   };
 
+  struct Macro final {
+    enum MacroType {
+      INT,
+      FLOAT,
+      STRING,
+      TYPE,
+      ATTRIBUTE,
+    };
+
+    MacroType t;
+    string m;
+  };
+
   struct M {
     Module_t type;
     // it *might* be a cool idea to have this as a union of
@@ -487,6 +502,9 @@ private:
     vector<fs::path> roots;
     vector<fs::path> includes;
     vector<fs::path> linking;
+    std::unordered_map<string, Macro>
+        macros; // these are all macros with values
+    std::unordered_set<string> defined_macros;
     std::string compiler;
     char const *name;
     char const *install_dir;
@@ -495,6 +513,7 @@ private:
     auto display(std::ostream &) const noexcept -> void;
 
     auto append_include_paths(string_view const) noexcept -> Opt<ModuleErr>;
+    auto append_predefined_macros(string_view const) noexcept -> Opt<ModuleErr>;
   } m;
 
   Module(M &&m) noexcept : m(std::move(m)) {}
@@ -975,21 +994,35 @@ auto Module::M::display(std::ostream &out) const noexcept -> void {
   std::for_each(linking.begin(), linking.end(), _display);
   out << "]\n";
 
+  out << "macros = {\n";
+  for (auto &&[name, value] : macros) {
+    out << name << "=" << value.m << ",\n";
+  }
+  out << "}\n";
+
+  out << "defined_macros = ";
+  out << "[" << defined_macros.size() << "]{\n";
+  for (auto const &name : defined_macros) {
+    out << name << ",\n";
+  }
+  out << "}\n";
+
   out << "compiler = " << compiler << '\n';
   out << "name = " << name << '\n';
   out << "install_dir = " << install_dir << '\n';
   out.flush();
 }
 
-// this function is breaking things :), fix it, figue out how pipes work and
-// shit also because we have this now windows support is most likely borked :)
+// TODO: i think i'm not properly handling child procs, so see about fixing it
+// in these two functions :)
+//
+// this function is breaking things :), fix it, figue
+// out how pipes work and shit also because we have this now windows support is
+// most likely borked :)
 auto Module::M::append_include_paths(string_view const compiler) noexcept
     -> Opt<ModuleErr> {
   using Opt = Opt<ModuleErr>;
   using Err = Opt::Err;
-
-  // add running the command echo | clang -dE -E - to get the list of predefined
-  // macros, and throw them in a hash map
 
   auto _pipes = array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
@@ -1017,6 +1050,8 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
 
     dup2(write_pipe, STDERR_FILENO);
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
+      close(write_pipe); // we never actually close the write_pipe, but execl
+                         // replaces the running program so idk
       return Err(CAPI(strerror(errno)));
     }
   } break;
@@ -1025,6 +1060,8 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
     // straightforward way i can think of
     close(write_pipe);
     auto constexpr buffer_size = sizeof(char) * size_t{2 << 8};
+    // code is technically unsafe, bc many of the std::string functions can
+    // throw, leaking this buffer :)
     auto *const buffer = (char *)malloc(buffer_size + 1);
     if (buffer == nullptr)
       return Err(CAPI(strerror(errno)));
@@ -1038,9 +1075,11 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
       amount_read = read(read_pipe, buffer, buffer_size);
     }
     free(buffer);
+    close(read_pipe);
+
     if (amount_read < 0) {
       // idk error happened
-      std::cerr << "\terror occured :)\n";
+      std::cerr << "\terror occured :) when looking at include paths\n";
       std::terminate();
     }
 
@@ -1071,8 +1110,128 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
       }
       start_path = skip_ws(end_path);
     }
+  } break;
+  }
+  return Opt();
+}
 
+auto Module::M::append_predefined_macros(string_view const compiler) noexcept
+    -> Opt<ModuleErr> {
+  using Opt = Opt<ModuleErr>;
+  using Err = Opt::Err;
+
+  auto _pipes = array<int, 2>{};
+  if (pipe(_pipes.data()) == -1) {
+    return Err(CAPI(strerror(errno)));
+  }
+  auto &&[read_pipe, write_pipe] = _pipes;
+  auto const pid = vfork();
+  if (pid < 0) {
     close(read_pipe);
+    close(write_pipe);
+    return Err(CAPI(strerror(errno)));
+  }
+  switch (pid) {
+  case 0: { // in child proc
+    // close reader
+    close(read_pipe);
+    // TODO: calling into std::format here seems to be causing a memory leak
+    // i think b/c we call into execl, which replaces this exe with the called
+    // one that it results in a memory leak, so we have to find a better way of
+    // handling the child proc
+    auto const command_string = std::format(
+        "echo | {} -dM -E -", string_view{compiler.data(), compiler.find(' ')});
+
+    dup2(write_pipe, STDOUT_FILENO);
+    if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
+      close(write_pipe); // we never actually close the write_pipe, but execl
+                         // replaces the running program so idk
+      return Err(CAPI(strerror(errno)));
+    }
+  } break;
+  default: { // in parent proc
+    close(write_pipe);
+    auto *read_me =
+        fdopen(dup(read_pipe), "r"); // idk saw something on stackoverflow
+    auto buffer_size = sizeof(char) * size_t{2 << 8};
+    auto *buffer = (char *)malloc(buffer_size + 1);
+    if (buffer == nullptr)
+      return Err(CAPI(strerror(errno)));
+    memset(buffer, 0, buffer_size + 1);
+
+    // this seems to work, bc getline returns -1 on EOF so we can't check
+    // amount_read to see if there's an error or if we just hit EOF
+    errno = 0;
+
+    auto amount_read = getline(&buffer, &buffer_size, read_me);
+    for (; amount_read > 0;
+         amount_read = getline(&buffer, &buffer_size, read_me)) {
+      auto constexpr header = string_view{"#define "};
+      if (strncmp(buffer, header.data(), header.size()) != 0) {
+        std::cerr << "\tError while processing macros, terminating\n";
+        std::cerr << "\tHere is the buffer :) [" << buffer << "]\n";
+        fclose(read_me);
+        free(buffer);
+        close(read_pipe);
+        std::terminate();
+      }
+
+      auto macro_start = header.size();
+      auto macro_cur = macro_start;
+      while (macro_cur < buffer_size && buffer[macro_cur] != 0) {
+        if (buffer[macro_cur] == ' ' || buffer[macro_cur] == '\n') {
+          break;
+        }
+        ++macro_cur;
+      }
+
+      // TODO: add checks to make sure we're not out of bounds, but this seems
+      // to be working fine now as a hack :)
+      if (buffer[macro_cur] == ' ' && buffer[macro_cur + 1] == '\n') {
+        defined_macros.emplace(buffer + macro_start, buffer + macro_cur - 1);
+        continue;
+      }
+
+      auto const macro_name =
+          string_view{buffer + macro_start, buffer + macro_cur};
+
+      if (buffer[macro_cur] != ' ') {
+        std::cerr << "\tdefined macro ended on unexpected character ["
+                  << buffer[macro_cur] << "]\n";
+        fclose(read_me);
+        free(buffer);
+        close(read_pipe);
+        std::terminate();
+      }
+      macro_start = macro_cur + 1;
+      ++macro_cur;
+      // TODO: find a way to actually get the macros type (int, double,
+      // string_literal, etc), really seems annoying bc we could also have
+      // macros defined as like functions :)
+      while (macro_cur < buffer_size && buffer[macro_cur] != 0) {
+        if (buffer[macro_cur] == '\n')
+          break;
+        ++macro_cur;
+      }
+
+      macros.emplace(macro_name,
+                     Macro{Macro::STRING,
+                           string(buffer + macro_start, buffer + macro_cur)});
+    }
+
+    if (errno != 0) {
+      // idk error happened
+      std::cerr << "\terror occured :) when looking at macros\n";
+      perror("getline");
+      std::terminate();
+    }
+
+    fclose(read_me);
+    free(buffer);
+    close(read_pipe);
+
+    // reached EOF
+
   } break;
   }
   return Opt();
@@ -1178,6 +1337,7 @@ auto Module::make(Module_t type, lua_State *state) noexcept
     return Err(UnexpectedType("include", state, LUA_TTABLE, include_t));
   }
   ret_t.append_include_paths(ret_t.compiler);
+  ret_t.append_predefined_macros(ret_t.compiler);
   switch (auto const linking_t = lua_getfield(state, -6, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
@@ -1202,6 +1362,9 @@ auto Module::make(Module_t type, lua_State *state) noexcept
   }
 
   lua_pop(state, 5);
+
+  std::cout << "---displaying---\n";
+  ret_t.display(std::cout);
 
   return Ok(std::move(ret_t));
 }
@@ -1419,7 +1582,9 @@ auto CompilationPool::_thread_loop() noexcept -> void {
                       include_path, this_path.c_str(), mod->install_dir(),
                       mod->name(), this_path.stem().c_str());
       std::cout << "[" << invoked_command << "]\n";
-      std::cout.flush();
+      std::cout.flush(); // this actually needs to stay here, something about if
+                         // the system command does io operations having an
+                         // unflushed stdout can cause problems
       auto const res = system(invoked_command.c_str());
       if (res == 0) {
         auto res_lock = std::unique_lock(result_mtx);
