@@ -2,6 +2,7 @@
 
 #include "common.hpp"
 #include "luamake_error.hpp"
+#include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
 
 extern "C" {
@@ -48,13 +49,13 @@ extern "C" {
     return lua_error((L));                                                     \
   }
 
-namespace luamake_builtins {
-using luamake::FixedString, luamake::OwnedString, luamake::StringViews;
-using std::pair, std::array, std::string, std::string_view, std::vector;
+namespace luamake {
+namespace {
+using std::pair, std::array, std::string, std::string_view, std::vector,
+    std::unordered_map, std::unordered_set;
 
 using uint = unsigned int;
 
-namespace {
 // TODO: fill this out
 // read user luamake.lua to find module dependency
 auto get_include_paths() noexcept -> vector<fs::path> {
@@ -62,7 +63,7 @@ auto get_include_paths() noexcept -> vector<fs::path> {
 }
 
 // TODO: make this return a bool to check if we hit 0
-auto skip_ws(char const *ch) noexcept -> char const * {
+auto skip_ws(char const *ch) -> char const * {
   auto const *local = ch;
   while (*local != 0) {
     switch (*local) {
@@ -83,8 +84,26 @@ auto skip_ws(char const *ch) noexcept -> char const * {
   return local;
 }
 
-// TODO: rename this function or move it into where it's actually used
-constexpr auto skippable(char const ch) noexcept -> bool {
+auto skip_ws(FixedString const &str, size_t i) -> size_t {
+  while (i < str.size) {
+    switch (str.buffer[i]) {
+    case ' ':
+      [[fallthrough]];
+    case '\t':
+      [[fallthrough]];
+    case '\n':
+      [[fallthrough]];
+    case '\r':
+      ++i;
+      break;
+    default:
+      return i;
+    }
+  }
+  return i;
+}
+
+constexpr auto skippable(char const ch) -> bool {
   switch (ch) {
   case '#':
     [[fallthrough]];
@@ -197,9 +216,19 @@ struct MemoryAlloc final {
   }
 };
 
-using DepTreeErr =
-    std::variant<EmptyFileName, FileDoesNotExist, NonTerminatedString,
-                 MalformedInclude, CAPI, MemoryAlloc>;
+struct NonTerminatedPreprocessor final {
+  fs::path file;
+  explicit NonTerminatedPreprocessor(fs::path const &file) noexcept
+      : file(file) {}
+  auto error() const noexcept -> string {
+    return std::format("Error while processing the preprocessor in file [{}]",
+                       file.c_str());
+  }
+};
+
+using DepTreeErr = std::variant<EmptyFileName, FileDoesNotExist,
+                                NonTerminatedString, MalformedInclude, CAPI,
+                                MemoryAlloc, NonTerminatedPreprocessor>;
 
 struct MissingField final {
   string_view field_name;
@@ -261,6 +290,19 @@ struct Module final {
 
 private:
   static auto parse_compiler_table(lua_State *state) -> string;
+
+  struct Macro final {
+    enum MacroType {
+      INT,
+      FLOAT,
+      STRING,
+      TYPE,
+      ATTRIBUTE,
+    };
+
+    MacroType t;
+    string m;
+  };
 
   // this is kinda stupid i'm not gonna lie, but this is the only
   // way i can think to have DepTree be able to reference Module and vice versa
@@ -330,16 +372,20 @@ private:
       auto append_path(fs::path const &) noexcept
           -> pair<unsigned int, unsigned int>;
       [[nodiscard]]
-      auto append_dep(fs::path const &root, vector<fs::path> const &includes,
-                      size_t const parent_idx) -> Opt<DepTreeErr>;
+      auto append_dep(fs::path const &, vector<fs::path> const &,
+                      unordered_map<string, Module::Macro> const &,
+                      unordered_set<string> const &, size_t const)
+          -> Opt<DepTreeErr>;
       [[nodiscard]]
-      auto parse_preprocessor_stmt(char const **, fs::path const &,
-                                   vector<fs::path> const &, size_t const)
+      auto parse_preprocessor_stmt(FixedString const &, size_t &,
+                                   fs::path const &, vector<fs::path> const &,
+                                   unordered_map<string, Module::Macro> const &,
+                                   unordered_set<string> const &, size_t const)
           -> Opt<DepTreeErr>;
       [[nodiscard]]
       auto get_path(size_t const) const noexcept -> fs::path;
       [[nodiscard]]
-      auto find(string_view const string) const noexcept
+      auto find(string_view const) const noexcept
           -> std::tuple<bool, unsigned int, unsigned int>;
       [[nodiscard]]
       auto resize() noexcept -> Opt<DepTreeErr>;
@@ -369,19 +415,6 @@ private:
     friend Compiler;
     friend CompilationPool;
     friend Module;
-  };
-
-  struct Macro final {
-    enum MacroType {
-      INT,
-      FLOAT,
-      STRING,
-      TYPE,
-      ATTRIBUTE,
-    };
-
-    MacroType t;
-    string m;
   };
 
   struct M {
@@ -464,6 +497,8 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
 
 auto Module::DepTree::M::append_dep(fs::path const &dep,
                                     vector<fs::path> const &includes,
+                                    unordered_map<string, Macro> const &macros,
+                                    unordered_set<string> const &defined_macros,
                                     size_t const parent_idx)
     -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
@@ -484,7 +519,8 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
     return maybe_file_content;
   }
 
-  auto &&[fcontent, fsize] = maybe_file_content.get();
+  auto file_string = maybe_file_content.get();
+  auto &&[fcontent, fsize] = file_string;
 
   if (num_files == cap_files) {
     if (auto m_error = resize(); !m_error.ok()) {
@@ -508,7 +544,8 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
       auto const possible_path =
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
-        if (auto m_error = append_dep(possible_path, includes, root_idx);
+        if (auto m_error = append_dep(possible_path, includes, macros,
+                                      defined_macros, root_idx);
             !m_error.ok()) {
           return m_error;
         }
@@ -521,43 +558,56 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   files[root_idx].start = start;
   files[root_idx].end = end;
 
-  for (auto const *ch = fcontent; *ch != 0;) {
-    switch (*ch) {
+  // parse this into an ir
+  auto m_ir = ir::IR::parse(file);
+  if (!m_ir.ok()) {
+    return Err(std::move(m_ir.err()));
+  }
+  auto ir = m_ir.get();
+  // interpret the ir
+  auto interpret_res = ir.interpret();
+  if (!interpret_res.ok()) {
+    return Err(std::move(interpret_res.err()));
+  }
+  for (auto i = size_t{}; i != fsize;) {
+    switch (fcontent[i]) {
     case '#': { // possible include
-      if (auto e = parse_preprocessor_stmt(&ch, dep, includes, root_idx);
+      if (auto e = parse_preprocessor_stmt(file_string, i, dep, includes,
+                                           macros, defined_macros, root_idx);
           !e.ok()) {
         return e;
       }
     } break;
     case '/': // possible comment
-      ++ch;
-      switch (*ch) {
+      ++i;
+      switch (fcontent[i]) {
       case 0:
         return Err(NonTerminatedString(
             dep)); // this should be a different error type i'm just tired
       case '/':    // advance to end of line
-        ++ch;
-        while (*ch != 0 && *ch != '\n')
-          ++ch;
-        if (*ch != 0)
-          ++ch; // ch (should) == '\n';
+        ++i;
+        while (fcontent[i] != 0 && fcontent[i] != '\n')
+          ++i;
+
+        if (fcontent[i] != 0)
+          ++i; // ch (should) == '\n';
         break;
       case '*': { // advance until */
-        ++ch;
+        ++i;
         auto found_end = false;
         while (!found_end) {
-          while (*ch != 0 && *ch != '*')
-            ++ch;
-          switch (*ch) {
+          while (fcontent[i] != 0 && fcontent[i] != '*')
+            ++i;
+          switch (fcontent[i]) {
           case 0:
             return Err(NonTerminatedString(dep)); // not right error i'm tired
           case '*': // check that next char is also a '/'
-            ++ch;
-            if (*ch != 0 && *ch == '/')
+            ++i;
+            if (fcontent[i] != 0 && fcontent[i] == '/')
               found_end = true;
             break;
           default:
-            ++ch;
+            ++i;
             break;
           }
         }
@@ -568,18 +618,18 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
       }
       break;
     case '"': // string to move over
-      while (*ch != 0 && *ch != '"') {
-        ++ch;
+      while (fcontent[i] != 0 && fcontent[i] != '"') {
+        ++i;
       }
-      if (*ch == 0) {
+      if (fcontent[i] == 0) {
         return Err(NonTerminatedString(dep));
       } else {
-        ++ch; // *ch (should) == '"'
+        ++i; // fcontent[i] (should) == '"'
       }
       break;
     default:
-      while (*ch != 0 && skippable(*ch)) {
-        ++ch;
+      while (fcontent[i] != 0 && skippable(fcontent[i])) {
+        ++i;
       }
       break;
     }
@@ -590,20 +640,34 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   return Opt();
 }
 
+// TODO: add array bounds checking to a lot of the if statements
 auto Module::DepTree::M::parse_preprocessor_stmt(
-    char const **ch, fs::path const &dep, vector<fs::path> const &includes,
-    size_t const root_idx) -> Opt<DepTreeErr> {
+    FixedString const &file, size_t &i, fs::path const &dep,
+    vector<fs::path> const &includes,
+    unordered_map<string, Module::Macro> const &macros,
+    unordered_set<string> const &defined_macros, size_t const root_idx)
+    -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
   using Err = Opt::Err;
-  auto constexpr include_prefix = string_view{"#include"};
-  if (strncmp(*ch, include_prefix.data(), include_prefix.size()) == 0) {
-    *ch += include_prefix.size();
-    *ch = skip_ws(*ch);
 
-    switch (**ch) {
+  auto constexpr include_prefix = string_view{"#include"};
+  auto constexpr ifdef_prefix = string_view{"#ifdef"};
+  auto constexpr else_prefix = string_view{"#else"};
+  auto constexpr elif_prefix = string_view{"#elif"};
+  auto constexpr endif_prefix = string_view{"#endif"};
+
+  auto const fcontent = file.buffer;
+
+  // TODO: #define, #if, #else, #elif,
+  if (strncmp(fcontent + i, include_prefix.data(), include_prefix.size()) ==
+      0) {
+    i += include_prefix.size();
+    i = skip_ws(file, i);
+
+    switch (fcontent[i]) {
     case '"': {
-      ++(*ch);
-      auto const *end_of_include_string = *ch;
+      ++i;
+      auto const *end_of_include_string = fcontent + i;
       while (*end_of_include_string != 0 && *end_of_include_string != '"') {
         ++end_of_include_string;
       }
@@ -611,12 +675,12 @@ auto Module::DepTree::M::parse_preprocessor_stmt(
       if (*end_of_include_string == 0)
         return Err(NonTerminatedString(dep));
 
-      auto const include_string_size = end_of_include_string - *ch;
+      auto const include_string_size = end_of_include_string - (fcontent + i);
       if (include_string_size == 0)
         return Err(EmptyFileName(dep));
 
       auto const include_file =
-          fs::path(string_view{*ch, end_of_include_string});
+          fs::path(string_view{fcontent + i, end_of_include_string});
 
       if (include_file.stem() == dep.stem()) {
         auto const include_f_ext =
@@ -627,16 +691,21 @@ auto Module::DepTree::M::parse_preprocessor_stmt(
         }
       }
 
+      auto found = false;
       for (auto const &include_prefix : includes) {
         auto const dep_path = include_prefix / dep.parent_path() / include_file;
         if (fs::exists(dep_path)) {
-          if (auto m_error = append_dep(dep_path, includes, root_idx);
+          found = true;
+          if (auto m_error = append_dep(dep_path, includes, macros,
+                                        defined_macros, root_idx);
               !m_error.ok()) {
             return m_error;
           }
         }
       }
-      // TODO: add error handling for if the file doesn't exist
+      if (!found) {
+        return Err(FileDoesNotExist(include_file, dep));
+      }
     } break;
     case '<': {
       // TODO global include
@@ -644,8 +713,40 @@ auto Module::DepTree::M::parse_preprocessor_stmt(
     default:
       return Err(MalformedInclude(dep));
     }
+  } else if (strncmp(fcontent + i, ifdef_prefix.data(), ifdef_prefix.size()) ==
+             0) {
+    i += ifdef_prefix.size();
+    i = skip_ws(file, i);
+
+    auto const *end_of_macro = fcontent + i;
+    while (*end_of_macro != 0 && *end_of_macro != '\n') {
+      ++end_of_macro;
+    }
+
+    if (*end_of_macro == 0) {
+      return Err(NonTerminatedPreprocessor(dep));
+    }
+
+    auto const macro = string(fcontent + i, end_of_macro);
+
+    auto const is_defined =
+        macros.contains(macro) || defined_macros.contains(macro);
+
+    if (is_defined) {
+      while (strncmp(fcontent + i, endif_prefix.data(), endif_prefix.size()) !=
+             0) {
+        if (auto e = parse_preprocessor_stmt(file, i, dep, includes, macros,
+                                             defined_macros, root_idx);
+            !e.ok()) {
+          return e;
+        }
+      }
+    } else {
+      // TODO
+    }
+
   } else { // TODO: pares #if, #ifdef, etc.
-    ++(*ch);
+    ++i;
   }
   return Opt();
 }
@@ -1262,8 +1363,10 @@ auto Module::make(Module_t type, lua_State *state) noexcept
 
   lua_pop(state, 5);
 
+#if 0
   std::cout << "---displaying---\n";
   ret_t.display(std::cout);
+#endif
 
   return Ok(std::move(ret_t));
 }
@@ -1278,7 +1381,8 @@ auto Module::gen_dep_tree() noexcept -> Opt<DepTreeErr> {
   m.tree = m_m.get();
   try {
     for (auto const &root : m.roots) {
-      if (auto m_err = m.tree.m.append_dep(root, m.includes, DepTree::ROOT_IDX);
+      if (auto m_err = m.tree.m.append_dep(root, m.includes, m.macros,
+                                           m.defined_macros, DepTree::ROOT_IDX);
           m_err == decltype(m_err)::ERR) {
         return m_err;
       }
@@ -1314,6 +1418,7 @@ auto Module::links() const noexcept -> std::string {
   return res;
 }
 
+// TODO: check for defined macros
 auto Module::parse_compiler_table(lua_State *state) -> string {
   auto str = string();
 
@@ -1850,6 +1955,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
 }
 } // namespace
 
+namespace builtins {
 auto dump(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 2) {
@@ -2022,5 +2128,6 @@ auto make_runner_obj(lua_State *state,
   lua_pushcfunction(state, run);
   lua_setfield(state, -2, "run");
 }
-} // namespace luamake_builtins
+} // namespace builtins
+} // namespace luamake
 #undef LUA_ASSERT

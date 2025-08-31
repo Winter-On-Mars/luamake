@@ -21,7 +21,8 @@ using std::array, std::pair, std::string, std::string_view;
 #define RUNNER_OBJ "__luamake_runner"
 #define TESTING_MACRO "__define_testing_macro"
 
-namespace MakeTypes {
+namespace luamake {
+namespace {
 enum class exit_t : unsigned char {
   ok,
   internal_error,
@@ -211,7 +212,7 @@ auto Type::run() const noexcept -> exit_t {
 
   (void)lua_gc(state, LUA_GCSTOP);
 
-  lua_register(state, "Dump", luamake_builtins::dump);
+  lua_register(state, "Dump", luamake::builtins::dump);
 
   auto res = exit_t::ok;
   auto cfg = user_func_config{
@@ -233,7 +234,7 @@ auto Type::run() const noexcept -> exit_t {
     res = test(&cfg);
   } break;
   case RUN: {
-    res = MakeTypes::run(&cfg);
+    res = luamake::run(&cfg);
   } break;
   case UNKNOWN_ARG:
     [[fallthrough]];
@@ -254,7 +255,7 @@ auto Type::run() const noexcept -> exit_t {
 static auto build(user_func_config const *const c) noexcept -> exit_t {
   using enum exit_t;
 
-  lua_pushcfunction(c->state, luamake_builtins::clang);
+  lua_pushcfunction(c->state, luamake::builtins::clang);
   lua_setglobal(c->state, "Clang");
 
   auto build_lua_fn = lua_getglobal(c->state, "Build");
@@ -279,7 +280,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   switch (builder) {
   case LUA_TNIL:
     lua_pop(c->state, 1);
-    luamake_builtins::make_builder_obj(c->state, BUILDER_OBJ);
+    luamake::builtins::make_builder_obj(c->state, BUILDER_OBJ);
     break;
   case LUA_TTABLE:
     break;
@@ -663,7 +664,7 @@ static auto clean() noexcept -> exit_t {
 }
 
 static auto test(user_func_config const *const c) noexcept -> exit_t {
-  luamake_builtins::make_builder_obj(c->state, BUILDER_OBJ);
+  luamake::builtins::make_builder_obj(c->state, BUILDER_OBJ);
   lua_pushboolean(c->state, true);
   lua_setfield(c->state, -2, TESTING_MACRO);
 
@@ -696,7 +697,7 @@ static auto run(user_func_config const *const c) noexcept -> exit_t {
   switch (runner_t) {
   case LUA_TNIL:
     lua_pop(c->state, 1);
-    luamake_builtins::make_runner_obj(c->state, RUNNER_OBJ);
+    luamake::builtins::make_runner_obj(c->state, RUNNER_OBJ);
     break;
   case LUA_TTABLE:
     break;
@@ -748,21 +749,22 @@ static auto help() noexcept -> exit_t {
   fflush(stdout);
   return exit_t::ok;
 }
-} // namespace MakeTypes
+} // namespace
+} // namespace luamake
 
 auto main(int argc, char **argv) -> int {
-  auto const flags = MakeTypes::Type::make(argc, argv);
+  auto const flags = luamake::Type::Type::make(argc, argv);
   switch (flags.run()) {
-  case MakeTypes::exit_t::ok:
+  case luamake::exit_t::ok:
     return 0;
-  case MakeTypes::exit_t::internal_error:
+  case luamake::exit_t::internal_error:
     error_message("Internal Service Error, probably not implimented yet :)");
     return 1;
-  case MakeTypes::exit_t::lua_vm_error:
+  case luamake::exit_t::lua_vm_error:
     return 1;
-  case MakeTypes::exit_t::config_error:
+  case luamake::exit_t::config_error:
     return 70;
-  case MakeTypes::exit_t::useage_error:
+  case luamake::exit_t::useage_error:
     return 65;
   }
 }

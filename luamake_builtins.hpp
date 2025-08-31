@@ -7,7 +7,8 @@ extern "C" {
 #include "lua/lua.h"
 }
 
-namespace luamake_builtins {
+namespace luamake {
+namespace builtins {
 auto dump(lua_State *state) noexcept -> int;
 
 auto clang(lua_State *state) noexcept -> int;
@@ -17,6 +18,7 @@ auto make_builder_obj(lua_State *state,
 
 auto make_runner_obj(lua_State *state,
                      std::string_view const runner_obj) noexcept -> void;
-} // namespace luamake_builtins
+} // namespace builtins
+} // namespace luamake
 
 #endif
