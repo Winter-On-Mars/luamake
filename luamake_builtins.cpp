@@ -2,8 +2,7 @@
 
 #include "common.hpp"
 #include "luamake_error.hpp"
-#include <unordered_map>
-#include <unordered_set>
+#include "luamake_strings.hpp"
 
 extern "C" {
 #include "lua/lua.h"
@@ -31,6 +30,8 @@ extern "C" {
 #include <thread>
 #include <tuple>
 #include <unistd.h>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -48,6 +49,7 @@ extern "C" {
   }
 
 namespace luamake_builtins {
+using luamake::FixedString, luamake::OwnedString, luamake::StringViews;
 using std::pair, std::array, std::string, std::string_view, std::vector;
 
 using uint = unsigned int;
@@ -125,121 +127,6 @@ auto display_string_view(string_view const str) noexcept -> void {
   std::cout.flush();
 }
 #endif
-
-struct OwnedString final {
-  char *buffer;
-  size_t size;
-  size_t capacity;
-
-  explicit OwnedString(char *buffer, size_t size) noexcept;
-  constexpr OwnedString() noexcept;
-
-  constexpr OwnedString(OwnedString &&that) noexcept;
-
-  constexpr auto operator=(OwnedString &&that) noexcept -> OwnedString &;
-
-  ~OwnedString() noexcept;
-
-  OwnedString(OwnedString const &) = delete;
-  OwnedString &operator=(OwnedString const &) = delete;
-
-  auto append(string &&) noexcept -> void;
-};
-
-OwnedString::OwnedString(char *buffer, size_t size) noexcept
-    : buffer(buffer), size(0), capacity(size) {}
-constexpr OwnedString::OwnedString() noexcept
-    : buffer(nullptr), size(0), capacity(0) {}
-
-constexpr OwnedString::OwnedString(OwnedString &&that) noexcept
-    : buffer(that.buffer), size(that.size), capacity(that.capacity) {
-  that.buffer = nullptr;
-  that.size = 0;
-  that.capacity = 0;
-}
-
-constexpr auto OwnedString::operator=(OwnedString &&that) noexcept
-    -> OwnedString & {
-  buffer = that.buffer;
-  size = that.size;
-  capacity = that.capacity;
-
-  that.buffer = nullptr;
-  that.size = 0;
-  that.capacity = 0;
-  return *this;
-}
-
-OwnedString::~OwnedString() noexcept {
-  if (buffer != nullptr)
-    free((void *)buffer);
-}
-
-auto OwnedString::append(string &&str) noexcept -> void {
-  auto const str_len = str.length();
-  if (!(size < capacity - str_len - 1)) {
-    /* resize */
-    auto next_cap = 3 * (capacity + str_len + 1) / 2;
-    buffer = (char *)realloc(buffer, next_cap * sizeof(char));
-    if (buffer == nullptr) {
-      std::cerr << "Unable to realloc [" << next_cap << "] bytes needed\n";
-      std::terminate();
-    }
-    capacity = next_cap;
-  }
-  memcpy(buffer + size, str.data(), str_len);
-  size += str_len;
-  buffer[size] = 0;
-  ++size;
-}
-
-struct StringViews final {
-  unsigned int start;
-  unsigned int end;
-};
-
-struct FixedString final {
-  char const *buffer;
-  size_t size;
-
-  explicit FixedString(char const *buffer, size_t size) noexcept;
-  constexpr FixedString() noexcept;
-
-  constexpr FixedString(FixedString &&that) noexcept;
-
-  constexpr auto operator=(FixedString &&that) noexcept -> FixedString &;
-
-  ~FixedString() noexcept;
-
-  FixedString(FixedString const &) = delete;
-  FixedString &operator=(FixedString const &) = delete;
-};
-
-FixedString::FixedString(char const *buffer, size_t size) noexcept
-    : buffer(buffer), size(size) {}
-
-constexpr FixedString::FixedString() noexcept : buffer(nullptr), size(0) {}
-
-constexpr FixedString::FixedString(FixedString &&that) noexcept
-    : buffer(that.buffer), size(that.size) {
-  that.buffer = nullptr;
-  that.size = 0;
-}
-
-constexpr auto FixedString::operator=(FixedString &&that) noexcept
-    -> FixedString & {
-  buffer = that.buffer;
-  size = that.size;
-
-  that.buffer = nullptr;
-  that.size = 0;
-  return *this;
-}
-
-FixedString::~FixedString() noexcept {
-  if (buffer != nullptr)
-    free((void *)buffer);
-}
 
 struct Compiler;
 struct CompilationPool;
@@ -446,6 +333,10 @@ private:
       auto append_dep(fs::path const &root, vector<fs::path> const &includes,
                       size_t const parent_idx) -> Opt<DepTreeErr>;
       [[nodiscard]]
+      auto parse_preprocessor_stmt(char const **, fs::path const &,
+                                   vector<fs::path> const &, size_t const)
+          -> Opt<DepTreeErr>;
+      [[nodiscard]]
       auto get_path(size_t const) const noexcept -> fs::path;
       [[nodiscard]]
       auto find(string_view const string) const noexcept
@@ -571,8 +462,6 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
                         static_cast<unsigned int>(end));
 }
 
-// TODO: i don't think we ever actually resize any of the variables,
-// so if there's more there than we pro allocated then we run into an issue :)
 auto Module::DepTree::M::append_dep(fs::path const &dep,
                                     vector<fs::path> const &includes,
                                     size_t const parent_idx)
@@ -580,7 +469,8 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   using Opt = Opt<DepTreeErr>;
   using Err = Opt::Err;
 
-  auto constexpr limit = 25;
+  // TODO: fix the depth issue
+  auto constexpr limit = 50;
   if (num_files >= limit) {
     throw limit;
   }
@@ -631,63 +521,12 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   files[root_idx].start = start;
   files[root_idx].end = end;
 
-  auto constexpr include_prefix = string_view{"#include"};
-  auto const potential_include_dirs = get_include_paths();
-
   for (auto const *ch = fcontent; *ch != 0;) {
     switch (*ch) {
-    case '#': // possible include
-    {
-      if (strncmp(ch, include_prefix.data(), include_prefix.size()) == 0) {
-        ch += include_prefix.size();
-        ch = skip_ws(ch);
-
-        switch (*ch) {
-        case '"': {
-          ++ch;
-          auto const *end_of_include_string = ch;
-          while (*end_of_include_string != 0 && *end_of_include_string != '"') {
-            ++end_of_include_string;
-          }
-
-          if (*end_of_include_string == 0)
-            return Err(NonTerminatedString(dep));
-
-          auto const include_string_size = end_of_include_string - ch;
-          if (include_string_size == 0)
-            return Err(EmptyFileName(dep));
-
-          auto const include_file =
-              fs::path(string_view{ch, end_of_include_string});
-
-          if (include_file.stem() == dep.stem()) {
-            auto const include_f_ext =
-                DepTree::determine_file_type(include_file.extension());
-            auto const path_ext = DepTree::determine_file_type(dep.extension());
-            if (include_f_ext == HEADER && path_ext == IMPL) {
-              continue; // ignore this path
-            }
-          }
-
-          for (auto const &include_prefix : includes) {
-            auto const dep_path =
-                include_prefix / dep.parent_path() / include_file;
-            if (fs::exists(dep_path)) {
-              if (auto m_error = append_dep(dep_path, includes, root_idx);
-                  !m_error.ok()) {
-                return m_error;
-              }
-            }
-          }
-        } break;
-        case '<': {
-          // TODO global include
-        } break;
-        default:
-          return Err(MalformedInclude(dep));
-        }
-      } else {
-        ++ch;
+    case '#': { // possible include
+      if (auto e = parse_preprocessor_stmt(&ch, dep, includes, root_idx);
+          !e.ok()) {
+        return e;
       }
     } break;
     case '/': // possible comment
@@ -748,6 +587,66 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
 
   hashes[root_idx] = hash_fut.get();
 
+  return Opt();
+}
+
+auto Module::DepTree::M::parse_preprocessor_stmt(
+    char const **ch, fs::path const &dep, vector<fs::path> const &includes,
+    size_t const root_idx) -> Opt<DepTreeErr> {
+  using Opt = Opt<DepTreeErr>;
+  using Err = Opt::Err;
+  auto constexpr include_prefix = string_view{"#include"};
+  if (strncmp(*ch, include_prefix.data(), include_prefix.size()) == 0) {
+    *ch += include_prefix.size();
+    *ch = skip_ws(*ch);
+
+    switch (**ch) {
+    case '"': {
+      ++(*ch);
+      auto const *end_of_include_string = *ch;
+      while (*end_of_include_string != 0 && *end_of_include_string != '"') {
+        ++end_of_include_string;
+      }
+
+      if (*end_of_include_string == 0)
+        return Err(NonTerminatedString(dep));
+
+      auto const include_string_size = end_of_include_string - *ch;
+      if (include_string_size == 0)
+        return Err(EmptyFileName(dep));
+
+      auto const include_file =
+          fs::path(string_view{*ch, end_of_include_string});
+
+      if (include_file.stem() == dep.stem()) {
+        auto const include_f_ext =
+            DepTree::determine_file_type(include_file.extension());
+        auto const path_ext = DepTree::determine_file_type(dep.extension());
+        if (include_f_ext == HEADER && path_ext == IMPL) {
+          return Opt(); // ignore
+        }
+      }
+
+      for (auto const &include_prefix : includes) {
+        auto const dep_path = include_prefix / dep.parent_path() / include_file;
+        if (fs::exists(dep_path)) {
+          if (auto m_error = append_dep(dep_path, includes, root_idx);
+              !m_error.ok()) {
+            return m_error;
+          }
+        }
+      }
+      // TODO: add error handling for if the file doesn't exist
+    } break;
+    case '<': {
+      // TODO global include
+    } break;
+    default:
+      return Err(MalformedInclude(dep));
+    }
+  } else { // TODO: pares #if, #ifdef, etc.
+    ++(*ch);
+  }
   return Opt();
 }
 
