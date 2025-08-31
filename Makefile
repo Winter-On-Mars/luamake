@@ -5,7 +5,7 @@ linker:=lld # if someone has clang they should have lld, so this is better, even
 
 .PHONY: all, ncolor, dbg, clean_submod
 
-files:=common.o luamake_builtins.o dependency_graph.o main.o luamake_error.o luamake_strings.o
+files:=common.o luamake_builtins.o dependency_graph.o main.o luamake_error.o luamake_strings.o luamake_pre_ir.o
 lua_a:=lua/liblua.a
 
 all: $(files) $(lua_a)
