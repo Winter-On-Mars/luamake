@@ -226,10 +226,10 @@ struct Module final {
     DYNAMIC,
   };
 
-  static auto make(Module_t type, lua_State *state) noexcept
+  static auto make(Module_t type, lua_State *state)
       -> Result<Module, ModuleErr>;
 
-  auto gen_dep_tree() noexcept -> Opt<DepTreeErr>;
+  auto gen_dep_tree() -> Opt<DepTreeErr>;
 
   auto constexpr install_dir() const noexcept -> char const * {
     return m.install_dir;
@@ -437,17 +437,11 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
 auto Module::DepTree::M::append_dep(fs::path const &dep,
                                     vector<fs::path> const &includes,
                                     unordered_map<string, ir::Macro> &macros,
-                                    unordered_set<string> &defined_macros,
+                                    unordered_set<string> &def_macros,
                                     size_t const parent_idx)
     -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
   using Err = Opt::Err;
-
-  // TODO: fix the depth issue
-  auto constexpr limit = 50;
-  if (num_files >= limit) {
-    throw limit;
-  }
 
   auto file = File(dep, File::READ);
   if (!file)
@@ -484,7 +478,7 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
         if (auto m_error = append_dep(possible_path, includes, macros,
-                                      defined_macros, root_idx);
+                                      def_macros, root_idx);
             !m_error.ok()) {
           return m_error;
         }
@@ -497,14 +491,10 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   files[root_idx].start = start;
   files[root_idx].end = end;
 
-  try {
-    auto ir = ir::IR::parse(file_string);
-    ir.interpret(macros, defined_macros);
-  } catch (ir::Exception const &e) {
-    std::cerr << e.what() << '\n';
-  } catch (...) {
-    std::cerr << "Something was caught\n";
-  }
+  std::cerr << std::format("generating ir for file [{}]\n", dep.c_str());
+  auto ir = ir::IR::parse(file_string);
+  std::cerr << std::format("interpreting ir for file [{}]\n", dep.c_str());
+  ir.interpret(macros, def_macros);
 
   hashes[root_idx] = hash_fut.get();
 
@@ -997,7 +987,7 @@ auto Module::M::append_predefined_macros(string_view const compiler) noexcept
   return Opt();
 }
 
-auto Module::make(Module_t type, lua_State *state) noexcept
+auto Module::make(Module_t type, lua_State *state)
     -> Result<Module, ModuleErr> {
   using Ok = Result<Module, ModuleErr>::Ok;
   using Err = Result<Module, ModuleErr>::Err;
@@ -1121,7 +1111,34 @@ auto Module::make(Module_t type, lua_State *state) noexcept
     return Err(UnexpectedType("linking", state, LUA_TTABLE, linking_t));
   }
 
-  lua_pop(state, 5);
+  switch (auto const macro_t = lua_getfield(state, -7, "macros")) {
+  case LUA_TTABLE: {
+    auto const len = lua_rawlen(state, -1);
+    auto macros = -1;
+    for (auto i = 1; i <= len; ++i) {
+      switch (auto const value_t = lua_geti(state, macros, i)) {
+      case LUA_TSTRING: {
+        auto mac = string(lua_tolstring(state, -1, nullptr));
+        if (mac.find('=') != mac.npos) {
+          // TODO: parse macro being set to value
+        } else {
+          ret_t.defined_macros.insert(std::move(mac));
+        }
+      } break;
+      default:
+        return Err(UnexpectedType("macros[i]", state, LUA_TSTRING, value_t));
+      }
+      --macros;
+    }
+    lua_pop(state, static_cast<int>(len));
+  } break;
+  case LUA_TNIL:
+    break;
+  default:
+    return Err(UnexpectedType("macros", state, LUA_TTABLE, macro_t));
+  }
+
+  lua_pop(state, 6);
 
 #if 0
   std::cout << "---displaying---\n";
@@ -1131,7 +1148,7 @@ auto Module::make(Module_t type, lua_State *state) noexcept
   return Ok(std::move(ret_t));
 }
 
-auto Module::gen_dep_tree() noexcept -> Opt<DepTreeErr> {
+auto Module::gen_dep_tree() -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
 
   auto m_m = DepTree::M::make();
@@ -1147,12 +1164,10 @@ auto Module::gen_dep_tree() noexcept -> Opt<DepTreeErr> {
         return m_err;
       }
     }
-    return Opt();
-  } catch (int) {
-    std::cerr << "Debugging, too many files\n";
-    m.display(std::cout);
-    m.tree.display(std::cout);
-    std::terminate();
+  } catch (ir::Exception const &e) {
+    std::cerr << e.what() << '\n';
+  } catch (...) {
+    std::cerr << "Something was caught.\n";
   }
 
   return Opt();
