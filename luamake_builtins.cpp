@@ -56,17 +56,9 @@ using std::pair, std::array, std::string, std::string_view, std::vector,
 
 using uint = unsigned int;
 
-// TODO: fill this out
-// read user luamake.lua to find module dependency
-auto get_include_paths() noexcept -> vector<fs::path> {
-  return vector<fs::path>{".", "/usr/include"};
-}
-
-// TODO: make this return a bool to check if we hit 0
 auto skip_ws(char const *ch) -> char const * {
-  auto const *local = ch;
-  while (*local != 0) {
-    switch (*local) {
+  while (*ch != 0) {
+    switch (*ch) {
     case ' ':
       [[fallthrough]];
     case '\t':
@@ -74,46 +66,13 @@ auto skip_ws(char const *ch) -> char const * {
     case '\n':
       [[fallthrough]];
     case '\r': {
-      ++local;
+      ++ch;
     } break;
     default:
-      return local;
+      return ch;
     }
   }
-  // TODO: error checking when we hit eof
-  return local;
-}
-
-auto skip_ws(FixedString const &str, size_t i) -> size_t {
-  while (i < str.size) {
-    switch (str.buffer[i]) {
-    case ' ':
-      [[fallthrough]];
-    case '\t':
-      [[fallthrough]];
-    case '\n':
-      [[fallthrough]];
-    case '\r':
-      ++i;
-      break;
-    default:
-      return i;
-    }
-  }
-  return i;
-}
-
-constexpr auto skippable(char const ch) -> bool {
-  switch (ch) {
-  case '#':
-    [[fallthrough]];
-  case '"':
-    [[fallthrough]];
-  case '/':
-    return false;
-  default:
-    return true;
-  }
+  return ch;
 }
 
 // algorithm
@@ -291,19 +250,6 @@ struct Module final {
 private:
   static auto parse_compiler_table(lua_State *state) -> string;
 
-  struct Macro final {
-    enum MacroType {
-      INT,
-      FLOAT,
-      STRING,
-      TYPE,
-      ATTRIBUTE,
-    };
-
-    MacroType t;
-    string m;
-  };
-
   // this is kinda stupid i'm not gonna lie, but this is the only
   // way i can think to have DepTree be able to reference Module and vice versa
   // without having to worry about pointer indirection
@@ -373,15 +319,8 @@ private:
           -> pair<unsigned int, unsigned int>;
       [[nodiscard]]
       auto append_dep(fs::path const &, vector<fs::path> const &,
-                      unordered_map<string, Module::Macro> const &,
-                      unordered_set<string> const &, size_t const)
-          -> Opt<DepTreeErr>;
-      [[nodiscard]]
-      auto parse_preprocessor_stmt(FixedString const &, size_t &,
-                                   fs::path const &, vector<fs::path> const &,
-                                   unordered_map<string, Module::Macro> const &,
-                                   unordered_set<string> const &, size_t const)
-          -> Opt<DepTreeErr>;
+                      unordered_map<string, ir::Macro> &,
+                      unordered_set<string> &, size_t const) -> Opt<DepTreeErr>;
       [[nodiscard]]
       auto get_path(size_t const) const noexcept -> fs::path;
       [[nodiscard]]
@@ -426,7 +365,7 @@ private:
     vector<fs::path> roots;
     vector<fs::path> includes;
     vector<fs::path> linking;
-    std::unordered_map<string, Macro>
+    std::unordered_map<string, ir::Macro>
         macros; // these are all macros with values
     std::unordered_set<string> defined_macros;
     std::string compiler;
@@ -497,8 +436,8 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
 
 auto Module::DepTree::M::append_dep(fs::path const &dep,
                                     vector<fs::path> const &includes,
-                                    unordered_map<string, Macro> const &macros,
-                                    unordered_set<string> const &defined_macros,
+                                    unordered_map<string, ir::Macro> &macros,
+                                    unordered_set<string> &defined_macros,
                                     size_t const parent_idx)
     -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
@@ -560,192 +499,15 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
 
   try {
     auto ir = ir::IR::parse(file_string);
-    ir.interpret();
+    ir.interpret(macros, defined_macros);
   } catch (ir::Exception const &e) {
     std::cerr << e.what() << '\n';
   } catch (...) {
     std::cerr << "Something was caught\n";
   }
 
-  for (auto i = size_t{}; i != fsize;) {
-    switch (fcontent[i]) {
-    case '#': { // possible include
-      if (auto e = parse_preprocessor_stmt(file_string, i, dep, includes,
-                                           macros, defined_macros, root_idx);
-          !e.ok()) {
-        return e;
-      }
-    } break;
-    case '/': // possible comment
-      ++i;
-      switch (fcontent[i]) {
-      case 0:
-        return Err(NonTerminatedString(
-            dep)); // this should be a different error type i'm just tired
-      case '/':    // advance to end of line
-        ++i;
-        while (fcontent[i] != 0 && fcontent[i] != '\n')
-          ++i;
-
-        if (fcontent[i] != 0)
-          ++i; // ch (should) == '\n';
-        break;
-      case '*': { // advance until */
-        ++i;
-        auto found_end = false;
-        while (!found_end) {
-          while (fcontent[i] != 0 && fcontent[i] != '*')
-            ++i;
-          switch (fcontent[i]) {
-          case 0:
-            return Err(NonTerminatedString(dep)); // not right error i'm tired
-          case '*': // check that next char is also a '/'
-            ++i;
-            if (fcontent[i] != 0 && fcontent[i] == '/')
-              found_end = true;
-            break;
-          default:
-            ++i;
-            break;
-          }
-        }
-      } break;
-      default: // probably a part of a math eq, or just a malformed file, idk
-               // ignoring :)
-        break;
-      }
-      break;
-    case '"': // string to move over
-      while (fcontent[i] != 0 && fcontent[i] != '"') {
-        ++i;
-      }
-      if (fcontent[i] == 0) {
-        return Err(NonTerminatedString(dep));
-      } else {
-        ++i; // fcontent[i] (should) == '"'
-      }
-      break;
-    default:
-      while (fcontent[i] != 0 && skippable(fcontent[i])) {
-        ++i;
-      }
-      break;
-    }
-  }
-
   hashes[root_idx] = hash_fut.get();
 
-  return Opt();
-}
-
-// TODO: add array bounds checking to a lot of the if statements
-auto Module::DepTree::M::parse_preprocessor_stmt(
-    FixedString const &file, size_t &i, fs::path const &dep,
-    vector<fs::path> const &includes,
-    unordered_map<string, Module::Macro> const &macros,
-    unordered_set<string> const &defined_macros, size_t const root_idx)
-    -> Opt<DepTreeErr> {
-  using Opt = Opt<DepTreeErr>;
-  using Err = Opt::Err;
-
-  auto constexpr include_prefix = string_view{"#include"};
-  auto constexpr ifdef_prefix = string_view{"#ifdef"};
-  auto constexpr else_prefix = string_view{"#else"};
-  auto constexpr elif_prefix = string_view{"#elif"};
-  auto constexpr endif_prefix = string_view{"#endif"};
-
-  auto const fcontent = file.buffer;
-
-  // TODO: #define, #if, #else, #elif,
-  if (strncmp(fcontent + i, include_prefix.data(), include_prefix.size()) ==
-      0) {
-    i += include_prefix.size();
-    i = skip_ws(file, i);
-
-    switch (fcontent[i]) {
-    case '"': {
-      ++i;
-      auto const *end_of_include_string = fcontent + i;
-      while (*end_of_include_string != 0 && *end_of_include_string != '"') {
-        ++end_of_include_string;
-      }
-
-      if (*end_of_include_string == 0)
-        return Err(NonTerminatedString(dep));
-
-      auto const include_string_size = end_of_include_string - (fcontent + i);
-      if (include_string_size == 0)
-        return Err(EmptyFileName(dep));
-
-      auto const include_file =
-          fs::path(string_view{fcontent + i, end_of_include_string});
-
-      if (include_file.stem() == dep.stem()) {
-        auto const include_f_ext =
-            DepTree::determine_file_type(include_file.extension());
-        auto const path_ext = DepTree::determine_file_type(dep.extension());
-        if (include_f_ext == HEADER && path_ext == IMPL) {
-          return Opt(); // ignore
-        }
-      }
-
-      auto found = false;
-      for (auto const &include_prefix : includes) {
-        auto const dep_path = include_prefix / dep.parent_path() / include_file;
-        if (fs::exists(dep_path)) {
-          found = true;
-          if (auto m_error = append_dep(dep_path, includes, macros,
-                                        defined_macros, root_idx);
-              !m_error.ok()) {
-            return m_error;
-          }
-        }
-      }
-      if (!found) {
-        return Err(FileDoesNotExist(include_file, dep));
-      }
-    } break;
-    case '<': {
-      // TODO global include
-    } break;
-    default:
-      return Err(MalformedInclude(dep));
-    }
-  } else if (strncmp(fcontent + i, ifdef_prefix.data(), ifdef_prefix.size()) ==
-             0) {
-    i += ifdef_prefix.size();
-    i = skip_ws(file, i);
-
-    auto const *end_of_macro = fcontent + i;
-    while (*end_of_macro != 0 && *end_of_macro != '\n') {
-      ++end_of_macro;
-    }
-
-    if (*end_of_macro == 0) {
-      return Err(NonTerminatedPreprocessor(dep));
-    }
-
-    auto const macro = string(fcontent + i, end_of_macro);
-
-    auto const is_defined =
-        macros.contains(macro) || defined_macros.contains(macro);
-
-    if (is_defined) {
-      while (strncmp(fcontent + i, endif_prefix.data(), endif_prefix.size()) !=
-             0) {
-        if (auto e = parse_preprocessor_stmt(file, i, dep, includes, macros,
-                                             defined_macros, root_idx);
-            !e.ok()) {
-          return e;
-        }
-      }
-    } else {
-      // TODO
-    }
-
-  } else { // TODO: pares #if, #ifdef, etc.
-    ++i;
-  }
   return Opt();
 }
 
@@ -1213,8 +975,8 @@ auto Module::M::append_predefined_macros(string_view const compiler) noexcept
       }
 
       macros.emplace(macro_name,
-                     Macro{Macro::STRING,
-                           string(buffer + macro_start, buffer + macro_cur)});
+                     ir::Macro{ir::Macro::STRING, string(buffer + macro_start,
+                                                         buffer + macro_cur)});
     }
 
     if (errno != 0) {
