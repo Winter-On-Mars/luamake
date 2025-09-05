@@ -558,17 +558,15 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   files[root_idx].start = start;
   files[root_idx].end = end;
 
-  // parse this into an ir
-  auto m_ir = ir::IR::parse(file);
-  if (!m_ir.ok()) {
-    return Err(std::move(m_ir.err()));
+  try {
+    auto ir = ir::IR::parse(file_string);
+    ir.interpret();
+  } catch (ir::Exception const &e) {
+    std::cerr << e.what() << '\n';
+  } catch (...) {
+    std::cerr << "Something was caught\n";
   }
-  auto ir = m_ir.get();
-  // interpret the ir
-  auto interpret_res = ir.interpret();
-  if (!interpret_res.ok()) {
-    return Err(std::move(interpret_res.err()));
-  }
+
   for (auto i = size_t{}; i != fsize;) {
     switch (fcontent[i]) {
     case '#': { // possible include
@@ -1680,6 +1678,7 @@ auto install_exe(lua_State *state) noexcept -> int {
     return lua_error(state);
   }
 
+#if 0
   auto const actually_compiled_files = Compiler::compile(main_mod);
 
   // because of the format of `actually_compiled_files` for the best
@@ -1698,6 +1697,8 @@ auto install_exe(lua_State *state) noexcept -> int {
   } else {
     return 0;
   }
+#endif
+  return 0;
 }
 
 auto install_static(lua_State *state) noexcept -> int {
