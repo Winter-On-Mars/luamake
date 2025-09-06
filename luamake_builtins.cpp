@@ -326,8 +326,10 @@ private:
       [[nodiscard]]
       auto find(string_view const) const noexcept
           -> std::tuple<bool, unsigned int, unsigned int>;
-      [[nodiscard]]
-      auto resize() noexcept -> Opt<DepTreeErr>;
+      /**
+       * @throws std::bad_alloc
+       */
+      auto resize() noexcept -> void;
     } m;
 
     // basically making the assumption that a project isn't gonna have
@@ -456,9 +458,7 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   auto &&[fcontent, fsize] = file_string;
 
   if (num_files == cap_files) {
-    if (auto m_error = resize(); !m_error.ok()) {
-      return m_error;
-    }
+    resize();
   }
   auto const root_idx = num_files;
   if (parent_idx != ROOT_IDX)
@@ -494,7 +494,7 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   std::cerr << std::format("generating ir for file [{}]\n", dep.c_str());
   auto ir = ir::IR::parse(file_string);
   std::cerr << std::format("interpreting ir for file [{}]\n", dep.c_str());
-  ir.interpret(macros, def_macros);
+  auto const files_deps = ir.interpret(macros, def_macros);
 
   hashes[root_idx] = hash_fut.get();
 
@@ -536,35 +536,27 @@ auto Module::DepTree::M::find(string_view const path) const noexcept
   return std::make_tuple(false, 0, 0);
 }
 
-auto Module::DepTree::M::resize() noexcept -> Opt<DepTreeErr> {
-  using None = Opt<DepTreeErr>;
-  using Err = Opt<DepTreeErr>::Err;
+auto Module::DepTree::M::resize() noexcept -> void {
   auto const next_cap = 3 * cap_files / 2;
-  try {
-    // these are basic types so we *should* just be able to memmov them
-    auto n_types = std::make_unique<SourceFile_t[]>(next_cap);
-    std::memmove(n_types.get(), types.get(), sizeof(SourceFile_t) * cap_files);
-    auto n_files = std::make_unique<StringViews[]>(next_cap);
-    std::memmove(n_files.get(), files.get(), sizeof(StringViews) * cap_files);
-    auto n_hashes = std::make_unique<size_t[]>(next_cap);
-    std::memmove(n_hashes.get(), hashes.get(), sizeof(size_t) * cap_files);
+  // these are basic types so we *should* just be able to memmov them
+  auto n_types = std::make_unique<SourceFile_t[]>(next_cap);
+  std::memmove(n_types.get(), types.get(), sizeof(SourceFile_t) * cap_files);
+  auto n_files = std::make_unique<StringViews[]>(next_cap);
+  std::memmove(n_files.get(), files.get(), sizeof(StringViews) * cap_files);
+  auto n_hashes = std::make_unique<size_t[]>(next_cap);
+  std::memmove(n_hashes.get(), hashes.get(), sizeof(size_t) * cap_files);
 
-    auto n_deps = std::make_unique<vector<unsigned int>[]>(next_cap);
-    for (auto i = size_t{}; i < cap_files; ++i) {
-      n_deps[i] = std::move(deps[i]);
-    }
-
-    types = std::move(n_types);
-    files = std::move(n_files);
-    hashes = std::move(n_hashes);
-    deps = std::move(n_deps);
-
-    cap_files = next_cap;
-
-    return None();
-  } catch (std::exception const &e) {
-    return Err(MemoryAlloc(e.what()));
+  auto n_deps = std::make_unique<vector<unsigned int>[]>(next_cap);
+  for (auto i = size_t{}; i < cap_files; ++i) {
+    n_deps[i] = std::move(deps[i]);
   }
+
+  types = std::move(n_types);
+  files = std::move(n_files);
+  hashes = std::move(n_hashes);
+  deps = std::move(n_deps);
+
+  cap_files = next_cap;
 }
 
 auto Module::DepTree::display(std::ostream &out,
@@ -1424,36 +1416,37 @@ auto install_exe(lua_State *state) noexcept -> int {
                     "table, found [%s]",
                     lua_typename(state, ret_t));
 
-  auto maybe_main_mod = Module::make(Module::EXE, state);
-  if (!maybe_main_mod.ok()) {
-    auto const msg =
-        std::visit([](auto &&e) -> string { return e.error() + '\n'; },
-                   *maybe_main_mod.err().get());
+  try {
+    auto maybe_main_mod = Module::make(Module::EXE, state);
+    if (!maybe_main_mod.ok()) {
+      auto const msg =
+          std::visit([](auto &&e) -> string { return e.error() + '\n'; },
+                     *maybe_main_mod.err().get());
 
-    lua_pushstring(state, msg.c_str());
-    return lua_error(state);
-  }
+      lua_pushstring(state, msg.c_str());
+      return lua_error(state);
+    }
 
-  auto main_mod = maybe_main_mod.get();
-  auto ec = std::error_code{};
-  if (fs::create_directories(
-          fs::path(
-              std::format("{}/{}.o", main_mod.install_dir(), main_mod.name())),
-          ec);
-      ec) {
-    std::cerr << ec.message() << '\n';
-    lua_pushstring(state, "Unable to create directory");
-    return lua_error(state);
-  }
-  ec.clear();
+    auto main_mod = maybe_main_mod.get();
+    auto ec = std::error_code{};
+    if (fs::create_directories(
+            fs::path(std::format("{}/{}.o", main_mod.install_dir(),
+                                 main_mod.name())),
+            ec);
+        ec) {
+      std::cerr << ec.message() << '\n';
+      lua_pushstring(state, "Unable to create directory");
+      return lua_error(state);
+    }
+    ec.clear();
 
-  if (auto m_err = main_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
-    auto const msg =
-        std::visit([](auto &&e) -> string { return e.error() + '\n'; },
-                   *m_err.err().get());
-    lua_pushstring(state, msg.c_str());
-    return lua_error(state);
-  }
+    if (auto m_err = main_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
+      auto const msg =
+          std::visit([](auto &&e) -> string { return e.error() + '\n'; },
+                     *m_err.err().get());
+      lua_pushstring(state, msg.c_str());
+      return lua_error(state);
+    }
 
 #if 0
   auto const actually_compiled_files = Compiler::compile(main_mod);
@@ -1475,7 +1468,11 @@ auto install_exe(lua_State *state) noexcept -> int {
     return 0;
   }
 #endif
-  return 0;
+    return 0;
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  }
 }
 
 auto install_static(lua_State *state) noexcept -> int {
