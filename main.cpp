@@ -15,6 +15,8 @@ extern "C" {
 #include "common.hpp"
 #include "luamake_builtins.hpp"
 
+namespace fs = std::filesystem;
+
 using std::array, std::pair, std::string, std::string_view;
 
 #define BUILDER_OBJ "__luamake_builder"
