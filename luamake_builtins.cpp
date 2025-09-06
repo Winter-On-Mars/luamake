@@ -1074,7 +1074,17 @@ auto Module::make(Module_t type, lua_State *state)
   }
 
   ret_t.includes.reserve(10);
-  ret_t.includes.emplace_back(".");
+  for (auto const &root : ret_t.roots) {
+    auto found = false;
+    for (auto const &include : ret_t.includes) {
+      if (include == fs::canonical(root.parent_path())) {
+        found = true;
+      }
+    }
+    if (!found) {
+      ret_t.includes.push_back(fs::canonical(root.parent_path()));
+    }
+  }
   switch (auto const include_t = lua_getfield(state, -5, "include")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
