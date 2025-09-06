@@ -86,10 +86,6 @@ struct IR final {
     LOCAL_INCLUDE,
     DEFINE,
   };
-  size_t size;
-  size_t cap;
-  std::unique_ptr<types[]> types;
-  std::unique_ptr<std::string[]> exprs;
   /**
    * @throws Parse_Exc <: Exception
    */
@@ -155,8 +151,13 @@ private:
     auto to_string(enum Lexer::types t) const -> std::string;
   };
   auto interpret_impl(size_t &, bool, std::unordered_map<std::string, Macro> &,
-                      std::unordered_set<std::string> &) -> void;
+                      std::unordered_set<std::string> &,
+                      std::vector<std::filesystem::path> &) -> void;
 
+  size_t size;
+  size_t cap;
+  std::unique_ptr<types[]> types;
+  std::unique_ptr<std::string[]> exprs;
   friend Lexer;
 };
 
