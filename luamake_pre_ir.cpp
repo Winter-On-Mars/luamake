@@ -3,13 +3,17 @@
 
 #include <cstring>
 #include <format>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+namespace fs = std::filesystem;
 
-using std::string, std::string_view, std::vector, std::unordered_map;
+using std::string, std::string_view, std::vector, std::unordered_map,
+    std::unordered_set;
 
 namespace luamake {
 namespace ir {
@@ -76,67 +80,12 @@ auto constexpr skip_until_close_multicomment(size_t const size,
 }
 } // namespace
 
-struct Lex_Exc final : public Exception {
-  explicit Lex_Exc(decltype(__LINE__) line, std::string &&message) noexcept
-      : line(line), message(message) {}
-  ~Lex_Exc() final = default;
-  auto what() const noexcept -> std::string final {
-    return std::format("Lex Error on line {}\n\tAdditional info [{}]", line,
-                       message);
-  }
-  decltype(__LINE__) line;
-  std::string message;
-};
-
-struct Lexer final {
-  enum types {
-    // preprocessor stuff
-    IF,
-    IFDEF,
-    IFNDEF,
-    ELIF,
-    ELSE,
-    ENDIF,
-    DEFINE,
-    INCLUDE,
-    // operators
-    // TODO: add other operators
-    LOG_AND,
-    LOG_OR,
-    OP_DEFINED,
-    LPAREN,
-    RPAREN,
-    LANGLE,
-    RANGLE,
-    QUOTE,
-    // values
-    CHAR_LIT,
-    INT_LIT,
-    MACRO,
-  };
-
-  vector<types> types;
-  vector<string> lexemes;
-
-  /**
-   * @throws Lex_Exc
-   */
-  static auto lex(FixedString const &) -> Lexer;
-
-  /**
-   * @throws Lex_Exc
-   */
-  auto parse_to_ir() -> ir::IR;
-
-  auto to_string(enum types t) const -> string;
-};
-
 // i would like to add lexical short cutting, where if we see a macro that's
 // already been defined in something like a header guard, then we completely
 // skip the file
 // TODO: there's actually a lot more we need to do for macro preprocessing, like
 // properly parsing expressions (adding them to the lexer :))
-auto Lexer::lex(FixedString const &file) -> Lexer {
+auto IR::Lexer::lex(FixedString const &file) -> Lexer {
   // clang-format off
   static auto const keywords = unordered_map<string_view, enum Lexer::types>{{
     {string_view{"#if"}, IF},
@@ -262,7 +211,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
   return lex;
 }
 
-auto Lexer::parse_to_ir() -> IR {
+auto IR::Lexer::parse_to_ir() -> IR {
   auto ir = IR();
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
@@ -298,6 +247,10 @@ auto Lexer::parse_to_ir() -> IR {
       ++cur_t;
       ir.push(IR::ENDIF, "");
       break;
+    case ELSE:
+      ++cur_t;
+      ir.push(IR::ELSE, "");
+      break;
     default:
       throw Lex_Exc(__LINE__, std::format("Not implimented, type = [{}]",
                                           to_string(types[cur_t])));
@@ -307,7 +260,7 @@ auto Lexer::parse_to_ir() -> IR {
   return ir;
 }
 
-auto Lexer::to_string(enum types t) const -> string {
+auto IR::Lexer::to_string(enum types t) const -> string {
   switch (t) {
   case IF:
     return string("IF");
@@ -350,14 +303,19 @@ auto Lexer::to_string(enum types t) const -> string {
   }
 }
 
+auto Lex_Exc::what() const noexcept -> std::string {
+  return std::format("Lex Error on line {}\n\tAdditional info [{}]", line,
+                     message);
+}
+
 auto Parse_Exc::what() const noexcept -> string {
-  // TODO:
-  return string("Parse Error");
+  return std::format("Parse Error on line {}\n\tAdditional info {}", line,
+                     message);
 }
 
 auto Interpret_Exc::what() const noexcept -> string {
-  // TODO:
-  return string("Interpreter Error");
+  return std::format("Interpreter Error on line {}\n\tAdditional info {}", line,
+                     message);
 }
 
 IR::IR()
@@ -368,7 +326,67 @@ auto IR::parse(FixedString const &file) -> IR {
   return Lexer::lex(file).parse_to_ir();
 }
 
-auto IR::interpret() -> void {}
+// TODO
+auto IR::interpret(unordered_map<string, Macro> &macros,
+                   unordered_set<string> &def_macros) -> vector<fs::path> {
+  for (auto i = size_t{}; i < size;) {
+    interpret_impl(i, false, macros, def_macros);
+  }
+  return vector<fs::path>();
+}
+
+auto IR::interpret_impl(size_t &i, bool interpret_elses,
+                        std::unordered_map<std::string, Macro> &macros,
+                        std::unordered_set<std::string> &def_macros) -> void {
+  switch (types[i]) {
+  case GLOBAL_INCLUDE: {
+    // TODO: check that this file *actually exists*
+    ++i;
+  } break;
+  case IFDEF: {
+    auto const checking_macro = exprs[i];
+    auto const defined =
+        macros.contains(checking_macro) || def_macros.contains(checking_macro);
+    std::cerr << "Macro [" << checking_macro << "] is"
+              << (defined ? " " : " not ") << "defined\n";
+    ++i;
+    if (defined) {
+      while (i < size) {
+        if (types[i] == ELSE || types[i] == ENDIF || types[i] == ELIF)
+          break;
+        interpret_impl(i, false, macros, def_macros);
+        ++i;
+      }
+      if (i == size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+      while (i < size && types[i] != ENDIF) {
+        ++i;
+      }
+      if (i == size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+    } else {
+      while (i < size) {
+        if (!(types[i] == ELSE || types[i] == ENDIF || types[i] == ELIF))
+          ++i;
+      }
+      if (i == size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+
+      interpret_impl(i, true, macros, def_macros);
+
+      while (i < size && types[i] != ENDIF) {
+        ++i;
+      }
+      if (i == size) {
+        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+      }
+    }
+  } break;
+  default:
+    throw Interpret_Exc(__LINE__, std::format("Not implimented, type = [{}]",
+                                              pretty_types(types[i])));
+  }
+}
 
 auto IR::check_size() -> void {
   if (size == cap) {
