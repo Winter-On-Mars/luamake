@@ -304,18 +304,18 @@ auto IR::Lexer::to_string(enum types t) const -> string {
 }
 
 auto Lex_Exc::what() const noexcept -> std::string {
-  return std::format("Lex Error on line {}\n\tAdditional info [{}]", line,
+  return std::format("Lex Error on line {}\n\tAdditional info: [{}]", line,
                      message);
 }
 
 auto Parse_Exc::what() const noexcept -> string {
-  return std::format("Parse Error on line {}\n\tAdditional info {}", line,
+  return std::format("Parse Error on line {}\n\tAdditional info: {}", line,
                      message);
 }
 
 auto Interpret_Exc::what() const noexcept -> string {
-  return std::format("Interpreter Error on line {}\n\tAdditional info {}", line,
-                     message);
+  return std::format("Interpreter Error on line {}\n\tAdditional info: {}",
+                     line, message);
 }
 
 IR::IR()
@@ -326,36 +326,37 @@ auto IR::parse(FixedString const &file) -> IR {
   return Lexer::lex(file).parse_to_ir();
 }
 
-// TODO
 auto IR::interpret(unordered_map<string, Macro> &macros,
                    unordered_set<string> &def_macros) -> vector<fs::path> {
+  auto vec = vector<fs::path>();
   for (auto i = size_t{}; i < size;) {
-    interpret_impl(i, false, macros, def_macros);
+    interpret_impl(i, false, macros, def_macros, vec);
   }
-  return vector<fs::path>();
+  return vec;
 }
 
 auto IR::interpret_impl(size_t &i, bool interpret_elses,
                         std::unordered_map<std::string, Macro> &macros,
-                        std::unordered_set<std::string> &def_macros) -> void {
+                        std::unordered_set<std::string> &def_macros,
+                        vector<fs::path> &vec) -> void {
   switch (types[i]) {
   case GLOBAL_INCLUDE: {
     // TODO: check that this file *actually exists*
     ++i;
   } break;
+  case LOCAL_INCLUDE: {
+    vec.push_back(exprs[i++]);
+  } break;
   case IFDEF: {
     auto const checking_macro = exprs[i];
     auto const defined =
         macros.contains(checking_macro) || def_macros.contains(checking_macro);
-    std::cerr << "Macro [" << checking_macro << "] is"
-              << (defined ? " " : " not ") << "defined\n";
     ++i;
     if (defined) {
       while (i < size) {
         if (types[i] == ELSE || types[i] == ENDIF || types[i] == ELIF)
           break;
-        interpret_impl(i, false, macros, def_macros);
-        ++i;
+        interpret_impl(i, false, macros, def_macros, vec);
       }
       if (i == size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
@@ -364,6 +365,7 @@ auto IR::interpret_impl(size_t &i, bool interpret_elses,
       }
       if (i == size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+      ++i; // move over the ENDIF
     } else {
       while (i < size) {
         if (!(types[i] == ELSE || types[i] == ENDIF || types[i] == ELIF))
@@ -372,7 +374,7 @@ auto IR::interpret_impl(size_t &i, bool interpret_elses,
       if (i == size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
 
-      interpret_impl(i, true, macros, def_macros);
+      interpret_impl(i, true, macros, def_macros, vec);
 
       while (i < size && types[i] != ENDIF) {
         ++i;
