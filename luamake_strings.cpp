@@ -4,8 +4,10 @@
 #include <iostream>
 
 namespace luamake {
-OwnedString::OwnedString(char *buffer, size_t size) noexcept
-    : buffer(buffer), size(0), capacity(size) {}
+OwnedString::OwnedString(char *&buffer, size_t size) noexcept
+    : buffer(buffer), size(0), capacity(size) {
+  buffer = nullptr;
+}
 OwnedString::~OwnedString() noexcept {
   if (buffer != nullptr)
     free((void *)buffer);

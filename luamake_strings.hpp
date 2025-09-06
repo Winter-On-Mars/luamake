@@ -6,12 +6,15 @@
 
 namespace luamake {
 
+/**
+ * @brief takes ownership of the buffer, with buffer.size == size
+ */
 struct OwnedString final {
   char *buffer;
   size_t size;
   size_t capacity;
 
-  explicit OwnedString(char *buffer, size_t size) noexcept;
+  explicit OwnedString(char *&buffer, size_t size) noexcept;
   constexpr OwnedString() noexcept;
 
   constexpr OwnedString(OwnedString &&that) noexcept;
