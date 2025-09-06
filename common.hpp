@@ -63,8 +63,36 @@
 
 [[noreturn]] auto unreachable() noexcept -> void;
 
-namespace fs = std::filesystem;
+/*
+   shamelessly stealing this idea from
+[[https://www.youtube.com/watch?v=f30PceqQWko]]
 
+
+enum class IoType { SOURCE, SINK };
+
+template <IoType type> struct _File final {
+  auto write() {
+    if constexpr (type == IoType::SOURCE) {
+      write(...);
+
+    } else {
+      throw UnsupportedOperation();
+    }
+  }
+  auto read();
+#ifdef __unix__
+  int fd;
+#else
+  FILE* file;
+#endif
+};
+
+using SourceFile = _File<IoType::SOURCE>;
+using SinkFile = _File<IoType::SINK>;
+*/
+
+// TODO: add a macro to test if on unix system, and use unix os functions like
+// open, read, write, etc..., also update this to not be as bad :)
 struct File final {
   enum permissions : unsigned char {
     READ = 1 << 0,
@@ -72,7 +100,8 @@ struct File final {
     BINARY = 1 << 2,
   };
 
-  constexpr File(fs::path const &path, permissions &&perms) noexcept
+  constexpr File(std::filesystem::path const &path,
+                 permissions &&perms) noexcept
       : file(nullptr) {
     char max_length_perms[] = {0, 0, 0,
                                0}; // this should be 5 or 7 from man fread
