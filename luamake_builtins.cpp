@@ -49,6 +49,8 @@ extern "C" {
     return lua_error((L));                                                     \
   }
 
+namespace fs = std::filesystem;
+
 namespace luamake {
 namespace {
 using std::pair, std::array, std::string, std::string_view, std::vector,
@@ -1185,7 +1187,6 @@ auto Module::links() const noexcept -> std::string {
   return res;
 }
 
-// TODO: check for defined macros
 auto Module::parse_compiler_table(lua_State *state) -> string {
   auto str = string();
 
