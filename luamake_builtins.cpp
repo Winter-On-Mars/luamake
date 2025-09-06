@@ -462,9 +462,9 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   if (num_files == cap_files) {
     resize();
   }
-  auto const root_idx = num_files;
+  auto const this_idx = num_files;
   if (parent_idx != ROOT_IDX)
-    deps[parent_idx].push_back(static_cast<unsigned int>(root_idx));
+    deps[parent_idx].push_back(static_cast<unsigned int>(this_idx));
   ++num_files;
 
   auto &&[start, end] = append_path(dep);
@@ -480,7 +480,7 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
         if (auto m_error = append_dep(possible_path, includes, macros,
-                                      def_macros, root_idx);
+                                      def_macros, this_idx);
             !m_error.ok()) {
           return m_error;
         }
@@ -489,16 +489,32 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
     // HOL
   }
 
-  types[root_idx] = ftype;
-  files[root_idx].start = start;
-  files[root_idx].end = end;
+  types[this_idx] = ftype;
+  files[this_idx].start = start;
+  files[this_idx].end = end;
 
   std::cerr << std::format("generating ir for file [{}]\n", dep.c_str());
   auto ir = ir::IR::parse(file_string);
   std::cerr << std::format("interpreting ir for file [{}]\n", dep.c_str());
   auto const files_deps = ir.interpret(macros, def_macros);
 
-  hashes[root_idx] = hash_fut.get();
+  std::cerr << std::format("file deps for [{}]\n", dep.c_str());
+  for (auto const &file : files_deps) {
+    std::cerr << std::format("{} ", file.c_str());
+  }
+  std::cerr << '\n';
+
+#if 0
+  i this is all we really need to do to get everything up and working again :)
+  for (auto const &file : files_deps) {
+    if (auto m_error = append_dep(file, includes, macros, def_macros, this_idx);
+        !m_error.ok()) {
+      return m_error;
+    }
+  }
+#endif
+
+  hashes[this_idx] = hash_fut.get();
 
   return Opt();
 }
@@ -1417,6 +1433,7 @@ auto install_exe(lua_State *state) noexcept -> int {
                     "table, found [%s]",
                     lua_typename(state, ret_t));
 
+  // TODO: update these functions to throw exceptions
   try {
     auto maybe_main_mod = Module::make(Module::EXE, state);
     if (!maybe_main_mod.ok()) {
@@ -1472,6 +1489,9 @@ auto install_exe(lua_State *state) noexcept -> int {
     return 0;
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
     return lua_error(state);
   }
 }
