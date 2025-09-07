@@ -4,7 +4,6 @@
 #include "luamake_error.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
-#include <stdexcept>
 
 extern "C" {
 #include "lua/lua.h"
@@ -26,6 +25,7 @@ extern "C" {
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -140,6 +140,15 @@ auto display_string_view(string_view const str) noexcept -> void {
 struct Compiler;
 struct CompilationPool;
 
+// TODO: change the error for dep tree
+
+struct ModuleErr {
+  constexpr ModuleErr(string &&message) noexcept : message(message) {}
+  virtual ~ModuleErr() = default;
+  virtual auto what() const -> string = 0;
+  std::string message;
+};
+
 struct EmptyFileName final {
   fs::path path;
   explicit EmptyFileName(fs::path const &path) noexcept : path(path) {}
@@ -191,10 +200,12 @@ struct MalformedInclude final {
   };
 };
 
-struct CAPI final {
-  string message;
-  explicit CAPI(string const &message) noexcept : message(message) {}
+// TODO: this is a fucky one, b/c it's both used by ModuleErr and DepTreeErr
+struct CAPI final : public ModuleErr {
+  explicit CAPI(string &&message) noexcept : ModuleErr(std::move(message)) {}
+  ~CAPI() = default;
   auto error() const noexcept -> string { return message; }
+  auto what() const -> string final { return message; }
 };
 
 struct MemoryAlloc final {
@@ -220,33 +231,32 @@ using DepTreeErr = std::variant<EmptyFileName, FileDoesNotExist,
                                 NonTerminatedString, MalformedInclude, CAPI,
                                 MemoryAlloc, NonTerminatedPreprocessor>;
 
-struct MissingField final {
-  string_view field_name;
-  MissingField(string_view &&field_name) noexcept : field_name(field_name) {}
-  auto error() const noexcept -> string {
+struct MissingField final : public ModuleErr {
+  constexpr explicit MissingField(string &&field_name) noexcept
+      : ModuleErr(std::move(field_name)) {}
+  ~MissingField() final = default;
+  auto what() const -> string final {
     return std::format(
         "Required field [{}] could not be found when constructing a module.",
-        field_name);
+        message);
   }
 };
 
-struct UnexpectedType final {
-  string_view field_name;
+struct UnexpectedType final : public ModuleErr {
   int expected_type;
   int found_type;
-  UnexpectedType(string_view &&field_name, int expected_type,
-                 int found_type) noexcept
-      : field_name(field_name), expected_type(expected_type),
+  constexpr explicit UnexpectedType(string &&field_name, int expected_type,
+                                    int found_type) noexcept
+      : ModuleErr(std::move(field_name)), expected_type(expected_type),
         found_type(found_type) {}
-  auto error() const noexcept -> string {
+  ~UnexpectedType() final = default;
+  auto what() const noexcept -> string final {
     return std::format("Required field [{}] found, but was of type {}, "
                        "expected type {}, when constructing a module.",
-                       field_name, lua_typename(found_type),
+                       message, lua_typename(found_type),
                        lua_typename(expected_type));
   }
 };
-
-using ModuleErr = std::variant<MissingField, UnexpectedType, CAPI>;
 
 struct Module final {
   enum Module_t {
@@ -255,28 +265,23 @@ struct Module final {
     DYNAMIC,
   };
 
-  static auto make(Module_t type, lua_State *state)
-      -> Result<Module, ModuleErr>;
+  /**
+   * @throws ModuleErr
+   */
+  Module(Module_t &&type, lua_State *state);
 
   auto gen_dep_tree() -> Opt<DepTreeErr>;
 
-  auto constexpr install_dir() const noexcept -> char const * {
-    return m.install_dir;
-  }
-  auto constexpr name() const noexcept -> char const * { return m.name; }
-  auto roots() const noexcept -> vector<fs::path> { return m.roots; }
-  auto compiler() const noexcept -> std::string { return m.compiler; }
-  auto includes() const noexcept -> std::string;
-  auto links() const noexcept -> std::string;
+  // TODO: update these to return FixedString
+  auto format_includes() const -> string;
+  auto format_links() const -> string;
 
   Module(Module &&) = default;
-  Module &operator=(Module &&) = default;
   ~Module() noexcept = default;
 
   Module(Module const &) = delete;
   Module &operator=(Module const &) = delete;
 
-private:
   static auto parse_compiler_table(lua_State *state) -> string;
 
   // this is kinda stupid i'm not gonna lie, but this is the only
@@ -366,8 +371,6 @@ private:
     // so this *seems like* a valid assumption
     static constexpr auto ROOT_IDX = static_cast<size_t>(-1);
 
-    // this should probably returned a FixedString, we don't need the size and
-    // capacity
     static auto get_file_content(FILE *file) noexcept
         -> Result<FixedString, DepTreeErr>;
 
@@ -387,32 +390,33 @@ private:
     friend Module;
   };
 
-  struct M {
-    Module_t type;
-    // it *might* be a cool idea to have this as a union of
-    // vector<fs::path> and fs::path for better domain modeling, but
-    // unions are a bit of a pain to work with in c++
-    DepTree tree;
-    vector<fs::path> roots;
-    vector<fs::path> includes;
-    vector<fs::path> linking;
-    std::unordered_map<string, ir::Macro>
-        macros; // these are all macros with values
-    std::unordered_set<string> defined_macros;
-    std::string compiler;
-    char const *name;
-    char const *install_dir;
+  Module_t type;
+  // it *might* be a cool idea to have this as a union of
+  // vector<fs::path> and fs::path for better domain modeling, but
+  // unions are a bit of a pain to work with in c++
+  DepTree tree;
+  vector<fs::path> roots;
+  vector<fs::path> includes;
+  vector<fs::path> linking;
+  std::unordered_map<string, ir::Macro>
+      macros; // these are all macros with values
+  std::unordered_set<string> defined_macros;
+  ir::IR_Interpreter interpreter;
+  std::string compiler;
+  char const *name;
+  char const *install_dir;
 
-    [[remove]]
-    auto display(std::ostream &) const noexcept -> void;
+  auto display(std::ostream &) const noexcept -> void;
 
-    auto append_include_paths(string_view const) noexcept -> Opt<ModuleErr>;
-    auto append_predefined_macros(string_view const) noexcept -> Opt<ModuleErr>;
-  } m;
+  /**
+   * @throws CAPI
+   */
+  auto append_include_paths(string_view const) -> void;
+  /**
+   * @throws CAPI
+   */
+  auto append_predefined_macros(string_view const) -> void;
 
-  Module(M &&m) noexcept : m(std::move(m)) {}
-  Module() noexcept = default;
-  friend Result<Module, ModuleErr>;
   friend CompilationPool;
   friend Compiler;
 };
@@ -523,7 +527,7 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   std::cerr << std::format("generating ir for file [{}]\n", dep.c_str());
   auto ir = ir::IR::parse(file_string);
   std::cerr << std::format("interpreting ir for file [{}]\n", dep.c_str());
-  auto const files_deps = ir.interpret(macros, def_macros);
+  auto const files_deps = ir.interpret();
 
   std::cerr << std::format("file deps for [{}]\n", dep.c_str());
   for (auto const &file : files_deps) {
@@ -751,7 +755,7 @@ auto SourceFile::deserialize_impl(File &file) noexcept -> SourceFile {
 }
 */
 
-auto Module::M::display(std::ostream &out) const noexcept -> void {
+auto Module::display(std::ostream &out) const noexcept -> void {
   auto _display = [&](auto x) { out << x << ", "; };
 
   out << "type = ";
@@ -806,21 +810,17 @@ auto Module::M::display(std::ostream &out) const noexcept -> void {
 // this function is breaking things :), fix it, figue
 // out how pipes work and shit also because we have this now windows support is
 // most likely borked :)
-auto Module::M::append_include_paths(string_view const compiler) noexcept
-    -> Opt<ModuleErr> {
-  using Opt = Opt<ModuleErr>;
-  using Err = Opt::Err;
-
+auto Module::append_include_paths(string_view const compiler) -> void {
   auto _pipes = array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
-    return Err(CAPI(strerror(errno)));
+    throw CAPI(strerror(errno));
   }
   auto &&[read_pipe, write_pipe] = _pipes;
   auto const pid = vfork();
   if (pid < 0) {
     close(read_pipe);
     close(write_pipe);
-    return Err(CAPI(strerror(errno)));
+    throw CAPI(strerror(errno));
   }
   switch (pid) {
   case 0: { // in child proc
@@ -839,7 +839,7 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
       close(write_pipe); // we never actually close the write_pipe, but execl
                          // replaces the running program so idk
-      return Err(CAPI(strerror(errno)));
+      throw CAPI(strerror(errno));
     }
   } break;
   default: { // in parent proc
@@ -851,7 +851,7 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
     // throw, leaking this buffer :)
     auto *const buffer = (char *)malloc(buffer_size + 1);
     if (buffer == nullptr)
-      return Err(CAPI(strerror(errno)));
+      throw CAPI(strerror(errno));
     memset(buffer, 0, buffer_size + 1);
 
     auto search_string = string();
@@ -864,11 +864,8 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
     free(buffer);
     close(read_pipe);
 
-    if (amount_read < 0) {
-      // idk error happened
-      std::cerr << "\terror occured :) when looking at include paths\n";
-      std::terminate();
-    }
+    if (amount_read < 0)
+      throw CAPI(strerror(errno));
 
     // reached EOF
 
@@ -899,24 +896,19 @@ auto Module::M::append_include_paths(string_view const compiler) noexcept
     }
   } break;
   }
-  return Opt();
 }
 
-auto Module::M::append_predefined_macros(string_view const compiler) noexcept
-    -> Opt<ModuleErr> {
-  using Opt = Opt<ModuleErr>;
-  using Err = Opt::Err;
-
+auto Module::append_predefined_macros(string_view const compiler) -> void {
   auto _pipes = array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
-    return Err(CAPI(strerror(errno)));
+    throw CAPI(strerror(errno));
   }
   auto &&[read_pipe, write_pipe] = _pipes;
   auto const pid = vfork();
   if (pid < 0) {
     close(read_pipe);
     close(write_pipe);
-    return Err(CAPI(strerror(errno)));
+    throw CAPI(strerror(errno));
   }
   switch (pid) {
   case 0: { // in child proc
@@ -933,7 +925,7 @@ auto Module::M::append_predefined_macros(string_view const compiler) noexcept
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
       close(write_pipe); // we never actually close the write_pipe, but execl
                          // replaces the running program so idk
-      return Err(CAPI(strerror(errno)));
+      throw CAPI(strerror(errno));
     }
   } break;
   default: { // in parent proc
@@ -943,7 +935,7 @@ auto Module::M::append_predefined_macros(string_view const compiler) noexcept
     auto buffer_size = sizeof(char) * size_t{2 << 8};
     auto *buffer = (char *)malloc(buffer_size + 1);
     if (buffer == nullptr)
-      return Err(CAPI(strerror(errno)));
+      throw CAPI(strerror(errno));
     memset(buffer, 0, buffer_size + 1);
 
     // this seems to work, bc getline returns -1 on EOF so we can't check
@@ -982,6 +974,7 @@ auto Module::M::append_predefined_macros(string_view const compiler) noexcept
       auto const macro_name =
           string_view{buffer + macro_start, buffer + macro_cur};
 
+      // TODO: throw something
       if (buffer[macro_cur] != ' ') {
         std::cerr << "\tdefined macro ended on unexpected character ["
                   << buffer[macro_cur] << "]\n";
@@ -1009,7 +1002,11 @@ auto Module::M::append_predefined_macros(string_view const compiler) noexcept
     if (errno != 0) {
       // idk error happened
       std::cerr << "\terror occured :) when looking at macros\n";
+      // the man pages say that perror can change errno if something happens
+      // with perror, so we just store the error before hand
+      auto const actual_error = errno;
       perror("getline");
+      throw CAPI(strerror(actual_error));
       std::terminate();
     }
 
@@ -1021,56 +1018,53 @@ auto Module::M::append_predefined_macros(string_view const compiler) noexcept
 
   } break;
   }
-  return Opt();
 }
 
-auto Module::make(Module_t type, lua_State *state)
-    -> Result<Module, ModuleErr> {
-  using Ok = Result<Module, ModuleErr>::Ok;
-  using Err = Result<Module, ModuleErr>::Err;
-  auto ret_t = M{type};
-
+Module::Module(Module_t &&type, lua_State *state)
+    : type(type), tree(), roots(), includes(), linking(), macros(),
+      defined_macros(), interpreter(includes, macros, defined_macros),
+      compiler(), name(nullptr), install_dir(nullptr) {
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING:
-    ret_t.name = lua_tolstring(state, -1, nullptr);
+    name = lua_tolstring(state, -1, nullptr);
     break;
   case LUA_TNIL:
-    return Err(MissingField("name"));
+    throw MissingField("name");
   default:
-    return Err(UnexpectedType("name", LUA_TSTRING, name_t));
+    throw UnexpectedType("name", LUA_TSTRING, name_t);
   }
 
   switch (type) {
   case EXE:
-    ret_t.roots.reserve(1);
+    roots.reserve(1);
     switch (auto const root_t = lua_getfield(state, -2, "root")) {
     case LUA_TSTRING:
-      ret_t.roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
+      roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
       break;
     case LUA_TNIL:
-      return Err(MissingField("root"));
+      throw MissingField("root");
     default:
-      return Err(UnexpectedType("root", LUA_TSTRING, root_t));
+      throw UnexpectedType("root", LUA_TSTRING, root_t);
     }
     break;
   case STATIC: {
     switch (auto const root_t = lua_getfield(state, -2, "roots")) {
     case LUA_TTABLE: {
       auto const num_roots = lua_rawlen(state, -1);
-      auto const roots = lua_absindex(state, -1);
-      ret_t.roots.reserve(num_roots);
-      for (lua_pushnil(state); lua_next(state, roots) != 0;) {
+      auto const roots_idx = lua_absindex(state, -1);
+      roots.reserve(num_roots);
+      for (lua_pushnil(state); lua_next(state, roots_idx) != 0;) {
         if (auto const value_t = lua_type(state, -1); value_t != LUA_TSTRING) {
-          return Err(UnexpectedType("roots[i]", LUA_TSTRING, value_t));
+          throw UnexpectedType("roots[i]", LUA_TSTRING, value_t);
         }
-        ret_t.roots.push_back(lua_tolstring(state, -1, nullptr));
+        roots.push_back(lua_tolstring(state, -1, nullptr));
         lua_pop(state, 1);
       }
     } break;
     case LUA_TNIL:
-      return Err(MissingField("roots"));
+      throw MissingField("roots");
     default:
-      return Err(UnexpectedType("roots", LUA_TTABLE, root_t));
+      throw UnexpectedType("roots", LUA_TTABLE, root_t);
     }
   } break;
   case DYNAMIC:
@@ -1081,34 +1075,34 @@ auto Module::make(Module_t type, lua_State *state)
 
   switch (auto const compiler_t = lua_getfield(state, -3, "compiler")) {
   case LUA_TTABLE:
-    ret_t.compiler = Module::parse_compiler_table(state);
+    compiler = Module::parse_compiler_table(state);
     break;
   case LUA_TNIL:
-    return Err(MissingField("compiler"));
+    throw MissingField("compiler");
   default:
-    return Err(UnexpectedType("compiler", LUA_TTABLE, compiler_t));
+    throw UnexpectedType("compiler", LUA_TTABLE, compiler_t);
   }
 
   switch (auto const install_dir_t = lua_getfield(state, -4, "install_dir")) {
   case LUA_TSTRING:
-    ret_t.install_dir = lua_tolstring(state, -1, nullptr);
+    install_dir = lua_tolstring(state, -1, nullptr);
     break;
   case LUA_TNIL:
-    return Err(MissingField("install_dir"));
+    throw MissingField("install_dir");
   default:
-    return Err(UnexpectedType("install_dir", LUA_TSTRING, install_dir_t));
+    throw UnexpectedType("install_dir", LUA_TSTRING, install_dir_t);
   }
 
-  ret_t.includes.reserve(10);
-  for (auto const &root : ret_t.roots) {
+  includes.reserve(10);
+  for (auto const &root : roots) {
     auto found = false;
-    for (auto const &include : ret_t.includes) {
+    for (auto const &include : includes) {
       if (include == fs::canonical(root.parent_path())) {
         found = true;
       }
     }
     if (!found) {
-      ret_t.includes.push_back(fs::canonical(root.parent_path()));
+      includes.push_back(fs::canonical(root.parent_path()));
     }
   }
   switch (auto const include_t = lua_getfield(state, -5, "include")) {
@@ -1118,10 +1112,10 @@ auto Module::make(Module_t type, lua_State *state)
     for (auto i = 1; i <= len; ++i) {
       switch (auto const value_t = lua_geti(state, include, i)) {
       case LUA_TSTRING:
-        ret_t.includes.push_back(lua_tolstring(state, -1, nullptr));
+        includes.push_back(lua_tolstring(state, -1, nullptr));
         break;
       default:
-        return Err(UnexpectedType("include[i]", LUA_TSTRING, value_t));
+        throw UnexpectedType("include[i]", LUA_TSTRING, value_t);
       }
       --include;
     }
@@ -1130,31 +1124,31 @@ auto Module::make(Module_t type, lua_State *state)
   case LUA_TNIL:
     break;
   default:
-    return Err(UnexpectedType("include", LUA_TTABLE, include_t));
+    throw UnexpectedType("include", LUA_TTABLE, include_t);
   }
-  ret_t.append_include_paths(ret_t.compiler);
-  ret_t.append_predefined_macros(ret_t.compiler);
+  append_include_paths(compiler);
+  append_predefined_macros(compiler);
   switch (auto const linking_t = lua_getfield(state, -6, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
-    ret_t.linking.reserve(len);
-    auto linking = -1;
+    linking.reserve(len);
+    auto linking_idx = -1;
     for (auto i = 1; i <= len; ++i) {
-      switch (auto const value_t = lua_geti(state, linking, i)) {
+      switch (auto const value_t = lua_geti(state, linking_idx, i)) {
       case LUA_TSTRING:
-        ret_t.linking.push_back(lua_tolstring(state, -1, nullptr));
+        linking.push_back(lua_tolstring(state, -1, nullptr));
         break;
       default:
-        return Err(UnexpectedType("linking[i]", LUA_TSTRING, value_t));
+        throw UnexpectedType("linking[i]", LUA_TSTRING, value_t);
       }
-      --linking;
+      --linking_idx;
     }
     lua_pop(state, static_cast<int>(len));
   } break;
   case LUA_TNIL:
     break;
   default:
-    return Err(UnexpectedType("linking", LUA_TTABLE, linking_t));
+    throw UnexpectedType("linking", LUA_TTABLE, linking_t);
   }
 
   switch (auto const macro_t = lua_getfield(state, -7, "macros")) {
@@ -1168,11 +1162,11 @@ auto Module::make(Module_t type, lua_State *state)
         if (mac.find('=') != mac.npos) {
           // TODO: parse macro being set to value
         } else {
-          ret_t.defined_macros.insert(std::move(mac));
+          defined_macros.insert(std::move(mac));
         }
       } break;
       default:
-        return Err(UnexpectedType("macros[i]", LUA_TSTRING, value_t));
+        throw UnexpectedType("macros[i]", LUA_TSTRING, value_t);
       }
       --macros;
     }
@@ -1181,17 +1175,15 @@ auto Module::make(Module_t type, lua_State *state)
   case LUA_TNIL:
     break;
   default:
-    return Err(UnexpectedType("macros", LUA_TTABLE, macro_t));
+    throw UnexpectedType("macros", LUA_TTABLE, macro_t);
   }
 
   lua_pop(state, 6);
 
-#if 0
+  // #if 0
   std::cout << "---displaying---\n";
-  ret_t.display(std::cout);
-#endif
-
-  return Ok(std::move(ret_t));
+  display(std::cout);
+  // #endif
 }
 
 auto Module::gen_dep_tree() -> Opt<DepTreeErr> {
@@ -1201,11 +1193,11 @@ auto Module::gen_dep_tree() -> Opt<DepTreeErr> {
   if (m_m == decltype(m_m)::ERR)
     return m_m;
 
-  m.tree = m_m.get();
+  tree = m_m.get();
   try {
-    for (auto const &root : m.roots) {
-      if (auto m_err = m.tree.m.append_dep(root, m.includes, m.macros,
-                                           m.defined_macros, DepTree::ROOT_IDX);
+    for (auto const &root : roots) {
+      if (auto m_err = tree.m.append_dep(root, includes, macros, defined_macros,
+                                         DepTree::ROOT_IDX);
           m_err == decltype(m_err)::ERR) {
         return m_err;
       }
@@ -1219,21 +1211,21 @@ auto Module::gen_dep_tree() -> Opt<DepTreeErr> {
   return Opt();
 }
 
-auto Module::includes() const noexcept -> std::string {
+auto Module::format_includes() const -> std::string {
   auto res = string();
   res.reserve(256); // idk random number can def be optimized :)
-  for (auto const &path : m.includes) {
+  for (auto const &path : includes) {
     res += std::format(" -I{}", path.string());
   }
   return res;
 }
 
-auto Module::links() const noexcept -> std::string {
+auto Module::format_links() const -> std::string {
   // when we add dynamic library support, we'll have to worry about the -L flag
   // and shit
   auto res = string();
   res.reserve(256); // idk random number can def be optimized :)
-  for (auto const &path : m.linking) {
+  for (auto const &path : linking) {
     res += std::format("{} ", path.string());
   }
   return res;
@@ -1399,12 +1391,12 @@ auto CompilationPool::_thread_loop() noexcept -> void {
         continue;
       }
 
-      auto const include_path = mod->includes();
+      auto const include_path = mod->format_includes();
 
       auto const invoked_command =
-          std::format("{} {} -c {} -o {}/{}.o/{}.o", mod->compiler(),
-                      include_path, this_path.c_str(), mod->install_dir(),
-                      mod->name(), this_path.stem().c_str());
+          std::format("{} {} -c {} -o {}/{}.o/{}.o", mod->compiler,
+                      include_path, this_path.c_str(), mod->install_dir,
+                      mod->name, this_path.stem().c_str());
       std::cout << "[" << invoked_command << "]\n";
       std::cout.flush(); // this actually needs to stay here, something about if
                          // the system command does io operations having an
@@ -1412,7 +1404,7 @@ auto CompilationPool::_thread_loop() noexcept -> void {
       auto const res = system(invoked_command.c_str());
       if (res == 0) {
         auto res_lock = std::unique_lock(result_mtx);
-        result += std::format("{}/{}.o/{}.o ", mod->install_dir(), mod->name(),
+        result += std::format("{}/{}.o/{}.o ", mod->install_dir, mod->name,
                               this_path.stem().c_str());
       }
     }
@@ -1450,7 +1442,7 @@ struct Compiler final {
     // worry too much about memory allocations) auto includes = mod.includes();
 
     pool.init(&mod);
-    pool.add_task(mod.m.tree);
+    pool.add_task(mod.tree);
     pool.run();
     res = pool.get();
     return res;
@@ -1471,21 +1463,12 @@ auto install_exe(lua_State *state) noexcept -> int {
 
   // TODO: update these functions to throw exceptions
   try {
-    auto maybe_main_mod = Module::make(Module::EXE, state);
-    if (!maybe_main_mod.ok()) {
-      auto const msg =
-          std::visit([](auto &&e) -> string { return e.error() + '\n'; },
-                     *maybe_main_mod.err().get());
+    auto main_mod = Module(Module::EXE, state);
 
-      lua_pushstring(state, msg.c_str());
-      return lua_error(state);
-    }
-
-    auto main_mod = maybe_main_mod.get();
     auto ec = std::error_code{};
     if (fs::create_directories(
-            fs::path(std::format("{}/{}.o", main_mod.install_dir(),
-                                 main_mod.name())),
+            fs::path(
+                std::format("{}/{}.o", main_mod.install_dir, main_mod.name)),
             ec);
         ec) {
       std::cerr << ec.message() << '\n';
@@ -1523,6 +1506,9 @@ auto install_exe(lua_State *state) noexcept -> int {
   }
 #endif
     return 0;
+  } catch (ModuleErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
@@ -1544,47 +1530,49 @@ auto install_static(lua_State *state) noexcept -> int {
                     "to be of type table, found [%s]",
                     lua_typename(state, ret_t));
 
-  auto maybe_static_mod = Module::make(Module::STATIC, state);
-  if (!maybe_static_mod.ok()) {
-    auto const err_msg =
-        std::visit([](auto &&e) -> string { return e.error() + '\n'; },
-                   *maybe_static_mod.err().get());
-    lua_pushstring(state, err_msg.c_str());
+  try {
+    auto static_mod = Module(Module::STATIC, state);
+
+    auto ec = std::error_code{};
+    if (fs::create_directories(fs::path(
+            std::format("{}/{}.o", static_mod.install_dir, static_mod.name)));
+        ec) {
+      std::cerr << ec.message() << '\n';
+      lua_pushstring(state, "Unable to create directory");
+      return lua_error(state);
+    }
+    ec.clear();
+
+    if (auto m_err = static_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
+      auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
+                                  *m_err.err().get());
+      lua_pushstring(state, msg.c_str());
+      return lua_error(state);
+    }
+
+    auto const compiled_files = Compiler::compile(static_mod);
+    auto const invoked_command =
+        std::format("ar crs {}/lib{}.a {}", static_mod.install_dir,
+                    static_mod.name, compiled_files);
+
+    std::cout << '[' << invoked_command << "]\n";
+    std::cout.flush();
+    if (system(invoked_command.c_str()) != 0) {
+      lua_pushstring(
+          state, std::format("Error compiling [{}]", invoked_command).c_str());
+      return lua_error(state);
+    } else {
+      return 0;
+    }
+  } catch (ModuleErr const &e) {
+    lua_pushstring(state, e.what().c_str());
     return lua_error(state);
-  }
-
-  auto static_mod = maybe_static_mod.get();
-
-  auto ec = std::error_code{};
-  if (fs::create_directories(fs::path(
-          std::format("{}/{}.o", static_mod.install_dir(), static_mod.name())));
-      ec) {
-    std::cerr << ec.message() << '\n';
-    lua_pushstring(state, "Unable to create directory");
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
     return lua_error(state);
-  }
-  ec.clear();
-
-  if (auto m_err = static_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
-    auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
-                                *m_err.err().get());
-    lua_pushstring(state, msg.c_str());
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
     return lua_error(state);
-  }
-
-  auto const compiled_files = Compiler::compile(static_mod);
-  auto const invoked_command =
-      std::format("ar crs {}/lib{}.a {}", static_mod.install_dir(),
-                  static_mod.name(), compiled_files);
-
-  std::cout << '[' << invoked_command << "]\n";
-  std::cout.flush();
-  if (system(invoked_command.c_str()) != 0) {
-    lua_pushstring(
-        state, std::format("Error compiling [{}]", invoked_command).c_str());
-    return lua_error(state);
-  } else {
-    return 0;
   }
 }
 
