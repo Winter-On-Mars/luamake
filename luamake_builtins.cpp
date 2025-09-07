@@ -336,6 +336,7 @@ struct Module final {
     // clearing the memory allocator would act as the destructor
     // TODO: if performance becomes an issue, it might be good to switch this to
     // a hash set for the `find` function
+    // TODO: update this to use exceptions, switch from constructor functions
     struct M final {
       size_t num_files;
       size_t cap_files;
@@ -525,9 +526,9 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
   files[this_idx].end = end;
 
   std::cerr << std::format("generating ir for file [{}]\n", dep.c_str());
-  auto ir = ir::IR::parse(file_string);
+  auto const ir = ir::IR::parse(file_string);
   std::cerr << std::format("interpreting ir for file [{}]\n", dep.c_str());
-  auto const files_deps = ir.interpret();
+  auto const files_deps = interpreter.interpret(ir);
 
   std::cerr << std::format("file deps for [{}]\n", dep.c_str());
   for (auto const &file : files_deps) {
