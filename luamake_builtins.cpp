@@ -4,6 +4,7 @@
 #include "luamake_error.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
+#include <stdexcept>
 
 extern "C" {
 #include "lua/lua.h"
@@ -57,6 +58,34 @@ using std::pair, std::array, std::string, std::string_view, std::vector,
     std::unordered_map, std::unordered_set;
 
 using uint = unsigned int;
+
+auto constexpr lua_typename(int const type) -> char const * {
+  if (type <= 0 || LUA_NUMTYPES <= type) {
+    throw std::runtime_error("type is out of range to be a lua type");
+  }
+
+  switch (type) {
+  case LUA_TNIL:
+    return "LUA_TNIL";
+  case LUA_TBOOLEAN:
+    return "LUA_TBOOLEAN";
+  case LUA_TLIGHTUSERDATA:
+    return "LUA_TLIGHTUSERDATA";
+  case LUA_TNUMBER:
+    return "LUA_TNUMBER";
+  case LUA_TSTRING:
+    return "LUA_TSTRING";
+  case LUA_TTABLE:
+    return "LUA_TTABLE";
+  case LUA_TFUNCTION:
+    return "LUA_TFUNCTION";
+  case LUA_TUSERDATA:
+    return "LUA_TUSERDATA";
+  case LUA_TTHREAD:
+    return "LUA_TTHREAD";
+  }
+  unreachable();
+}
 
 auto skip_ws(char const *ch) -> char const * {
   while (*ch != 0) {
@@ -203,19 +232,17 @@ struct MissingField final {
 
 struct UnexpectedType final {
   string_view field_name;
-  // idk why the lua_typename function needs a lua_State* but fine
-  lua_State *state;
   int expected_type;
   int found_type;
-  UnexpectedType(string_view &&field_name, lua_State *state, int expected_type,
+  UnexpectedType(string_view &&field_name, int expected_type,
                  int found_type) noexcept
-      : field_name(field_name), state(state), expected_type(expected_type),
+      : field_name(field_name), expected_type(expected_type),
         found_type(found_type) {}
   auto error() const noexcept -> string {
     return std::format("Required field [{}] found, but was of type {}, "
                        "expected type {}, when constructing a module.",
-                       field_name, lua_typename(state, found_type),
-                       lua_typename(state, expected_type));
+                       field_name, lua_typename(found_type),
+                       lua_typename(expected_type));
   }
 };
 
@@ -1010,7 +1037,7 @@ auto Module::make(Module_t type, lua_State *state)
   case LUA_TNIL:
     return Err(MissingField("name"));
   default:
-    return Err(UnexpectedType("name", state, LUA_TSTRING, name_t));
+    return Err(UnexpectedType("name", LUA_TSTRING, name_t));
   }
 
   switch (type) {
@@ -1023,7 +1050,7 @@ auto Module::make(Module_t type, lua_State *state)
     case LUA_TNIL:
       return Err(MissingField("root"));
     default:
-      return Err(UnexpectedType("root", state, LUA_TSTRING, root_t));
+      return Err(UnexpectedType("root", LUA_TSTRING, root_t));
     }
     break;
   case STATIC: {
@@ -1034,7 +1061,7 @@ auto Module::make(Module_t type, lua_State *state)
       ret_t.roots.reserve(num_roots);
       for (lua_pushnil(state); lua_next(state, roots) != 0;) {
         if (auto const value_t = lua_type(state, -1); value_t != LUA_TSTRING) {
-          return Err(UnexpectedType("roots[i]", state, LUA_TSTRING, value_t));
+          return Err(UnexpectedType("roots[i]", LUA_TSTRING, value_t));
         }
         ret_t.roots.push_back(lua_tolstring(state, -1, nullptr));
         lua_pop(state, 1);
@@ -1043,7 +1070,7 @@ auto Module::make(Module_t type, lua_State *state)
     case LUA_TNIL:
       return Err(MissingField("roots"));
     default:
-      return Err(UnexpectedType("roots", state, LUA_TTABLE, root_t));
+      return Err(UnexpectedType("roots", LUA_TTABLE, root_t));
     }
   } break;
   case DYNAMIC:
@@ -1059,7 +1086,7 @@ auto Module::make(Module_t type, lua_State *state)
   case LUA_TNIL:
     return Err(MissingField("compiler"));
   default:
-    return Err(UnexpectedType("compiler", state, LUA_TTABLE, compiler_t));
+    return Err(UnexpectedType("compiler", LUA_TTABLE, compiler_t));
   }
 
   switch (auto const install_dir_t = lua_getfield(state, -4, "install_dir")) {
@@ -1069,8 +1096,7 @@ auto Module::make(Module_t type, lua_State *state)
   case LUA_TNIL:
     return Err(MissingField("install_dir"));
   default:
-    return Err(
-        UnexpectedType("install_dir", state, LUA_TSTRING, install_dir_t));
+    return Err(UnexpectedType("install_dir", LUA_TSTRING, install_dir_t));
   }
 
   ret_t.includes.reserve(10);
@@ -1095,7 +1121,7 @@ auto Module::make(Module_t type, lua_State *state)
         ret_t.includes.push_back(lua_tolstring(state, -1, nullptr));
         break;
       default:
-        return Err(UnexpectedType("include[i]", state, LUA_TSTRING, value_t));
+        return Err(UnexpectedType("include[i]", LUA_TSTRING, value_t));
       }
       --include;
     }
@@ -1104,7 +1130,7 @@ auto Module::make(Module_t type, lua_State *state)
   case LUA_TNIL:
     break;
   default:
-    return Err(UnexpectedType("include", state, LUA_TTABLE, include_t));
+    return Err(UnexpectedType("include", LUA_TTABLE, include_t));
   }
   ret_t.append_include_paths(ret_t.compiler);
   ret_t.append_predefined_macros(ret_t.compiler);
@@ -1119,7 +1145,7 @@ auto Module::make(Module_t type, lua_State *state)
         ret_t.linking.push_back(lua_tolstring(state, -1, nullptr));
         break;
       default:
-        return Err(UnexpectedType("linking[i]", state, LUA_TSTRING, value_t));
+        return Err(UnexpectedType("linking[i]", LUA_TSTRING, value_t));
       }
       --linking;
     }
@@ -1128,7 +1154,7 @@ auto Module::make(Module_t type, lua_State *state)
   case LUA_TNIL:
     break;
   default:
-    return Err(UnexpectedType("linking", state, LUA_TTABLE, linking_t));
+    return Err(UnexpectedType("linking", LUA_TTABLE, linking_t));
   }
 
   switch (auto const macro_t = lua_getfield(state, -7, "macros")) {
@@ -1146,7 +1172,7 @@ auto Module::make(Module_t type, lua_State *state)
         }
       } break;
       default:
-        return Err(UnexpectedType("macros[i]", state, LUA_TSTRING, value_t));
+        return Err(UnexpectedType("macros[i]", LUA_TSTRING, value_t));
       }
       --macros;
     }
@@ -1155,7 +1181,7 @@ auto Module::make(Module_t type, lua_State *state)
   case LUA_TNIL:
     break;
   default:
-    return Err(UnexpectedType("macros", state, LUA_TTABLE, macro_t));
+    return Err(UnexpectedType("macros", LUA_TTABLE, macro_t));
   }
 
   lua_pop(state, 6);
