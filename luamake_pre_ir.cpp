@@ -3,7 +3,6 @@
 
 #include <cstring>
 #include <format>
-#include <iostream>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -12,8 +11,7 @@
 #include <vector>
 namespace fs = std::filesystem;
 
-using std::string, std::string_view, std::vector, std::unordered_map,
-    std::unordered_set;
+using std::string, std::string_view, std::vector, std::unordered_map;
 
 namespace luamake {
 namespace ir {
@@ -326,70 +324,6 @@ auto IR::parse(FixedString const &file) -> IR {
   return Lexer::lex(file).parse_to_ir();
 }
 
-auto IR::interpret(unordered_map<string, Macro> &macros,
-                   unordered_set<string> &def_macros) -> vector<fs::path> {
-  auto vec = vector<fs::path>();
-  for (auto i = size_t{}; i < size;) {
-    interpret_impl(i, false, macros, def_macros, vec);
-  }
-  return vec;
-}
-
-auto IR::interpret_impl(size_t &i, bool interpret_elses,
-                        std::unordered_map<std::string, Macro> &macros,
-                        std::unordered_set<std::string> &def_macros,
-                        vector<fs::path> &vec) -> void {
-  switch (types[i]) {
-  case GLOBAL_INCLUDE: {
-    // TODO: check that this file *actually exists*
-    ++i;
-  } break;
-  case LOCAL_INCLUDE: {
-    vec.push_back(exprs[i++]);
-  } break;
-  case IFDEF: {
-    auto const checking_macro = exprs[i];
-    auto const defined =
-        macros.contains(checking_macro) || def_macros.contains(checking_macro);
-    ++i;
-    if (defined) {
-      while (i < size) {
-        if (types[i] == ELSE || types[i] == ENDIF || types[i] == ELIF)
-          break;
-        interpret_impl(i, false, macros, def_macros, vec);
-      }
-      if (i == size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
-      while (i < size && types[i] != ENDIF) {
-        ++i;
-      }
-      if (i == size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
-      ++i; // move over the ENDIF
-    } else {
-      while (i < size) {
-        if (!(types[i] == ELSE || types[i] == ENDIF || types[i] == ELIF))
-          ++i;
-      }
-      if (i == size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
-
-      interpret_impl(i, true, macros, def_macros, vec);
-
-      while (i < size && types[i] != ENDIF) {
-        ++i;
-      }
-      if (i == size) {
-        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
-      }
-    }
-  } break;
-  default:
-    throw Interpret_Exc(__LINE__, std::format("Not implimented, type = [{}]",
-                                              pretty_types(types[i])));
-  }
-}
-
 auto IR::check_size() -> void {
   if (size == cap) {
     auto const new_cap = cap * 2;
@@ -409,6 +343,69 @@ auto IR::check_size() -> void {
 auto IR::push(enum types &&t, string_view &&sv) -> void {
   types[size] = t;
   exprs[size++] = sv;
+}
+
+auto IR_Interpreter::interpret(IR const &ir) -> vector<fs::path> {
+  auto vec = vector<fs::path>();
+  for (auto i = size_t{}; i < ir.size;) {
+    interpret_impl(false, ir, i, vec);
+  }
+  return vec;
+}
+
+auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
+                                    size_t &i, vector<fs::path> &vec) -> void {
+  switch (ir.types[i]) {
+  case IR::GLOBAL_INCLUDE: {
+    // TODO: check that this file *actually exists*
+    ++i;
+  } break;
+  case IR::LOCAL_INCLUDE: {
+    vec.push_back(ir.exprs[i++]);
+  } break;
+  case IR::IFDEF: {
+    auto const checking_macro = ir.exprs[i];
+    auto const defined =
+        macros.contains(checking_macro) || def_macros.contains(checking_macro);
+    ++i;
+    if (defined) {
+      while (i < ir.size) {
+        if (ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
+            ir.types[i] == IR::ELIF)
+          break;
+        interpret_impl(false, ir, i, vec);
+      }
+      if (i == ir.size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+      while (i < ir.size && ir.types[i] != ir.ENDIF) {
+        ++i;
+      }
+      if (i == ir.size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+      ++i; // move over the ENDIF
+    } else {
+      while (i < ir.size) {
+        if (!(ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
+              ir.types[i] == IR::ELIF))
+          ++i;
+      }
+      if (i == ir.size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+
+      interpret_impl(true, ir, i, vec);
+
+      while (i < ir.size && ir.types[i] != IR::ENDIF) {
+        ++i;
+      }
+      if (i == ir.size) {
+        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+      }
+    }
+  } break;
+  default:
+    throw Interpret_Exc(__LINE__, std::format("Not implimented, type = [{}]",
+                                              IR::pretty_types(ir.types[i])));
+  }
 }
 } // namespace ir
 } // namespace luamake

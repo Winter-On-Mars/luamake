@@ -60,6 +60,8 @@ struct Macro final {
   std::string m;
 };
 
+struct IR_Interpreter;
+
 // TODO: current the parser is an aggressive parser,
 // see about how it performs changing to a lazy parser,
 // this would require changing the API, basically just having an
@@ -92,21 +94,12 @@ struct IR final {
   [[nodiscard]]
   static auto parse(FixedString const &) -> IR;
 
-  /**
-   * @throws Interpret_Exc <: Exception
-   * TODO: figure out return type
-   */
-  [[nodiscard]]
-  auto interpret(std::unordered_map<std::string, Macro> &,
-                 std::unordered_set<std::string> &)
-      -> std::vector<std::filesystem::path>;
-
 private:
   auto check_size() -> void;
   // auto push(enum types &&t, std::string_view const) -> void;
   auto push(enum types &&t, std::string_view &&) -> void;
 
-  auto constexpr pretty_types(enum types) -> char const *;
+  static auto constexpr pretty_types(enum types) -> char const *;
 
   struct Lexer final {
     enum types {
@@ -150,15 +143,34 @@ private:
 
     auto to_string(enum Lexer::types t) const -> std::string;
   };
-  auto interpret_impl(size_t &, bool, std::unordered_map<std::string, Macro> &,
-                      std::unordered_set<std::string> &,
-                      std::vector<std::filesystem::path> &) -> void;
 
   size_t size;
   size_t cap;
   std::unique_ptr<types[]> types;
   std::unique_ptr<std::string[]> exprs;
   friend Lexer;
+  friend IR_Interpreter;
+};
+
+struct IR_Interpreter final {
+  constexpr IR_Interpreter(std::vector<std::filesystem::path> &includes,
+                           std::unordered_map<std::string, Macro> &macros,
+                           std::unordered_set<std::string> &def_macros)
+      : includes(includes), macros(macros), def_macros(def_macros) {}
+
+  /**
+   * @throws Interpret_Exc <: Exception
+   */
+  [[nodiscard]]
+  auto interpret(IR const &) -> std::vector<std::filesystem::path>;
+
+private:
+  std::vector<std::filesystem::path> &includes;
+  std::unordered_map<std::string, Macro> &macros;
+  std::unordered_set<std::string> &def_macros;
+
+  auto interpret_impl(bool, IR const &, size_t &,
+                      std::vector<std::filesystem::path> &) -> void;
 };
 
 auto constexpr IR::pretty_types(enum types t) -> char const * {
