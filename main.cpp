@@ -369,7 +369,7 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
                   "}" NL},
       string_view{"function Build(builder)" NL
                   "    local dlib = {" NL
-                  "        root = \"src/dyn.cpp\"," NL
+                  "        roots = { \"src/dyn.cpp\" }," NL
                   "        compiler = Clang({})," NL
                   "        name = \"a\"," NL
                   "        version = \"0.0.1\"," NL
@@ -380,7 +380,7 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
                   },
       string_view{"function Build(builder)" NL
                   "    local slib = {" NL
-                  "        root = \"src/static.cpp\"," NL
+                  "        roots = { \"src/static.cpp\" }," NL
                   "        compiler = Clang({})," NL
                   "        name = \"a\"," NL
                   "        version = \"0.0.1\"," NL
