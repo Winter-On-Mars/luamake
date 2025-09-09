@@ -158,12 +158,22 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
                         std::format("character found = {}", fcontent[i]));
         }
       } break;
-      case OP_DEFINED: {
-        // TODO
-        throw Lex_Exc(__LINE__, string("Not implimented"));
-      } break;
       case IFDEF: {
         lex.types.push_back(IFDEF);
+        i = skip_ws(file.size, fcontent, i) + 1;
+        end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
+        lex.types.push_back(CHAR_LIT);
+        lex.lexemes.emplace_back(string_view{fcontent + i, fcontent + end});
+      } break;
+      case IFNDEF: {
+        lex.types.push_back(IFNDEF);
+        i = skip_ws(file.size, fcontent, i) + 1;
+        end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
+        lex.types.push_back(CHAR_LIT);
+        lex.lexemes.emplace_back(string_view{fcontent + i, fcontent + end});
+      } break;
+      case DEFINE: {
+        lex.types.push_back(DEFINE);
         i = skip_ws(file.size, fcontent, i) + 1;
         end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
         lex.types.push_back(CHAR_LIT);
@@ -248,6 +258,10 @@ auto IR::Lexer::parse_to_ir() -> IR {
     case ELSE:
       ++cur_t;
       ir.push(IR::ELSE, "");
+      break;
+    case DEFINE:
+      cur_t += 2;
+      ir.push(IR::DEFINE, lexemes[cur_lex++]);
       break;
     default:
       throw Lex_Exc(__LINE__, std::format("Not implimented, type = [{}]",
