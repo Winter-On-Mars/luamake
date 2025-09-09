@@ -201,7 +201,6 @@ struct MalformedInclude final : public DepTreeErr {
   };
 };
 
-// TODO: this is a fucky one, b/c it's both used by ModuleErr and DepTreeErr
 struct CAPI final : public ModuleErr, public DepTreeErr {
   explicit CAPI(string &&message) : ModuleErr(std::move(message)) {}
   ~CAPI() = default;
@@ -251,6 +250,27 @@ struct UnexpectedType final : public ModuleErr {
                        "expected type {}, when constructing a module.",
                        message, lua_typename(found_type),
                        lua_typename(expected_type));
+  }
+};
+
+struct UnexpectedCharacter final : public ModuleErr {
+  constexpr explicit UnexpectedCharacter(string &&ctx, char ch) noexcept
+      : ModuleErr(std::move(ctx)), ch(ch) {}
+  ~UnexpectedCharacter() final = default;
+  auto what() const -> string final {
+    return std::format("{} found {}", message, ch);
+  }
+
+  char ch;
+};
+
+struct MisformattedOutput final : public ModuleErr {
+  constexpr explicit MisformattedOutput(string &&command) noexcept
+      : ModuleErr(std::move(command)) {}
+  ~MisformattedOutput() final = default;
+  auto what() const -> string final {
+    return std::format("When running command {}, output was not as expected",
+                       message);
   }
 };
 
@@ -500,46 +520,34 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   tree.files[this_idx].start = start;
   tree.files[this_idx].end = end;
 
-  std::cerr << std::format("generating ir for file [{}]\n", dep.c_str());
   auto const ir = ir::IR::parse(file_string);
-  std::cerr << std::format("interpreting ir for file [{}]\n", dep.c_str());
   auto const files_deps = interpreter.interpret(ir);
 
-  std::cerr << std::format("file deps for [{}]\n", dep.c_str());
   for (auto const &file : files_deps) {
-    std::cerr << std::format("{} ", file.c_str());
-  }
-  std::cerr << '\n';
-
-  for (auto const &file : files_deps) {
-    for (auto const &include : includes) {
-      auto const p = fs::canonical(include / file);
-      std::cerr << std::format("p.parent_path()/p.stem() = [{}], "
-                               "dep.parent_path()/dep.stem() = [{}]\n",
-                               (p.parent_path() / p.stem()).string(),
-                               (dep.parent_path() / dep.stem()).string());
-      if (!fs::exists(p)) {
-        std::cerr << "File does not exist\n";
-        continue;
-      }
-      if (DepTree::determine_file_type(p.extension()) &&
-          p.parent_path() / p.stem() == dep.parent_path() / dep.stem()) {
-        std::cerr << "Ignoring\n";
-        break; // impl file including header file
-      }
-      append_dep(p, this_idx);
-    }
-  }
-
-#if 0
-  i this is all we really need to do to get everything up and working again :)
-  for (auto const &file : files_deps) {
-    if (auto m_error = append_dep(file, includes, macros, def_macros, this_idx);
-        !m_error.ok()) {
-      return m_error;
-    }
-  }
+    auto const maybe_file = [&]() -> std::optional<fs::path> {
+      for (auto const &include : includes) {
+        auto const p = fs::canonical(include / file);
+#if DEBUG
+        std::cerr << std::format("p.parent_path()/p.stem() = [{}], "
+                                 "dep.parent_path()/dep.stem() = [{}]\n",
+                                 (p.parent_path() / p.stem()).string(),
+                                 (dep.parent_path() / dep.stem()).string());
 #endif
+        if (!fs::exists(p)) {
+          continue;
+        }
+        if (DepTree::determine_file_type(p.extension()) &&
+            p.parent_path() / p.stem() == dep.parent_path() / dep.stem()) {
+          return std::nullopt; // impl file including header file
+        }
+        return p;
+      }
+      // TODO: update this to throw
+      return std::nullopt;
+    }();
+    if (maybe_file)
+      append_dep(maybe_file.value(), this_idx);
+  }
 
   tree.hashes[this_idx] = hash_fut.get();
 }
@@ -941,12 +949,12 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
          amount_read = getline(&buffer, &buffer_size, read_me)) {
       auto constexpr header = string_view{"#define "};
       if (strncmp(buffer, header.data(), header.size()) != 0) {
-        std::cerr << "\tError while processing macros, terminating\n";
-        std::cerr << "\tHere is the buffer :) [" << buffer << "]\n";
         fclose(read_me);
         free(buffer);
         close(read_pipe);
-        std::terminate();
+        throw MisformattedOutput(
+            std::format("echo | {} -dM -E -",
+                        string_view{compiler.data(), compiler.find(' ')}));
       }
 
       auto macro_start = header.size();
@@ -968,14 +976,13 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
       auto const macro_name =
           string_view{buffer + macro_start, buffer + macro_cur};
 
-      // TODO: throw something
       if (buffer[macro_cur] != ' ') {
-        std::cerr << "\tdefined macro ended on unexpected character ["
-                  << buffer[macro_cur] << "]\n";
         fclose(read_me);
         free(buffer);
         close(read_pipe);
-        std::terminate();
+        throw UnexpectedCharacter(
+            "Defined macro ended with unexpected character, expected ' '",
+            buffer[macro_cur]);
       }
       macro_start = macro_cur + 1;
       ++macro_cur;
@@ -994,14 +1001,7 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
     }
 
     if (errno != 0) {
-      // idk error happened
-      std::cerr << "\terror occured :) when looking at macros\n";
-      // the man pages say that perror can change errno if something happens
-      // with perror, so we just store the error before hand
-      auto const actual_error = errno;
-      perror("getline");
-      throw CAPI(strerror(actual_error));
-      std::terminate();
+      throw CAPI(strerror(errno));
     }
 
     fclose(read_me);
@@ -1016,8 +1016,8 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
 
 Module::Module(Module_t &&type, lua_State *state)
     : type(type), tree(), roots(), includes(), linking(), macros(),
-      def_macros(), interpreter(includes, macros, def_macros), compiler(),
-      name(nullptr), install_dir(nullptr) {
+      def_macros(), interpreter(macros, def_macros), compiler(), name(nullptr),
+      install_dir(nullptr) {
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING:
     name = lua_tolstring(state, -1, nullptr);
@@ -1176,10 +1176,10 @@ Module::Module(Module_t &&type, lua_State *state)
 
   lua_pop(state, 6);
 
-  // #if 0
+#if DEBUG
   std::cout << "---displaying---\n";
   display(std::cout);
-  // #endif
+#endif
 }
 
 auto Module::gen_dep_tree() -> void {
@@ -1189,6 +1189,10 @@ auto Module::gen_dep_tree() -> void {
   for (auto const &root : roots) {
     append_dep(root, DepTree::ROOT_IDX);
   }
+
+#if DEBUG
+  tree.display(std::cout);
+#endif
 }
 
 auto Module::format_includes() const -> std::string {
@@ -1459,27 +1463,26 @@ auto install_exe(lua_State *state) noexcept -> int {
 
     main_mod.gen_dep_tree();
 
-#if 0
-  auto const actually_compiled_files = Compiler::compile(main_mod);
+    // #if 0
+    auto const actually_compiled_files = Compiler::compile(main_mod);
 
-  // because of the format of `actually_compiled_files` for the best
-  // formatting of the command there shouldn't be a space between it and the
-  // -o
-  auto const invoked_command = std::format(
-      "{} -o {}/{} {} {}", main_mod.compiler(), main_mod.install_dir(),
-      main_mod.name(), actually_compiled_files, main_mod.links());
+    // because of the format of `actually_compiled_files` for the best
+    // formatting of the command there shouldn't be a space between it and the
+    // -o
+    auto const invoked_command = std::format(
+        "{} -o {}/{} {} {}", main_mod.compiler, main_mod.install_dir,
+        main_mod.name, actually_compiled_files, main_mod.format_links());
 
-  std::cout << "[" << invoked_command << "]\n";
-  std::cout.flush();
+    std::cout << "[" << invoked_command << "]\n";
+    std::cout.flush();
 
-  if (system(invoked_command.c_str()) != 0) {
-    lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
-    return lua_error(state);
-  } else {
-    return 0;
-  }
-#endif
-    return 0;
+    if (system(invoked_command.c_str()) != 0) {
+      lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
+      return lua_error(state);
+    } else {
+      return 0;
+    }
+    // #endif
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
