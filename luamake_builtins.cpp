@@ -1,7 +1,6 @@
 #include "luamake_builtins.hpp"
 
 #include "common.hpp"
-#include "luamake_error.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
 
@@ -139,8 +138,6 @@ auto display_string_view(string_view const str) noexcept -> void {
 struct Compiler;
 struct CompilationPool;
 
-// TODO: change the error for dep tree
-
 struct ModuleErr {
   constexpr ModuleErr(string &&message) noexcept : message(message) {}
   virtual ~ModuleErr() = default;
@@ -267,9 +264,12 @@ struct Module final {
   /**
    * @throws ModuleErr
    */
-  Module(Module_t &&type, lua_State *state);
+  Module(Module_t &&type, lua_State *state) noexcept(false);
 
-  auto gen_dep_tree() -> Opt<DepTreeErr>;
+  /**
+   * @throws
+   */
+  auto gen_dep_tree() noexcept(false) -> void;
 
   // TODO: update these to return FixedString
   auto format_includes() const -> string;
@@ -298,7 +298,7 @@ struct Module final {
      * @throws DepTreeErr | std::bad_alloc
      */
     [[nodiscard]]
-    DepTree(size_t const num_files = 8);
+    DepTree(size_t const num_files = 8) noexcept(false);
 
     DepTree(DepTree const &) = delete;
     DepTree &operator=(DepTree const &) = delete;
@@ -352,12 +352,6 @@ struct Module final {
     [[nodiscard]]
     auto append_path(fs::path const &) noexcept
         -> pair<unsigned int, unsigned int>;
-    /**
-     * @throws DepTreeErr
-     */
-    auto append_dep(fs::path const &, vector<fs::path> const &,
-                    unordered_map<string, ir::Macro> &, unordered_set<string> &,
-                    size_t const) -> void;
     [[nodiscard]]
     auto get_path(size_t const) const noexcept -> fs::path;
     [[nodiscard]]
@@ -366,7 +360,7 @@ struct Module final {
     /**
      * @throws std::bad_alloc
      */
-    auto resize() noexcept -> void;
+    auto resize() noexcept(false) -> void;
 
     // basically making the assumption that a project isn't gonna have
     // size_t.max files in it, idk if that's even physically possible
@@ -376,7 +370,7 @@ struct Module final {
     /**
      * @throws DepTreeErr
      */
-    static auto get_file_content(FILE *file) noexcept -> FixedString;
+    static auto get_file_content(FILE *file) noexcept(false) -> FixedString;
 
     auto display_impl(std::ostream &out, unsigned int const depth,
                       unsigned int const idx) const noexcept -> void;
@@ -401,7 +395,7 @@ struct Module final {
   vector<fs::path> linking;
   std::unordered_map<string, ir::Macro>
       macros; // these are all macros with values
-  std::unordered_set<string> defined_macros;
+  std::unordered_set<string> def_macros;
   ir::IR_Interpreter interpreter;
   std::string compiler;
   char const *name;
@@ -417,6 +411,10 @@ struct Module final {
    * @throws CAPI
    */
   auto append_predefined_macros(string_view const) -> void;
+  /**
+   * @throws DepTreeErr
+   */
+  auto append_dep(fs::path const &, size_t const) -> void;
 
   friend CompilationPool;
   friend Compiler;
@@ -446,9 +444,9 @@ auto Module::DepTree::append_path(fs::path const &path) noexcept
   if (auto &&[found, start, end] = find(canonical_path.c_str()); found) {
     return std::make_pair(start, end);
   }
-  auto start = all_paths.size;
+  auto const start = all_paths.size;
   all_paths.append(canonical_path.string());
-  auto end = all_paths.size;
+  auto const end = all_paths.size;
 
   if (start >= std::numeric_limits<unsigned int>::max() ||
       end >= std::numeric_limits<unsigned int>::max()) {
@@ -464,47 +462,43 @@ auto Module::DepTree::append_path(fs::path const &path) noexcept
                         static_cast<unsigned int>(end));
 }
 
-auto Module::DepTree::append_dep(fs::path const &dep,
-                                 vector<fs::path> const &includes,
-                                 unordered_map<string, ir::Macro> &macros,
-                                 unordered_set<string> &def_macros,
-                                 size_t const parent_idx) -> void {
+auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   auto file = File(dep, File::READ);
   if (!file)
-    throw FileDoesNotExist(dep, get_path(parent_idx));
+    throw FileDoesNotExist(dep, tree.get_path(parent_idx));
 
   auto const file_string = DepTree::get_file_content(file);
   auto &&[fcontent, fsize] = file_string;
 
-  if (num_files == cap_files) {
-    resize();
+  if (tree.num_files == tree.cap_files) {
+    tree.resize();
   }
-  auto const this_idx = num_files;
-  if (parent_idx != ROOT_IDX)
-    deps[parent_idx].push_back(static_cast<unsigned int>(this_idx));
-  ++num_files;
+  auto const this_idx = tree.num_files;
+  if (parent_idx != DepTree::ROOT_IDX)
+    tree.deps[parent_idx].push_back(static_cast<unsigned int>(this_idx));
+  ++tree.num_files;
 
-  auto &&[start, end] = append_path(dep);
+  auto &&[start, end] = tree.append_path(dep);
   auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
     return fnv1a(fsize, fcontent);
   });
   auto const ftype = DepTree::determine_file_type(dep.extension());
-  if (ftype == SourceFile_t::HEADER) {
+  if (ftype == DepTree::SourceFile_t::HEADER) {
     auto constexpr potential_extensions = array<string_view, 2>{{".cpp", ".c"}};
     auto const potential_impl = (dep.parent_path() / dep.stem()).string();
     for (auto const &potential_extension : potential_extensions) {
       auto const possible_path =
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
-        append_dep(possible_path, includes, macros, def_macros, this_idx);
+        append_dep(possible_path, this_idx);
       }
     }
     // HOL
   }
 
-  types[this_idx] = ftype;
-  files[this_idx].start = start;
-  files[this_idx].end = end;
+  tree.types[this_idx] = ftype;
+  tree.files[this_idx].start = start;
+  tree.files[this_idx].end = end;
 
   std::cerr << std::format("generating ir for file [{}]\n", dep.c_str());
   auto const ir = ir::IR::parse(file_string);
@@ -527,7 +521,7 @@ auto Module::DepTree::append_dep(fs::path const &dep,
   }
 #endif
 
-  hashes[this_idx] = hash_fut.get();
+  tree.hashes[this_idx] = hash_fut.get();
 }
 
 auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
@@ -565,7 +559,7 @@ auto Module::DepTree::find(string_view const path) const noexcept
   return std::make_tuple(false, 0, 0);
 }
 
-auto Module::DepTree::resize() noexcept -> void {
+auto Module::DepTree::resize() noexcept(false) -> void {
   auto const next_cap = 3 * cap_files / 2;
   // these are basic types so we *should* just be able to memmov them
   auto n_types = std::make_unique<SourceFile_t[]>(next_cap);
@@ -665,7 +659,8 @@ auto SourceFile::deserialize(fs::path const &path) noexcept -> SourceFile {
 
 // this function could probably have better error handling, but this is fine for
 // now
-auto Module::DepTree::get_file_content(FILE *file) noexcept -> FixedString {
+auto Module::DepTree::get_file_content(FILE *file) noexcept(false)
+    -> FixedString {
   if (fseek(file, 0, SEEK_END) == -1)
     throw CAPI(strerror(errno));
 
@@ -771,8 +766,8 @@ auto Module::display(std::ostream &out) const noexcept -> void {
   out << "}\n";
 
   out << "defined_macros = ";
-  out << "[" << defined_macros.size() << "]{\n";
-  for (auto const &name : defined_macros) {
+  out << "[" << def_macros.size() << "]{\n";
+  for (auto const &name : def_macros) {
     out << name << ",\n";
   }
   out << "}\n";
@@ -946,7 +941,7 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
       // TODO: add checks to make sure we're not out of bounds, but this seems
       // to be working fine now as a hack :)
       if (buffer[macro_cur] == ' ' && buffer[macro_cur + 1] == '\n') {
-        defined_macros.emplace(buffer + macro_start, buffer + macro_cur - 1);
+        def_macros.emplace(buffer + macro_start, buffer + macro_cur - 1);
         continue;
       }
 
@@ -1001,8 +996,8 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
 
 Module::Module(Module_t &&type, lua_State *state)
     : type(type), tree(), roots(), includes(), linking(), macros(),
-      defined_macros(), interpreter(includes, macros, defined_macros),
-      compiler(), name(nullptr), install_dir(nullptr) {
+      def_macros(), interpreter(includes, macros, def_macros), compiler(),
+      name(nullptr), install_dir(nullptr) {
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING:
     name = lua_tolstring(state, -1, nullptr);
@@ -1141,7 +1136,7 @@ Module::Module(Module_t &&type, lua_State *state)
         if (mac.find('=') != mac.npos) {
           // TODO: parse macro being set to value
         } else {
-          defined_macros.insert(std::move(mac));
+          def_macros.insert(std::move(mac));
         }
       } break;
       default:
@@ -1165,23 +1160,13 @@ Module::Module(Module_t &&type, lua_State *state)
   // #endif
 }
 
-auto Module::gen_dep_tree() -> Opt<DepTreeErr> {
-  using Opt = Opt<DepTreeErr>;
-
+auto Module::gen_dep_tree() -> void {
   // we probably don't need this, b/c the constructor will be called when we
-  // originally construct this module tree = DepTree();
-  try {
-    for (auto const &root : roots) {
-      tree.append_dep(root, includes, macros, defined_macros,
-                      DepTree::ROOT_IDX);
-    }
-  } catch (ir::Exception const &e) {
-    std::cerr << e.what() << '\n';
-  } catch (...) {
-    std::cerr << "Something was caught.\n";
+  // originally construct this module
+  // [[tree = DepTree();]]
+  for (auto const &root : roots) {
+    append_dep(root, DepTree::ROOT_IDX);
   }
-
-  return Opt();
 }
 
 auto Module::format_includes() const -> std::string {
@@ -1194,8 +1179,8 @@ auto Module::format_includes() const -> std::string {
 }
 
 auto Module::format_links() const -> std::string {
-  // when we add dynamic library support, we'll have to worry about the -L flag
-  // and shit
+  // when we add dynamic library support, we'll have to worry about the -L
+  // flag and shit
   auto res = string();
   res.reserve(256); // idk random number can def be optimized :)
   for (auto const &path : linking) {
@@ -1224,8 +1209,8 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
     if (lua_type(state, -1) != LUA_TSTRING) {
       lua_pushstring(
           state,
-          "Incorrect type in `warnings` table"); // TODO: update this to include
-                                                 // the found type
+          "Incorrect type in `warnings` table"); // TODO: update this to
+                                                 // include the found type
       lua_error(state);
       return "";
     }
@@ -1322,8 +1307,8 @@ auto CompilationPool::run() -> void {
 auto CompilationPool::add_task(Module::DepTree const &sf) -> void {
   auto lock = std::unique_lock(task_mtx);
   // this is a really hacky solution to fix the issues of compiling the same
-  // source multiple times, this is probably where that hash set solution would
-  // probably make things faster :)
+  // source multiple times, this is probably where that hash set solution
+  // would probably make things faster :)
   auto lowest = uint{0};
   remaining_tasks.reserve(sf.num_files);
   for (auto i = size_t{}; i < sf.num_files; ++i) {
@@ -1370,8 +1355,8 @@ auto CompilationPool::_thread_loop() noexcept -> void {
                       include_path, this_path.c_str(), mod->install_dir,
                       mod->name, this_path.stem().c_str());
       std::cout << "[" << invoked_command << "]\n";
-      std::cout.flush(); // this actually needs to stay here, something about if
-                         // the system command does io operations having an
+      std::cout.flush(); // this actually needs to stay here, something about
+                         // if the system command does io operations having an
                          // unflushed stdout can cause problems
       auto const res = system(invoked_command.c_str());
       if (res == 0) {
@@ -1409,9 +1394,10 @@ struct Compiler final {
   static auto compile(Module const &mod) noexcept -> string {
     auto res = string();
     auto pool = CompilationPool(std::thread::hardware_concurrency() - 1);
-    // pass this value to the _thread_loop function so we don't have to call it
-    // in each thread (plus we can make it a string_view so it shouldn't have to
-    // worry too much about memory allocations) auto includes = mod.includes();
+    // pass this value to the _thread_loop function so we don't have to call
+    // it in each thread (plus we can make it a string_view so it shouldn't
+    // have to worry too much about memory allocations) auto includes =
+    // mod.includes();
 
     pool.init(&mod);
     pool.add_task(mod.tree);
@@ -1478,6 +1464,9 @@ auto install_exe(lua_State *state) noexcept -> int {
   } catch (DepTreeErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
+  } catch (ir::Exception const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
@@ -1532,6 +1521,9 @@ auto install_static(lua_State *state) noexcept -> int {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
   } catch (DepTreeErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (ir::Exception const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
   } catch (std::exception const &e) {
@@ -1637,8 +1629,8 @@ auto link_static(lua_State *state) noexcept -> int {
     return lua_error(state);
   }
   auto const roots = lua_absindex(state, -1);
-  // i'm just assuming that this table is an array, and that the user won't mess
-  // that up
+  // i'm just assuming that this table is an array, and that the user won't
+  // mess that up
   auto init_include_tbl_len = lua_rawlen(state, -2);
   for (lua_pushnil(state); lua_next(state, roots); ++init_include_tbl_len) {
     LUA_ASSERT_FORMAT(
