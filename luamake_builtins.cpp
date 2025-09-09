@@ -35,7 +35,6 @@ extern "C" {
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #define LUA_ASSERT(L, A, B, ERROR)                                             \
@@ -149,15 +148,20 @@ struct ModuleErr {
   std::string message;
 };
 
-struct EmptyFileName final {
-  fs::path path;
-  explicit EmptyFileName(fs::path const &path) noexcept : path(path) {}
-  auto error() const noexcept -> string {
-    return string("In [") + path.string() + "] found empty include path.";
-  };
+struct DepTreeErr {
+  virtual ~DepTreeErr() = default;
+  virtual auto what() const -> string = 0;
 };
 
-struct FileDoesNotExist final {
+struct EmptyFileName final : public DepTreeErr {
+  explicit EmptyFileName(fs::path const &path) noexcept : path(path) {}
+  auto what() const -> string final {
+    return std::format("In [{}] found empty include path.", path.string());
+  };
+  fs::path path;
+};
+
+struct FileDoesNotExist final : public DepTreeErr {
   fs::path name;
   fs::path parent;
 
@@ -165,7 +169,7 @@ struct FileDoesNotExist final {
                             fs::path const &parent) noexcept
       : name(fname), parent(parent) {}
 
-  auto error() const noexcept -> string {
+  auto what() const -> string final {
     if (parent == fs::current_path()) {
       return std::format("Attempting to open file [{}] that does not exist.",
                          name.c_str());
@@ -177,59 +181,54 @@ struct FileDoesNotExist final {
   };
 };
 
-struct NonTerminatedString final {
+struct NonTerminatedString final : public DepTreeErr {
   fs::path name;
 
   explicit NonTerminatedString(fs::path const &fname) noexcept : name(fname) {}
 
-  auto error() const noexcept -> string {
+  auto what() const -> string final {
     return std::format(
         "File [{}] contains a non-terminating string in an include path.",
         name.c_str());
   };
 };
 
-struct MalformedInclude final {
+struct MalformedInclude final : public DepTreeErr {
   fs::path name;
 
   explicit MalformedInclude(fs::path const &fname) noexcept : name(fname) {}
 
-  auto error() const noexcept -> string {
+  auto what() const -> string final {
     return std::format("File [{}] contains a malformed include path",
                        name.c_str());
   };
 };
 
 // TODO: this is a fucky one, b/c it's both used by ModuleErr and DepTreeErr
-struct CAPI final : public ModuleErr {
-  explicit CAPI(string &&message) noexcept : ModuleErr(std::move(message)) {}
+struct CAPI final : public ModuleErr, public DepTreeErr {
+  explicit CAPI(string &&message) : ModuleErr(std::move(message)) {}
   ~CAPI() = default;
-  auto error() const noexcept -> string { return message; }
   auto what() const -> string final { return message; }
 };
 
-struct MemoryAlloc final {
-  char const *message;
-  explicit MemoryAlloc(char const *const message) noexcept : message(message) {}
-  auto error() const noexcept -> string {
+struct MemoryAlloc final : public DepTreeErr {
+  char const *fn_name;
+  explicit MemoryAlloc(char const *const fn_name) : fn_name(fn_name) {}
+  auto what() const -> string final {
     return std::format("Error while allocating memory in function [{}]",
-                       message);
+                       fn_name);
   }
 };
 
-struct NonTerminatedPreprocessor final {
+struct NonTerminatedPreprocessor final : public DepTreeErr {
   fs::path file;
   explicit NonTerminatedPreprocessor(fs::path const &file) noexcept
       : file(file) {}
-  auto error() const noexcept -> string {
+  auto what() const -> string {
     return std::format("Error while processing the preprocessor in file [{}]",
                        file.c_str());
   }
 };
-
-using DepTreeErr = std::variant<EmptyFileName, FileDoesNotExist,
-                                NonTerminatedString, MalformedInclude, CAPI,
-                                MemoryAlloc, NonTerminatedPreprocessor>;
 
 struct MissingField final : public ModuleErr {
   constexpr explicit MissingField(string &&field_name) noexcept
@@ -295,6 +294,12 @@ struct Module final {
       MISC,
     };
 
+    /**
+     * @throws DepTreeErr | std::bad_alloc
+     */
+    [[nodiscard]]
+    DepTree(size_t const num_files = 8);
+
     DepTree(DepTree const &) = delete;
     DepTree &operator=(DepTree const &) = delete;
 
@@ -337,43 +342,41 @@ struct Module final {
     // TODO: if performance becomes an issue, it might be good to switch this to
     // a hash set for the `find` function
     // TODO: update this to use exceptions, switch from constructor functions
-    struct M final {
-      size_t num_files;
-      size_t cap_files;
-      OwnedString all_paths;
-      std::unique_ptr<SourceFile_t[]> types;
-      std::unique_ptr<StringViews[]> files;
-      std::unique_ptr<vector<unsigned int>[]> deps;
-      std::unique_ptr<size_t[]> hashes;
-
-      [[nodiscard]]
-      static auto make(size_t const num_files = 8) noexcept
-          -> Result<M, DepTreeErr>;
-      [[nodiscard]]
-      auto append_path(fs::path const &) noexcept
-          -> pair<unsigned int, unsigned int>;
-      [[nodiscard]]
-      auto append_dep(fs::path const &, vector<fs::path> const &,
-                      unordered_map<string, ir::Macro> &,
-                      unordered_set<string> &, size_t const) -> Opt<DepTreeErr>;
-      [[nodiscard]]
-      auto get_path(size_t const) const noexcept -> fs::path;
-      [[nodiscard]]
-      auto find(string_view const) const noexcept
-          -> std::tuple<bool, unsigned int, unsigned int>;
-      /**
-       * @throws std::bad_alloc
-       */
-      auto resize() noexcept -> void;
-    } m;
+    size_t num_files;
+    size_t cap_files;
+    OwnedString all_paths;
+    std::unique_ptr<SourceFile_t[]> types;
+    std::unique_ptr<StringViews[]> files;
+    std::unique_ptr<vector<unsigned int>[]> deps;
+    std::unique_ptr<size_t[]> hashes;
+    [[nodiscard]]
+    auto append_path(fs::path const &) noexcept
+        -> pair<unsigned int, unsigned int>;
+    /**
+     * @throws DepTreeErr
+     */
+    auto append_dep(fs::path const &, vector<fs::path> const &,
+                    unordered_map<string, ir::Macro> &, unordered_set<string> &,
+                    size_t const) -> void;
+    [[nodiscard]]
+    auto get_path(size_t const) const noexcept -> fs::path;
+    [[nodiscard]]
+    auto find(string_view const) const noexcept
+        -> std::tuple<bool, unsigned int, unsigned int>;
+    /**
+     * @throws std::bad_alloc
+     */
+    auto resize() noexcept -> void;
 
     // basically making the assumption that a project isn't gonna have
     // size_t.max files in it, idk if that's even physically possible
     // so this *seems like* a valid assumption
     static constexpr auto ROOT_IDX = static_cast<size_t>(-1);
 
-    static auto get_file_content(FILE *file) noexcept
-        -> Result<FixedString, DepTreeErr>;
+    /**
+     * @throws DepTreeErr
+     */
+    static auto get_file_content(FILE *file) noexcept -> FixedString;
 
     auto display_impl(std::ostream &out, unsigned int const depth,
                       unsigned int const idx) const noexcept -> void;
@@ -383,9 +386,6 @@ struct Module final {
     static auto deserialize_impl(File &file) noexcept -> SourceFile;
     */
 
-    DepTree() = default;
-    DepTree(DepTree::M &&m) noexcept : m(std::move(m)) {}
-    friend Result<DepTree, DepTreeErr>;
     friend Compiler;
     friend CompilationPool;
     friend Module;
@@ -422,31 +422,25 @@ struct Module final {
   friend Compiler;
 };
 
-auto Module::DepTree::M::make(size_t const num_files) noexcept
-    -> Result<DepTree::M, DepTreeErr> {
-  using Ok = Result<DepTree::M, DepTreeErr>::Ok;
-  using Err = Result<DepTree::M, DepTreeErr>::Err;
+Module::DepTree::DepTree(size_t const num_files) {
+  types = std::make_unique<SourceFile_t[]>(num_files);
+  files = std::make_unique<StringViews[]>(num_files);
+  deps = std::make_unique<vector<unsigned int>[]>(num_files);
+  hashes = std::make_unique<size_t[]>(num_files);
 
-  try {
-    auto const paths_size = num_files * (sizeof(char) * 15 + 1);
-    auto *paths = (char *)malloc(paths_size);
-    if (paths == nullptr)
-      return Err(CAPI(strerror(errno)));
-    std::memset(paths, 0, paths_size);
+  auto const paths_size = num_files * (sizeof(char) * 15 + 1);
+  auto *paths = (char *)malloc(paths_size);
+  if (paths == nullptr)
+    throw CAPI(strerror(errno));
+  std::memset(paths, 0, paths_size);
 
-    auto types = std::make_unique<SourceFile_t[]>(num_files);
-    auto files = std::make_unique<StringViews[]>(num_files);
-    auto deps = std::make_unique<vector<unsigned int>[]>(num_files);
-    auto hashes = std::make_unique<size_t[]>(num_files);
+  all_paths = OwnedString(paths, paths_size);
 
-    return Ok(M{0, num_files, OwnedString(paths, paths_size), std::move(types),
-                std::move(files), std::move(deps), std::move(hashes)});
-  } catch (std::exception const &e) {
-    return Err(MemoryAlloc(e.what()));
-  }
+  this->num_files = 0;
+  cap_files = num_files;
 }
 
-auto Module::DepTree::M::append_path(fs::path const &path) noexcept
+auto Module::DepTree::append_path(fs::path const &path) noexcept
     -> pair<unsigned int, unsigned int> {
   auto const canonical_path = fs::canonical(path);
   if (auto &&[found, start, end] = find(canonical_path.c_str()); found) {
@@ -470,25 +464,16 @@ auto Module::DepTree::M::append_path(fs::path const &path) noexcept
                         static_cast<unsigned int>(end));
 }
 
-auto Module::DepTree::M::append_dep(fs::path const &dep,
-                                    vector<fs::path> const &includes,
-                                    unordered_map<string, ir::Macro> &macros,
-                                    unordered_set<string> &def_macros,
-                                    size_t const parent_idx)
-    -> Opt<DepTreeErr> {
-  using Opt = Opt<DepTreeErr>;
-  using Err = Opt::Err;
-
+auto Module::DepTree::append_dep(fs::path const &dep,
+                                 vector<fs::path> const &includes,
+                                 unordered_map<string, ir::Macro> &macros,
+                                 unordered_set<string> &def_macros,
+                                 size_t const parent_idx) -> void {
   auto file = File(dep, File::READ);
   if (!file)
-    return Err(FileDoesNotExist(dep, get_path(parent_idx)));
+    throw FileDoesNotExist(dep, get_path(parent_idx));
 
-  auto maybe_file_content = DepTree::get_file_content(file);
-  if (maybe_file_content == decltype(maybe_file_content)::ERR) {
-    return maybe_file_content;
-  }
-
-  auto file_string = maybe_file_content.get();
+  auto const file_string = DepTree::get_file_content(file);
   auto &&[fcontent, fsize] = file_string;
 
   if (num_files == cap_files) {
@@ -511,11 +496,7 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
       auto const possible_path =
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
-        if (auto m_error = append_dep(possible_path, includes, macros,
-                                      def_macros, this_idx);
-            !m_error.ok()) {
-          return m_error;
-        }
+        append_dep(possible_path, includes, macros, def_macros, this_idx);
       }
     }
     // HOL
@@ -547,11 +528,9 @@ auto Module::DepTree::M::append_dep(fs::path const &dep,
 #endif
 
   hashes[this_idx] = hash_fut.get();
-
-  return Opt();
 }
 
-auto Module::DepTree::M::get_path(size_t const idx) const noexcept -> fs::path {
+auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   if (idx == ROOT_IDX)
     return fs::current_path();
   auto &&[start, end] = files[idx];
@@ -560,7 +539,7 @@ auto Module::DepTree::M::get_path(size_t const idx) const noexcept -> fs::path {
 
 // this could (and probably should (if possible)) be rewritten to use the files
 // array(?)
-auto Module::DepTree::M::find(string_view const path) const noexcept
+auto Module::DepTree::find(string_view const path) const noexcept
     -> std::tuple<bool, unsigned int, unsigned int> {
   auto const *start = all_paths.buffer;
   auto const *current = all_paths.buffer;
@@ -586,7 +565,7 @@ auto Module::DepTree::M::find(string_view const path) const noexcept
   return std::make_tuple(false, 0, 0);
 }
 
-auto Module::DepTree::M::resize() noexcept -> void {
+auto Module::DepTree::resize() noexcept -> void {
   auto const next_cap = 3 * cap_files / 2;
   // these are basic types so we *should* just be able to memmov them
   auto n_types = std::make_unique<SourceFile_t[]>(next_cap);
@@ -611,7 +590,7 @@ auto Module::DepTree::M::resize() noexcept -> void {
 
 auto Module::DepTree::display(std::ostream &out,
                               unsigned int const depth) const noexcept -> void {
-  out << "All string = [" << string_view{m.all_paths.buffer, m.all_paths.size}
+  out << "All string = [" << string_view{all_paths.buffer, all_paths.size}
       << "]\n";
   out.flush();
   display_impl(out, depth, 0);
@@ -628,7 +607,7 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 
   out << indents << "{\n";
   out << indents << "\"type\":\"";
-  switch (m.types[idx]) {
+  switch (types[idx]) {
   case IMPL:
     out << "IMPL";
     break;
@@ -645,15 +624,15 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
   out << "\",\n";
 
   out << indents << "\"path\":\""
-      << string_view{m.all_paths.buffer + m.files[idx].start,
-                     m.all_paths.buffer + m.files[idx].end}
+      << string_view{all_paths.buffer + files[idx].start,
+                     all_paths.buffer + files[idx].end}
       << "\",\n";
 
-  out << std::hex << indents << "\"hash\":" << m.hashes[idx] << ",\n";
+  out << std::hex << indents << "\"hash\":" << hashes[idx] << ",\n";
 
   out << indents << "\"deps\":[\n";
 
-  for (auto const dep_idx : m.deps[idx]) {
+  for (auto const dep_idx : deps[idx]) {
     display_impl(out, depth + 1, dep_idx);
   }
 
@@ -684,31 +663,30 @@ auto SourceFile::deserialize(fs::path const &path) noexcept -> SourceFile {
 }
 */
 
-auto Module::DepTree::get_file_content(FILE *file) noexcept
-    -> Result<FixedString, DepTreeErr> {
-  using Ok = decltype(get_file_content(file))::Ok;
-  using Err = decltype(get_file_content(file))::Err;
+// this function could probably have better error handling, but this is fine for
+// now
+auto Module::DepTree::get_file_content(FILE *file) noexcept -> FixedString {
   if (fseek(file, 0, SEEK_END) == -1)
-    return Err(CAPI(strerror(errno)));
+    throw CAPI(strerror(errno));
 
   auto const _fsize = ftell(file);
   if (_fsize == -1)
-    return Err(CAPI(strerror(errno)));
+    throw CAPI(strerror(errno));
 
   auto fsize = static_cast<size_t>(_fsize);
   rewind(file);
 
   auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
   if (fcontent == nullptr)
-    return Err(CAPI(strerror(errno)));
+    throw CAPI(strerror(errno));
 
   if (auto const amount_read = fread(fcontent, sizeof(char), fsize, file);
       amount_read != fsize) {
     free(fcontent);
-    return Err(CAPI(strerror(errno)));
+    throw CAPI(strerror(errno));
   }
   fcontent[fsize] = 0;
-  return Ok(FixedString(fcontent, fsize));
+  return FixedString(fcontent, fsize);
 }
 
 /*
@@ -1190,18 +1168,12 @@ Module::Module(Module_t &&type, lua_State *state)
 auto Module::gen_dep_tree() -> Opt<DepTreeErr> {
   using Opt = Opt<DepTreeErr>;
 
-  auto m_m = DepTree::M::make();
-  if (m_m == decltype(m_m)::ERR)
-    return m_m;
-
-  tree = m_m.get();
+  // we probably don't need this, b/c the constructor will be called when we
+  // originally construct this module tree = DepTree();
   try {
     for (auto const &root : roots) {
-      if (auto m_err = tree.m.append_dep(root, includes, macros, defined_macros,
-                                         DepTree::ROOT_IDX);
-          m_err == decltype(m_err)::ERR) {
-        return m_err;
-      }
+      tree.append_dep(root, includes, macros, defined_macros,
+                      DepTree::ROOT_IDX);
     }
   } catch (ir::Exception const &e) {
     std::cerr << e.what() << '\n';
@@ -1353,12 +1325,11 @@ auto CompilationPool::add_task(Module::DepTree const &sf) -> void {
   // source multiple times, this is probably where that hash set solution would
   // probably make things faster :)
   auto lowest = uint{0};
-  remaining_tasks.reserve(sf.m.num_files);
-  for (auto i = size_t{}; i < sf.m.num_files; ++i) {
-    if (sf.m.types[i] == Module::DepTree::IMPL &&
-        sf.m.files[i].start >= lowest) {
-      remaining_tasks.push_back(sf.m.get_path(i));
-      lowest = sf.m.files[i].start + 1;
+  remaining_tasks.reserve(sf.num_files);
+  for (auto i = size_t{}; i < sf.num_files; ++i) {
+    if (sf.types[i] == Module::DepTree::IMPL && sf.files[i].start >= lowest) {
+      remaining_tasks.push_back(sf.get_path(i));
+      lowest = sf.files[i].start + 1;
     }
   }
 }
@@ -1478,13 +1449,7 @@ auto install_exe(lua_State *state) noexcept -> int {
     }
     ec.clear();
 
-    if (auto m_err = main_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
-      auto const msg =
-          std::visit([](auto &&e) -> string { return e.error() + '\n'; },
-                     *m_err.err().get());
-      lua_pushstring(state, msg.c_str());
-      return lua_error(state);
-    }
+    main_mod.gen_dep_tree();
 
 #if 0
   auto const actually_compiled_files = Compiler::compile(main_mod);
@@ -1508,6 +1473,9 @@ auto install_exe(lua_State *state) noexcept -> int {
 #endif
     return 0;
   } catch (ModuleErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (DepTreeErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
   } catch (std::exception const &e) {
@@ -1544,12 +1512,7 @@ auto install_static(lua_State *state) noexcept -> int {
     }
     ec.clear();
 
-    if (auto m_err = static_mod.gen_dep_tree(); m_err == decltype(m_err)::ERR) {
-      auto const msg = std::visit([](auto &&e) { return e.error() + '\n'; },
-                                  *m_err.err().get());
-      lua_pushstring(state, msg.c_str());
-      return lua_error(state);
-    }
+    static_mod.gen_dep_tree();
 
     auto const compiled_files = Compiler::compile(static_mod);
     auto const invoked_command =
@@ -1566,6 +1529,9 @@ auto install_static(lua_State *state) noexcept -> int {
       return 0;
     }
   } catch (ModuleErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (DepTreeErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
   } catch (std::exception const &e) {
