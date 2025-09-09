@@ -153,10 +153,9 @@ private:
 };
 
 struct IR_Interpreter final {
-  constexpr IR_Interpreter(std::vector<std::filesystem::path> &includes,
-                           std::unordered_map<std::string, Macro> &macros,
+  constexpr IR_Interpreter(std::unordered_map<std::string, Macro> &macros,
                            std::unordered_set<std::string> &def_macros)
-      : includes(includes), macros(macros), def_macros(def_macros) {}
+      : macros(macros), def_macros(def_macros) {}
 
   /**
    * @throws Interpret_Exc <: Exception
@@ -165,7 +164,6 @@ struct IR_Interpreter final {
   auto interpret(IR const &) -> std::vector<std::filesystem::path>;
 
 private:
-  std::vector<std::filesystem::path> &includes;
   std::unordered_map<std::string, Macro> &macros;
   std::unordered_set<std::string> &def_macros;
 
