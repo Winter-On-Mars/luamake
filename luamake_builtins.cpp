@@ -511,6 +511,26 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   }
   std::cerr << '\n';
 
+  for (auto const &file : files_deps) {
+    for (auto const &include : includes) {
+      auto const p = fs::canonical(include / file);
+      std::cerr << std::format("p.parent_path()/p.stem() = [{}], "
+                               "dep.parent_path()/dep.stem() = [{}]\n",
+                               (p.parent_path() / p.stem()).string(),
+                               (dep.parent_path() / dep.stem()).string());
+      if (!fs::exists(p)) {
+        std::cerr << "File does not exist\n";
+        continue;
+      }
+      if (DepTree::determine_file_type(p.extension()) &&
+          p.parent_path() / p.stem() == dep.parent_path() / dep.stem()) {
+        std::cerr << "Ignoring\n";
+        break; // impl file including header file
+      }
+      append_dep(p, this_idx);
+    }
+  }
+
 #if 0
   i this is all we really need to do to get everything up and working again :)
   for (auto const &file : files_deps) {
@@ -1013,7 +1033,8 @@ Module::Module(Module_t &&type, lua_State *state)
     roots.reserve(1);
     switch (auto const root_t = lua_getfield(state, -2, "root")) {
     case LUA_TSTRING:
-      roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
+      roots.push_back(
+          fs::canonical(fs::path(lua_tolstring(state, -1, nullptr))));
       break;
     case LUA_TNIL:
       throw MissingField("root");
@@ -1031,7 +1052,8 @@ Module::Module(Module_t &&type, lua_State *state)
         if (auto const value_t = lua_type(state, -1); value_t != LUA_TSTRING) {
           throw UnexpectedType("roots[i]", LUA_TSTRING, value_t);
         }
-        roots.push_back(lua_tolstring(state, -1, nullptr));
+        roots.push_back(
+            fs::canonical(fs::path(lua_tolstring(state, -1, nullptr))));
         lua_pop(state, 1);
       }
     } break;
