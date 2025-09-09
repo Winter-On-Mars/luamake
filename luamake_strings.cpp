@@ -4,15 +4,6 @@
 #include <iostream>
 
 namespace luamake {
-OwnedString::OwnedString(char *&buffer, size_t size) noexcept
-    : buffer(buffer), size(0), capacity(size) {
-  buffer = nullptr;
-}
-OwnedString::~OwnedString() noexcept {
-  if (buffer != nullptr)
-    free((void *)buffer);
-}
-
 auto OwnedString::append(std::string &&str) noexcept -> void {
   auto const str_len = str.length();
   if (!(size < capacity - str_len - 1)) {

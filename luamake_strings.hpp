@@ -1,7 +1,9 @@
 #ifndef __LUAMAKE_STRINGS_HPP
 #define __LUAMAKE_STRINGS_HPP
 
+#include "string_view"
 #include <cstddef>
+#include <format>
 #include <string>
 
 namespace luamake {
@@ -14,20 +16,25 @@ struct OwnedString final {
   size_t size;
   size_t capacity;
 
-  explicit OwnedString(char *&buffer, size_t size) noexcept;
+  explicit constexpr OwnedString(char *&buffer, size_t size) noexcept;
   constexpr OwnedString() noexcept;
 
   constexpr OwnedString(OwnedString &&that) noexcept;
 
   constexpr auto operator=(OwnedString &&that) noexcept -> OwnedString &;
 
-  ~OwnedString() noexcept;
+  constexpr ~OwnedString() noexcept;
 
   OwnedString(OwnedString const &) = delete;
   OwnedString &operator=(OwnedString const &) = delete;
 
   auto append(std::string &&) noexcept -> void;
 };
+
+constexpr OwnedString::OwnedString(char *&buffer, size_t size) noexcept
+    : buffer(buffer), size(0), capacity(size) {
+  buffer = nullptr;
+}
 
 constexpr OwnedString::OwnedString() noexcept
     : buffer(nullptr), size(0), capacity(0) {}
@@ -41,6 +48,9 @@ constexpr OwnedString::OwnedString(OwnedString &&that) noexcept
 
 constexpr auto OwnedString::operator=(OwnedString &&that) noexcept
     -> OwnedString & {
+  if (this == &that) {
+    return *this;
+  }
   buffer = that.buffer;
   size = that.size;
   capacity = that.capacity;
@@ -49,6 +59,11 @@ constexpr auto OwnedString::operator=(OwnedString &&that) noexcept
   that.size = 0;
   that.capacity = 0;
   return *this;
+}
+
+constexpr OwnedString::~OwnedString() noexcept {
+  if (buffer != nullptr)
+    free((void *)buffer);
 }
 
 struct StringViews final {
@@ -83,6 +98,9 @@ constexpr FixedString::FixedString(FixedString &&that) noexcept
 
 constexpr auto FixedString::operator=(FixedString &&that) noexcept
     -> FixedString & {
+  if (this == &that) {
+    return *this;
+  }
   buffer = that.buffer;
   size = that.size;
 
@@ -92,5 +110,21 @@ constexpr auto FixedString::operator=(FixedString &&that) noexcept
 }
 
 } // namespace luamake
+
+namespace std {
+template <> struct formatter<luamake::OwnedString, char> {
+  auto constexpr parse(format_parse_context &ctx) { return ctx.begin(); }
+  auto format(luamake::OwnedString const &str, format_context &ctx) const {
+    return std::format("{}", string_view{str.buffer, str.size});
+  }
+};
+
+template <> struct formatter<luamake::FixedString, char> {
+  auto constexpr parse(format_parse_context &ctx) { return ctx.begin(); }
+  auto format(luamake::FixedString const &str, format_context &ctx) const {
+    return std::format("{}", string_view{str.buffer, str.size});
+  }
+};
+} // namespace std
 
 #endif
