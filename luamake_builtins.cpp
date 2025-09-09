@@ -371,7 +371,7 @@ struct Module final {
     std::unique_ptr<size_t[]> hashes;
     [[nodiscard]]
     auto append_path(fs::path const &) noexcept
-        -> pair<unsigned int, unsigned int>;
+        -> std::tuple<bool, unsigned int, unsigned int>;
     [[nodiscard]]
     auto get_path(size_t const) const noexcept -> fs::path;
     [[nodiscard]]
@@ -459,10 +459,10 @@ Module::DepTree::DepTree(size_t const num_files) {
 }
 
 auto Module::DepTree::append_path(fs::path const &path) noexcept
-    -> pair<unsigned int, unsigned int> {
+    -> std::tuple<bool, unsigned int, unsigned int> {
   auto const canonical_path = fs::canonical(path);
   if (auto &&[found, start, end] = find(canonical_path.c_str()); found) {
-    return std::make_pair(start, end);
+    return std::make_tuple(true, start, end);
   }
   auto const start = all_paths.size;
   all_paths.append(canonical_path.string());
@@ -478,18 +478,11 @@ auto Module::DepTree::append_path(fs::path const &path) noexcept
     std::terminate();
   }
 
-  return std::make_pair(static_cast<unsigned int>(start),
-                        static_cast<unsigned int>(end));
+  return std::make_tuple(false, static_cast<unsigned int>(start),
+                         static_cast<unsigned int>(end));
 }
 
 auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
-  auto file = File(dep, File::READ);
-  if (!file)
-    throw FileDoesNotExist(dep, tree.get_path(parent_idx));
-
-  auto const file_string = DepTree::get_file_content(file);
-  auto &&[fcontent, fsize] = file_string;
-
   if (tree.num_files == tree.cap_files) {
     tree.resize();
   }
@@ -498,7 +491,17 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
     tree.deps[parent_idx].push_back(static_cast<unsigned int>(this_idx));
   ++tree.num_files;
 
-  auto &&[start, end] = tree.append_path(dep);
+  auto &&[found, start, end] = tree.append_path(dep);
+  if (found) // early return if file was already processed
+    return;
+
+  auto file = File(dep, File::READ);
+  if (!file)
+    throw FileDoesNotExist(dep, tree.get_path(parent_idx));
+
+  auto const file_string = DepTree::get_file_content(file);
+  auto &&[fcontent, fsize] = file_string;
+
   auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
     return fnv1a(fsize, fcontent);
   });
