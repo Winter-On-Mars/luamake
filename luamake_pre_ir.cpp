@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
 namespace fs = std::filesystem;
 
 using std::string, std::string_view, std::vector, std::unordered_map;
@@ -400,8 +401,11 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
     } else {
       while (i < ir.size) {
         if (!(ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
-              ir.types[i] == IR::ELIF))
+              ir.types[i] == IR::ELIF)) {
           ++i;
+        } else {
+          break;
+        }
       }
       if (i == ir.size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
@@ -414,7 +418,65 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
       if (i == ir.size) {
         throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
       }
+      ++i; // move over the #endif
     }
+  } break;
+  case IR::IFNDEF: {
+    auto const checking_macro = ir.exprs[i++];
+    auto const defined =
+        macros.contains(checking_macro) || def_macros.contains(checking_macro);
+    if (!defined) {
+      while (i < ir.size) {
+        if (ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
+            ir.types[i] == IR::ELIF)
+          break;
+        interpret_impl(false, ir, i, vec);
+      }
+      if (i == ir.size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
+      while (i < ir.size && ir.types[i] != ir.ENDIF) {
+        ++i;
+      }
+      if (i == ir.size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
+      ++i; // move over the ENDIF
+    } else {
+      while (i < ir.size) {
+        if (!(ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
+              ir.types[i] == IR::ELIF))
+          ++i;
+      }
+      if (i == ir.size)
+        throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
+
+      interpret_impl(true, ir, i, vec);
+
+      while (i < ir.size && ir.types[i] != IR::ENDIF) {
+        ++i;
+      }
+      if (i == ir.size) {
+        throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
+      }
+    }
+  } break;
+  case IR::ELSE: {
+    if (!interpret_elses) {
+      throw Interpret_Exc(__LINE__, "Unsupported interpretation of #else, "
+                                    "possibly misformatted preprocessor");
+    } else {
+      ++i;
+      while (i < ir.size) {
+        if (ir.types[i] == IR::ENDIF) {
+          break;
+        } else {
+          interpret_impl(false, ir, i, vec);
+        }
+      }
+    }
+  } break;
+  case IR::DEFINE: {
+    // TODO: parse object like macros
+    def_macros.emplace(ir.exprs[i++]);
   } break;
   default:
     throw Interpret_Exc(__LINE__, std::format("Not implimented, type = [{}]",
