@@ -443,12 +443,19 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
     } else {
       while (i < ir.size) {
         if (!(ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
-              ir.types[i] == IR::ELIF))
+              ir.types[i] == IR::ELIF)) {
           ++i;
+        } else {
+          break;
+        }
       }
       if (i == ir.size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
 
+      if (ir.types[i] == IR::ENDIF) {
+        ++i;
+        return;
+      }
       interpret_impl(true, ir, i, vec);
 
       while (i < ir.size && ir.types[i] != IR::ENDIF) {
