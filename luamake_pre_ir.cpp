@@ -73,6 +73,8 @@ auto constexpr skip_until_close_multicomment(size_t const size,
   while (i < size && i + 1 < size) {
     if (buffer[i] == '*' && buffer[i + 1] == '/') {
       return i + 2; // put buffer[i + 2 - 1] == '/'
+    } else {
+      ++i;
     }
   }
   return size;
@@ -84,6 +86,12 @@ auto constexpr skip_until_close_multicomment(size_t const size,
 // skip the file
 // TODO: there's actually a lot more we need to do for macro preprocessing, like
 // properly parsing expressions (adding them to the lexer :))
+// TODO: add proper lexing to the preprocessor, i think that for #if expressions
+// we just need to lex until we hit a '\n' character, then when we're parsing we
+// can form an expression tree, thankfully everything must eventually be
+// interpreted as an int (0 == false, x == true), so we can just have our
+// interpreter worry about int's and their expressions, how they get converted
+// to int's etc
 auto IR::Lexer::lex(FixedString const &file) -> Lexer {
   // clang-format off
   static auto const keywords = unordered_map<string_view, enum Lexer::types>{{
@@ -96,6 +104,8 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
     {string_view{"#define"}, DEFINE},
     {string_view{"#include"}, INCLUDE},
     {string_view{"defined"}, OP_DEFINED},
+    {string_view{"#undef"}, UNDEF},
+    {string_view{"#pragma"}, PRAGMA}
   }};
   // clang-format on
   auto lex = Lexer();
@@ -112,6 +122,9 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
       if (keyword == keywords.end()) {
         // continue to next character of interest
         i = skip_until("#/\"", file.size, fcontent, i);
+        throw Lex_Exc(
+            __LINE__,
+            std::format("Hash keyword [{}], is not implimented", hash_keyword));
       }
 
       switch (keyword->second) {
@@ -175,6 +188,13 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
       } break;
       case DEFINE: {
         lex.types.push_back(DEFINE);
+        i = skip_ws(file.size, fcontent, i) + 1;
+        end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
+        lex.types.push_back(CHAR_LIT);
+        lex.lexemes.emplace_back(string_view{fcontent + i, fcontent + end});
+      } break;
+      case UNDEF: {
+        lex.types.push_back(UNDEF);
         i = skip_ws(file.size, fcontent, i) + 1;
         end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
         lex.types.push_back(CHAR_LIT);
@@ -289,6 +309,10 @@ auto IR::Lexer::to_string(enum types t) const -> string {
     return string("ENDIF");
   case DEFINE:
     return string("DEFINE");
+  case UNDEF:
+    return string("UNDEF");
+  case PRAGMA:
+    return string("PRAGMA");
   case INCLUDE:
     return string("INCLUDE");
   case LOG_AND:
