@@ -87,6 +87,7 @@ struct IR final {
     GLOBAL_INCLUDE,
     LOCAL_INCLUDE,
     DEFINE,
+    UNDEF,
   };
   /**
    * @throws Parse_Exc <: Exception
@@ -112,6 +113,8 @@ private:
       ENDIF,
       DEFINE,
       INCLUDE,
+      UNDEF,
+      PRAGMA,
       // operators
       // TODO: add other operators
       LOG_AND,
@@ -191,6 +194,8 @@ auto constexpr IR::pretty_types(enum types t) -> char const * {
     return "LOCAL_INCLUDE";
   case DEFINE:
     return "DEFINE";
+  case UNDEF:
+    return "UNDEF";
   }
 }
 } // namespace ir
