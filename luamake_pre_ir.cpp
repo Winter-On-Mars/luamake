@@ -5,11 +5,17 @@
 #include <cstring>
 #include <format>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#ifdef DEBUG
+#include <iostream>
+#endif // DEBUG
 
 namespace fs = std::filesystem;
 
@@ -42,7 +48,7 @@ auto constexpr skip_ws(size_t const size, char const *const buf, size_t i)
 }
 
 // template <char const *delims>
-auto constexpr skip_until(string_view &&delims, size_t const size,
+auto constexpr skip_until(string_view const delims, size_t const size,
                           char const *buffer, size_t i) -> size_t {
   while (i < size) {
     for (auto idx = size_t{}; idx < delims.size(); ++idx) {
@@ -79,7 +85,7 @@ auto constexpr skip_until_close_multicomment(size_t const size,
   return size;
 }
 
-auto constexpr skip_while(string_view &&delims, size_t const size,
+auto constexpr skip_while(string_view const delims, size_t const size,
                           char const *const buffer, size_t i) -> size_t {
   while (i < size) {
     auto const found = delims.find(buffer[i]);
@@ -92,9 +98,39 @@ auto constexpr skip_while(string_view &&delims, size_t const size,
   return size;
 }
 
-auto constexpr is_any_of(string_view &&delims, char const *const buffer,
+auto constexpr is_any_of(string_view const delims, char const *const buffer,
                          size_t const i) -> bool {
   return delims.find(buffer[i]) != delims.npos;
+}
+
+auto constexpr is_any_of(std::span<enum IR::types const> &&types,
+                         enum IR::types const t) -> bool {
+  for (auto &&type : types) {
+    if (type == t) {
+      return true;
+    }
+  }
+  return false;
+}
+
+enum class delims : size_t {
+  LEXEME,
+  BINARY_FAIL,
+  ALLOWED_HEX,
+  ALPHA_SANS_HEX,
+  ALLOWED_OCTAL,
+  DECIMAL_DIGITS,
+  HEX_SANS_DIGITS,
+};
+
+auto constexpr delims_list = std::array<string_view, 7>{
+    {string_view{" \t\n\r(){}[]+-*/<>=#"}, string_view{"23456789abcdefABCDEF"},
+     string_view{"0123456789abcdefABCDEF"},
+     string_view{"ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ"},
+     string_view{"01234567"}, string_view{"0123456789"},
+     string_view{"abcdefABCDEF"}}};
+auto constexpr delims_at(delims &&del) -> string_view {
+  return delims_list[static_cast<std::underlying_type_t<delims>>(del)];
 }
 } // namespace
 
@@ -219,6 +255,8 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
         lex.lexemes.emplace_back(string_view{fcontent + i, fcontent + end});
       } break;
       case IF:
+        lex.types.push_back(IF);
+        i = skip_ws(file.size, file.buffer, i) + 1;
         i = lex.handle_hashif(file.size, fcontent, i);
         break;
       default:
@@ -358,6 +396,14 @@ auto IR::Lexer::to_string(enum types t) const -> string {
     return string("OP_STRINGIZING");
   case OP_CONCAT:
     return string("OP_CONCAT");
+  case OP_PLUS:
+    return string("OP_PLUS");
+  case OP_MINUS:
+    return string("OP_MINUS");
+  case OP_STAR:
+    return string("OP_STAR");
+  case OP_SLASH:
+    return string("OP_SLASH");
   case BANG:
     return string("BANG");
   case LPAREN:
@@ -376,6 +422,12 @@ auto IR::Lexer::to_string(enum types t) const -> string {
     return string("LIT_STRING");
   case LIT_INT:
     return string("LIT_INT");
+  case LIT_HEX:
+    return string("LIT_HEX");
+  case LIT_OCTAL:
+    return string("LIT_OCTAL");
+  case LIT_BINARY:
+    return string("LIT_BINARY");
   case LIT_FLOAT:
     return string("LIT_FLOAT");
   case LEXEME:
@@ -383,6 +435,7 @@ auto IR::Lexer::to_string(enum types t) const -> string {
   }
 }
 
+// TODO: extract all of these delim strings into variables that we can check on
 auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
                               size_t i) -> size_t {
   auto constexpr defined_str = string_view{"defined"};
@@ -392,9 +445,8 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
     switch (ch) {
     case '\\': {
       ++i;
-      if (i < size && buffer[i]) {
+      if (i < size && buffer[i] == '\n') {
         ++i;
-      } else {
       }
     } break;
     case '\n': {
@@ -427,6 +479,10 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
         types.push_back(OP_BIT_AND);
       }
     } break;
+    case '!': {
+      ++i;
+      types.push_back(BANG);
+    } break;
     case '<': {
       ++i;
       if (i < size && buffer[i] == '=') {
@@ -453,7 +509,7 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
       } else {
         types.push_back(OP_CONCAT);
       }
-    }
+    } break;
     case 'd': {
       if (i + defined_str.size() < size &&
           strncmp(buffer + i, defined_str.data(), defined_str.size()) == 0) {
@@ -461,7 +517,7 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
         types.push_back(OP_DEFINED);
       } else {
         auto const start = i;
-        i = skip_until(" \t\n\r(){}+-><=#[]", size, buffer, i) + 1;
+        i = skip_until(delims_at(delims::LEXEME), size, buffer, i);
         types.push_back(LEXEME);
         lexemes.emplace_back(string_view{buffer + start, buffer + i});
       }
@@ -503,7 +559,7 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
               }
             } break;
             default: {
-              if (is_any_of("23456789abcdefABCDEF", buffer, i)) {
+              if (is_any_of(delims_at(delims::BINARY_FAIL), buffer, i)) {
                 throw; // malformed number
               } else if (std::isalpha(buffer[i])) {
                 throw; // malformed input(?) kinda a different error
@@ -527,7 +583,7 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
           auto allow_quote = false;
           auto inner_looping = true;
           while (inner_looping && i < size) {
-            if (is_any_of("0123456789abcdefABCDEF", buffer, i)) {
+            if (is_any_of(delims_at(delims::ALLOWED_HEX), buffer, i)) {
               allow_quote = true;
               ++i;
             } else if (buffer[i] == '\'') {
@@ -537,8 +593,8 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
               } else {
                 throw; // malformed number, double ' found
               }
-            } else if (is_any_of("ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ",
-                                 buffer, i)) {
+            } else if (is_any_of(delims_at(delims::ALPHA_SANS_HEX), buffer,
+                                 i)) {
               throw; // malformmed number
             } else {
               inner_looping = false;
@@ -569,7 +625,7 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
 
           auto allow_quote = true;
           while (i < size) {
-            if (is_any_of("01234567", buffer, i)) {
+            if (is_any_of(delims_at(delims::ALLOWED_OCTAL), buffer, i)) {
               allow_quote = true;
               ++i;
             } else if (buffer[i] == '\'') {
@@ -580,7 +636,7 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
                 throw; // malformed octal number
               }
             } else {
-              if (is_any_of(" \t\r\n+-*/&|^#", buffer, i)) {
+              if (is_any_of(delims_at(delims::LEXEME), buffer, i)) {
                 break;
               } else {
                 throw; // malformed octal
@@ -600,6 +656,7 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
       }
     } break;
 #pragma endregion octal
+#pragma region decimal
     case '1':
       [[fallthrough]];
     case '2':
@@ -620,7 +677,7 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
       auto const start = i;
       auto allow_quote = true;
       while (i < size) {
-        if (is_any_of("0123456789", buffer, i)) {
+        if (is_any_of(delims_at(delims::DECIMAL_DIGITS), buffer, i)) {
           allow_quote = true;
           ++i;
         } else if (buffer[i] == '\'') {
@@ -630,10 +687,10 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
           } else {
             throw; // malformed decimal number
           }
-        } else if (is_any_of("abcdefABCDEF", buffer, i)) {
+        } else if (is_any_of(delims_at(delims::HEX_SANS_DIGITS), buffer, i)) {
           throw; // malformed decimal, trying to treat the number as hex
         } else {
-          if (is_any_of(" \t\r\n+-*/&|^#", buffer, i)) {
+          if (is_any_of(delims_at(delims::LEXEME), buffer, i)) {
             break;
           } else {
             throw; // malformed decimal
@@ -643,15 +700,31 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
       types.push_back(LIT_INT);
       lexemes.emplace_back(string_view{buffer + start, buffer + i});
     } break;
+#pragma endregion decimal
     default: {
-      // TODO
-      // auto const start = i;
-
+      auto const start = i;
+      i = skip_until(delims_at(delims::LEXEME), size, buffer, i);
+      types.push_back(LEXEME);
+      lexemes.emplace_back(string_view{buffer + start, buffer + i});
     } break;
     }
   }
   return i;
 }
+
+#ifdef DEBUG
+auto IR::Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
+  for (auto const &type : types) {
+    out << '[' << to_string(type) << ']';
+  }
+  out << '\n';
+  for (auto const &lexeme : lexemes) {
+    out << '[' << lexeme << ']';
+  }
+  out << '\n';
+  return out;
+}
+#endif
 
 auto Lex_Exc::what() const noexcept -> std::string {
   return std::format("Lex Error on line {}\n\tAdditional info: [{}]", line,
@@ -673,7 +746,13 @@ IR::IR()
       exprs(std::make_unique<std::string[]>(cap)) {}
 
 auto IR::parse(FixedString const &file) -> IR {
+#ifdef DEBUG
+  auto lexer = Lexer::lex(file);
+  lexer.display(std::cerr);
+  return lexer.parse_to_ir();
+#else
   return Lexer::lex(file).parse_to_ir();
+#endif
 }
 
 auto IR::check_size() -> void {
@@ -707,6 +786,9 @@ auto IR_Interpreter::interpret(IR const &ir) -> vector<fs::path> {
 
 auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
                                     size_t &i, vector<fs::path> &vec) -> void {
+#ifdef DEBUG
+  std::cerr << "\tLooking at [" << IR::pretty_types(ir.types[i]) << "]\n";
+#endif // DEBUG
   switch (ir.types[i]) {
   case IR::GLOBAL_INCLUDE: {
     // TODO: check that this file *actually exists*
@@ -714,6 +796,21 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
   } break;
   case IR::LOCAL_INCLUDE: {
     vec.push_back(ir.exprs[i++]);
+  } break;
+  case IR::IF: {
+    ++i;
+    auto const expr = eval(ir, i);
+    if (expr == 1) {
+      while (i < ir.size) {
+        if (ir.types[i] == IR::ENDIF || ir.types[i] == IR::ELSE ||
+            ir.types[i] == IR::ELIF) {
+          break;
+        } else {
+          interpret_impl(false, ir, i, vec);
+        }
+      }
+    } else {
+    }
   } break;
   case IR::IFDEF: {
     auto const checking_macro = ir.exprs[i];
@@ -826,6 +923,22 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
     throw Interpret_Exc(__LINE__, std::format("Not implimented, type = [{}]",
                                               IR::pretty_types(ir.types[i])));
   }
+}
+
+// TODO
+auto IR_Interpreter::eval(IR const &ir, size_t &i) const -> int { return 0; }
+
+auto IR_Interpreter::search_for_next_scope(IR const &ir, size_t i) const
+    -> size_t {
+  while (i < ir.size) {
+    if (ir.types[i] == IR::ENDIF || ir.types[i] == IR::ELSE ||
+        ir.types[i] == IR::ELIF) {
+      break;
+    } else {
+      ++i;
+    }
+  }
+  return i;
 }
 } // namespace ir
 } // namespace luamake
