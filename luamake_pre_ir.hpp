@@ -10,6 +10,10 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef DEBUG
+#include <ostream>
+#endif
+
 namespace luamake {
 namespace ir {
 struct Exception {
@@ -128,6 +132,10 @@ private:
       OP_GREATER_EQUAL,
       OP_STRINGIZING,
       OP_CONCAT,
+      OP_PLUS,
+      OP_MINUS,
+      OP_STAR,
+      OP_SLASH,
       BANG,
       LPAREN,
       RPAREN,
@@ -160,6 +168,10 @@ private:
 
     auto to_string(enum Lexer::types t) const -> std::string;
 
+#ifdef DEBUG
+    auto display(std::ostream &) const noexcept -> std::ostream &;
+#endif
+
   private:
     auto handle_hashif(size_t const, char const *const, size_t) -> size_t;
   };
@@ -189,6 +201,10 @@ private:
 
   auto interpret_impl(bool, IR const &, size_t &,
                       std::vector<std::filesystem::path> &) -> void;
+
+  auto eval(IR const &, size_t &i) const -> int;
+  // looks for the next #else, #elif, or #endif
+  auto search_for_next_scope(IR const &, size_t) const -> size_t;
 };
 
 auto constexpr IR::pretty_types(enum types t) -> char const * {
