@@ -11,7 +11,7 @@ lua_a:=lua/liblua.a
 all: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
-dbg: cc_flags+=-g
+dbg: cc_flags+=-ggdb3 -DDEBUG # might be a good idea to just use -g, but idk i only use gdb for debugging :)
 dbg: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
