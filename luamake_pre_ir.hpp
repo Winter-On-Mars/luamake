@@ -117,18 +117,32 @@ private:
       PRAGMA,
       // operators
       // TODO: add other operators
-      LOG_AND,
-      LOG_OR,
+      OP_AND,
+      OP_OR,
+      OP_BIT_AND,
+      OP_BIT_OR,
       OP_DEFINED,
+      OP_LESS,
+      OP_LESS_EQUAL,
+      OP_GREATER,
+      OP_GREATER_EQUAL,
+      OP_STRINGIZING,
+      OP_CONCAT,
+      BANG,
       LPAREN,
       RPAREN,
       LANGLE,
       RANGLE,
       QUOTE,
       // values
-      CHAR_LIT,
-      INT_LIT,
-      MACRO,
+      LIT_CHAR,
+      LIT_STRING,
+      LIT_INT,
+      LIT_HEX,
+      LIT_OCTAL,
+      LIT_BINARY,
+      LIT_FLOAT,
+      LEXEME,
     };
 
     std::vector<Lexer::types> types;
@@ -145,6 +159,9 @@ private:
     auto parse_to_ir() -> ir::IR;
 
     auto to_string(enum Lexer::types t) const -> std::string;
+
+  private:
+    auto handle_hashif(size_t const, char const *const, size_t) -> size_t;
   };
 
   size_t size;

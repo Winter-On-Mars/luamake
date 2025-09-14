@@ -1,6 +1,7 @@
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
 
+#include <cctype>
 #include <cstring>
 #include <format>
 #include <memory>
@@ -41,12 +42,10 @@ auto constexpr skip_ws(size_t const size, char const *const buf, size_t i)
 }
 
 // template <char const *delims>
-// size != strlen(delims)
-auto constexpr skip_until(char const *delims, size_t const size,
+auto constexpr skip_until(string_view &&delims, size_t const size,
                           char const *buffer, size_t i) -> size_t {
-  auto const str_len = string_len(delims);
   while (i < size) {
-    for (auto idx = size_t{}; idx < str_len; ++idx) {
+    for (auto idx = size_t{}; idx < delims.size(); ++idx) {
       if (delims[idx] == buffer[i]) {
         return i;
       }
@@ -78,6 +77,24 @@ auto constexpr skip_until_close_multicomment(size_t const size,
     }
   }
   return size;
+}
+
+auto constexpr skip_while(string_view &&delims, size_t const size,
+                          char const *const buffer, size_t i) -> size_t {
+  while (i < size) {
+    auto const found = delims.find(buffer[i]);
+    if (found == delims.npos) {
+      break;
+    } else {
+      ++i;
+    }
+  }
+  return size;
+}
+
+auto constexpr is_any_of(string_view &&delims, char const *const buffer,
+                         size_t const i) -> bool {
+  return delims.find(buffer[i]) != delims.npos;
 }
 } // namespace
 
@@ -147,7 +164,7 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
           if (!(end < file.size))
             throw Lex_Exc(__LINE__, string("Non terminated global include"));
 
-          lex.types.emplace_back(CHAR_LIT);
+          lex.types.emplace_back(LIT_STRING);
           lex.lexemes.emplace_back(
               string_view{fcontent + i + 1, fcontent + end});
           i = end + 1;
@@ -161,7 +178,7 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
           if (!(end < file.size))
             throw Lex_Exc(__LINE__, string("Non terminated local include"));
 
-          lex.types.emplace_back(CHAR_LIT);
+          lex.types.emplace_back(LIT_STRING);
           lex.lexemes.emplace_back(
               string_view{fcontent + i + 1, fcontent + end});
           i = end + 1;
@@ -176,30 +193,34 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
         lex.types.push_back(IFDEF);
         i = skip_ws(file.size, fcontent, i) + 1;
         end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
-        lex.types.push_back(CHAR_LIT);
+        lex.types.push_back(LEXEME);
         lex.lexemes.emplace_back(string_view{fcontent + i, fcontent + end});
       } break;
       case IFNDEF: {
         lex.types.push_back(IFNDEF);
         i = skip_ws(file.size, fcontent, i) + 1;
         end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
-        lex.types.push_back(CHAR_LIT);
+        lex.types.push_back(LEXEME);
         lex.lexemes.emplace_back(string_view{fcontent + i, fcontent + end});
       } break;
-      case DEFINE: {
+      case DEFINE: { // TODO: handle the case when we have a macro function, and
+                     // when we're defining a macro with a value attached to it
         lex.types.push_back(DEFINE);
         i = skip_ws(file.size, fcontent, i) + 1;
         end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
-        lex.types.push_back(CHAR_LIT);
+        lex.types.push_back(LEXEME);
         lex.lexemes.emplace_back(string_view{fcontent + i, fcontent + end});
       } break;
       case UNDEF: {
         lex.types.push_back(UNDEF);
         i = skip_ws(file.size, fcontent, i) + 1;
         end = skip_until(" \t\n\r", file.size, fcontent, i + 1);
-        lex.types.push_back(CHAR_LIT);
+        lex.types.push_back(LEXEME);
         lex.lexemes.emplace_back(string_view{fcontent + i, fcontent + end});
       } break;
+      case IF:
+        i = lex.handle_hashif(file.size, fcontent, i);
+        break;
       default:
         lex.types.push_back(keyword->second);
         break;
@@ -315,12 +336,30 @@ auto IR::Lexer::to_string(enum types t) const -> string {
     return string("PRAGMA");
   case INCLUDE:
     return string("INCLUDE");
-  case LOG_AND:
-    return string("LOG_AND");
-  case LOG_OR:
-    return string("LOG_OR");
+  case OP_AND:
+    return string("OP_AND");
+  case OP_OR:
+    return string("OP_OR");
+  case OP_BIT_AND:
+    return string("OP_BIT_AND");
+  case OP_BIT_OR:
+    return string("OP_BIT_OR");
   case OP_DEFINED:
     return string("OP_DEFINED");
+  case OP_LESS:
+    return string("OP_LESS");
+  case OP_LESS_EQUAL:
+    return string("OP_LESS_EQUAL");
+  case OP_GREATER:
+    return string("OP_GREATER");
+  case OP_GREATER_EQUAL:
+    return string("OP_GREATER_EQUAL");
+  case OP_STRINGIZING:
+    return string("OP_STRINGIZING");
+  case OP_CONCAT:
+    return string("OP_CONCAT");
+  case BANG:
+    return string("BANG");
   case LPAREN:
     return string("LPAREN");
   case RPAREN:
@@ -331,13 +370,287 @@ auto IR::Lexer::to_string(enum types t) const -> string {
     return string("RANGLE");
   case QUOTE:
     return string("QUOTE");
-  case CHAR_LIT:
-    return string("CHAR_LIT");
-  case INT_LIT:
-    return string("INT_LIT");
-  case MACRO:
-    return string("MACRO");
+  case LIT_CHAR:
+    return string("LIT_CHAR");
+  case LIT_STRING:
+    return string("LIT_STRING");
+  case LIT_INT:
+    return string("LIT_INT");
+  case LIT_FLOAT:
+    return string("LIT_FLOAT");
+  case LEXEME:
+    return string("LEXEME");
   }
+}
+
+auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
+                              size_t i) -> size_t {
+  auto constexpr defined_str = string_view{"defined"};
+  auto looping = true;
+  while (looping && i < size) {
+    auto const ch = buffer[i];
+    switch (ch) {
+    case '\\': {
+      ++i;
+      if (i < size && buffer[i]) {
+        ++i;
+      } else {
+      }
+    } break;
+    case '\n': {
+      looping = false;
+      ++i;
+    } break;
+    case '(': {
+      types.push_back(LPAREN);
+      ++i;
+    } break;
+    case ')': {
+      types.push_back(RPAREN);
+      ++i;
+    } break;
+    case '|': {
+      ++i;
+      if (i < size && buffer[i] == '|') {
+        ++i;
+        types.push_back(OP_OR);
+      } else {
+        types.push_back(OP_BIT_OR);
+      }
+    } break;
+    case '&': {
+      ++i;
+      if (i < size && buffer[i] == '&') {
+        ++i;
+        types.push_back(OP_AND);
+      } else {
+        types.push_back(OP_BIT_AND);
+      }
+    } break;
+    case '<': {
+      ++i;
+      if (i < size && buffer[i] == '=') {
+        ++i;
+        types.push_back(OP_LESS_EQUAL);
+      } else {
+        types.push_back(OP_LESS);
+      }
+    } break;
+    case '>': {
+      ++i;
+      if (i < size && buffer[i] == '=') {
+        ++i;
+        types.push_back(OP_GREATER_EQUAL);
+      } else {
+        types.push_back(OP_GREATER);
+      }
+    } break;
+    case '#': {
+      ++i;
+      if (i < size && buffer[i] == '#') {
+        ++i;
+        types.push_back(OP_STRINGIZING);
+      } else {
+        types.push_back(OP_CONCAT);
+      }
+    }
+    case 'd': {
+      if (i + defined_str.size() < size &&
+          strncmp(buffer + i, defined_str.data(), defined_str.size()) == 0) {
+        i += defined_str.size();
+        types.push_back(OP_DEFINED);
+      } else {
+        auto const start = i;
+        i = skip_until(" \t\n\r(){}+-><=#[]", size, buffer, i) + 1;
+        types.push_back(LEXEME);
+        lexemes.emplace_back(string_view{buffer + start, buffer + i});
+      }
+    } break;
+#pragma region octal
+    case '0': {
+      ++i;
+      if (!(i < size)) {
+        types.push_back(LIT_INT);
+        lexemes.push_back("0");
+      } else {
+        switch (buffer[i]) {
+#pragma region binary
+        case 'b': {
+          // TODO: check if we're on c++14>=, bc otherwise this is supposed to
+          // be an error, the same goes with "'" character
+          ++i;
+          if (!(i < size)) {
+            throw; // TODO: misformed octal number + additional information
+                   // about int formatting
+          }
+          auto const start = i - 1;
+          auto allow_quote = false;
+          auto inner_looping = true;
+          while (inner_looping && i < size) {
+            switch (buffer[i]) {
+            case '0':
+              [[fallthrough]];
+            case '1': {
+              allow_quote = true;
+              ++i;
+            } break;
+            case '\'': {
+              if (allow_quote) {
+                ++i;
+                allow_quote = false;
+              } else {
+                throw; // malformed number, double '' found
+              }
+            } break;
+            default: {
+              if (is_any_of("23456789abcdefABCDEF", buffer, i)) {
+                throw; // malformed number
+              } else if (std::isalpha(buffer[i])) {
+                throw; // malformed input(?) kinda a different error
+              }
+              inner_looping = false;
+            }
+            }
+          }
+          types.push_back(LIT_BINARY);
+          lexemes.emplace_back(string_view{buffer + start, buffer + i});
+        } break;
+#pragma endregion binary
+#pragma region hex
+        case 'x': {
+          ++i;
+          if (!(i < size)) {
+            throw; // TODO: misformed octal number + additional information
+                   // about int formatting
+          }
+          auto const start = i - 1;
+          auto allow_quote = false;
+          auto inner_looping = true;
+          while (inner_looping && i < size) {
+            if (is_any_of("0123456789abcdefABCDEF", buffer, i)) {
+              allow_quote = true;
+              ++i;
+            } else if (buffer[i] == '\'') {
+              if (allow_quote) {
+                ++i;
+                allow_quote = false;
+              } else {
+                throw; // malformed number, double ' found
+              }
+            } else if (is_any_of("ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ",
+                                 buffer, i)) {
+              throw; // malformmed number
+            } else {
+              inner_looping = false;
+            }
+          }
+          types.push_back(LIT_HEX);
+          lexemes.emplace_back(string_view{buffer + start, buffer + i});
+        } break;
+#pragma endregion hex
+        case '\'':
+          [[fallthrough]];
+        case '0':
+          [[fallthrough]];
+        case '1':
+          [[fallthrough]];
+        case '2':
+          [[fallthrough]];
+        case '3':
+          [[fallthrough]];
+        case '4':
+          [[fallthrough]];
+        case '5':
+          [[fallthrough]];
+        case '6':
+          [[fallthrough]];
+        case '7': {
+          auto const start = i;
+
+          auto allow_quote = true;
+          while (i < size) {
+            if (is_any_of("01234567", buffer, i)) {
+              allow_quote = true;
+              ++i;
+            } else if (buffer[i] == '\'') {
+              if (allow_quote) {
+                allow_quote = false;
+                ++i;
+              } else {
+                throw; // malformed octal number
+              }
+            } else {
+              if (is_any_of(" \t\r\n+-*/&|^#", buffer, i)) {
+                break;
+              } else {
+                throw; // malformed octal
+              }
+            }
+          }
+          types.push_back(LIT_OCTAL);
+          lexemes.emplace_back(string_view{buffer + start, buffer + i});
+        } break;
+        case '8':
+          [[fallthrough]];
+        case '9': {
+          // TODO: throw a malformed int expression
+          throw; // malformed octal
+        } break;
+        }
+      }
+    } break;
+#pragma endregion octal
+    case '1':
+      [[fallthrough]];
+    case '2':
+      [[fallthrough]];
+    case '3':
+      [[fallthrough]];
+    case '4':
+      [[fallthrough]];
+    case '5':
+      [[fallthrough]];
+    case '6':
+      [[fallthrough]];
+    case '7':
+      [[fallthrough]];
+    case '8':
+      [[fallthrough]];
+    case '9': {
+      auto const start = i;
+      auto allow_quote = true;
+      while (i < size) {
+        if (is_any_of("0123456789", buffer, i)) {
+          allow_quote = true;
+          ++i;
+        } else if (buffer[i] == '\'') {
+          if (allow_quote) {
+            allow_quote = false;
+            ++i;
+          } else {
+            throw; // malformed decimal number
+          }
+        } else if (is_any_of("abcdefABCDEF", buffer, i)) {
+          throw; // malformed decimal, trying to treat the number as hex
+        } else {
+          if (is_any_of(" \t\r\n+-*/&|^#", buffer, i)) {
+            break;
+          } else {
+            throw; // malformed decimal
+          }
+        }
+      }
+      types.push_back(LIT_INT);
+      lexemes.emplace_back(string_view{buffer + start, buffer + i});
+    } break;
+    default: {
+      // TODO
+      // auto const start = i;
+
+    } break;
+    }
+  }
+  return i;
 }
 
 auto Lex_Exc::what() const noexcept -> std::string {
