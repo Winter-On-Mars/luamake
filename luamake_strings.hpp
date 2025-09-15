@@ -1,15 +1,16 @@
 #ifndef __LUAMAKE_STRINGS_HPP
 #define __LUAMAKE_STRINGS_HPP
 
-#include "string_view"
 #include <cstddef>
 #include <format>
-#include <string>
+#include <string_view>
 
 namespace luamake {
 
 /**
  * @brief takes ownership of the buffer, with buffer.size == size
+ *  buffer *must* be allocated with (m|re|ca)alloc, as ~OwnedString calls into
+ *  free
  */
 struct OwnedString final {
   char *buffer;
@@ -28,7 +29,7 @@ struct OwnedString final {
   OwnedString(OwnedString const &) = delete;
   OwnedString &operator=(OwnedString const &) = delete;
 
-  auto append(std::string &&) noexcept -> void;
+  auto append(std::string_view const) noexcept -> void;
 };
 
 constexpr OwnedString::OwnedString(char *&buffer, size_t size) noexcept
