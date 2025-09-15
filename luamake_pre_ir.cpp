@@ -5,7 +5,6 @@
 #include <cstring>
 #include <format>
 #include <memory>
-#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -85,32 +84,21 @@ auto constexpr skip_until_close_multicomment(size_t const size,
   return size;
 }
 
-auto constexpr skip_while(string_view const delims, size_t const size,
-                          char const *const buffer, size_t i) -> size_t {
+template <class T>
+auto constexpr skip_until(size_t i, size_t const size, T const *const buffer,
+                          T delim) -> size_t {
   while (i < size) {
-    auto const found = delims.find(buffer[i]);
-    if (found == delims.npos) {
+    if (buffer[i] == delim) {
       break;
-    } else {
-      ++i;
     }
+    ++i;
   }
-  return size;
+  return i;
 }
 
 auto constexpr is_any_of(string_view const delims, char const *const buffer,
                          size_t const i) -> bool {
   return delims.find(buffer[i]) != delims.npos;
-}
-
-auto constexpr is_any_of(std::span<enum IR::types const> &&types,
-                         enum IR::types const t) -> bool {
-  for (auto &&type : types) {
-    if (type == t) {
-      return true;
-    }
-  }
-  return false;
 }
 
 enum class delims : size_t {
@@ -145,9 +133,9 @@ auto constexpr delims_at(delims &&del) -> string_view {
 // interpreted as an int (0 == false, x == true), so we can just have our
 // interpreter worry about int's and their expressions, how they get converted
 // to int's etc
-auto IR::Lexer::lex(FixedString const &file) -> Lexer {
+auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
   // clang-format off
-  static auto const keywords = unordered_map<string_view, enum Lexer::types>{{
+  static auto const keywords = unordered_map<string_view, enum PP_Lexer::types>{{
     {string_view{"#if"}, IF},
     {string_view{"#ifdef"}, IFDEF},
     {string_view{"#ifndef"}, IFNDEF},
@@ -160,8 +148,9 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
     {string_view{"#undef"}, UNDEF},
     {string_view{"#pragma"}, PRAGMA}
   }};
+  auto constexpr chars_of_interest = string_view{"#/\""};
   // clang-format on
-  auto lex = Lexer();
+  auto lex = PP_Lexer();
 
   auto const fcontent = file.buffer;
   for (auto i = size_t{}; i < file.size;) {
@@ -174,7 +163,7 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
       auto const keyword = keywords.find(hash_keyword);
       if (keyword == keywords.end()) {
         // continue to next character of interest
-        i = skip_until("#/\"", file.size, fcontent, i);
+        i = skip_until(chars_of_interest, file.size, fcontent, i);
         throw Lex_Exc(
             __LINE__,
             std::format("Hash keyword [{}], is not implimented", hash_keyword));
@@ -299,8 +288,8 @@ auto IR::Lexer::lex(FixedString const &file) -> Lexer {
   return lex;
 }
 
-auto IR::Lexer::parse_to_ir() -> IR {
-  auto ir = IR();
+auto PP_Lexer::parse_to_ast() -> IR_AST {
+  auto ir = IR_AST();
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
   while (cur_t < types.size()) {
@@ -311,11 +300,13 @@ auto IR::Lexer::parse_to_ir() -> IR {
       switch (types[cur_t]) {
       case LANGLE:
         cur_t += 3; // LANGLE CHAR_LIT RANGLE
-        ir.push(IR::GLOBAL_INCLUDE, lexemes[cur_lex++]);
+        ir.push(IR_AST::IR_Types::GLOBAL_INCLUDE,
+                ir.make_charlit(lexemes[cur_lex++]));
         break;
       case QUOTE:
         cur_t += 3; // QUOTE CHAR_LIT QUOTE
-        ir.push(IR::LOCAL_INCLUDE, lexemes[cur_lex++]);
+        ir.push(IR_AST::IR_Types::LOCAL_INCLUDE,
+                ir.make_charlit(lexemes[cur_lex++]));
         break;
       default:
         throw Lex_Exc(__LINE__, std::format("Malformed #include statement, "
@@ -325,23 +316,23 @@ auto IR::Lexer::parse_to_ir() -> IR {
       break;
     case IFDEF:
       cur_t += 2;
-      ir.push(IR::IFDEF, lexemes[cur_lex++]);
+      ir.push(IR_AST::IR_Types::IFDEF, ir.make_charlit(lexemes[cur_lex++]));
       break;
     case IFNDEF:
       cur_t += 2;
-      ir.push(IR::IFNDEF, lexemes[cur_lex++]);
+      ir.push(IR_AST::IR_Types::IFNDEF, ir.make_charlit(lexemes[cur_lex++]));
       break;
     case ENDIF:
       ++cur_t;
-      ir.push(IR::ENDIF, "");
+      ir.push(IR_AST::IR_Types::ENDIF, nullptr);
       break;
     case ELSE:
       ++cur_t;
-      ir.push(IR::ELSE, "");
+      ir.push(IR_AST::IR_Types::ELSE, nullptr);
       break;
     case DEFINE:
       cur_t += 2;
-      ir.push(IR::DEFINE, lexemes[cur_lex++]);
+      ir.push(IR_AST::IR_Types::DEFINE, ir.make_charlit(lexemes[cur_lex++]));
       break;
     default:
       throw Lex_Exc(__LINE__, std::format("Not implimented, type = [{}]",
@@ -352,92 +343,9 @@ auto IR::Lexer::parse_to_ir() -> IR {
   return ir;
 }
 
-auto IR::Lexer::to_string(enum types t) const -> string {
-  switch (t) {
-  case IF:
-    return string("IF");
-  case IFDEF:
-    return string("IFDEF");
-  case IFNDEF:
-    return string("IFNDEF");
-  case ELIF:
-    return string("ELIF");
-  case ELSE:
-    return string("ELSE");
-  case ENDIF:
-    return string("ENDIF");
-  case DEFINE:
-    return string("DEFINE");
-  case UNDEF:
-    return string("UNDEF");
-  case PRAGMA:
-    return string("PRAGMA");
-  case INCLUDE:
-    return string("INCLUDE");
-  case OP_AND:
-    return string("OP_AND");
-  case OP_OR:
-    return string("OP_OR");
-  case OP_BIT_AND:
-    return string("OP_BIT_AND");
-  case OP_BIT_OR:
-    return string("OP_BIT_OR");
-  case OP_DEFINED:
-    return string("OP_DEFINED");
-  case OP_LESS:
-    return string("OP_LESS");
-  case OP_LESS_EQUAL:
-    return string("OP_LESS_EQUAL");
-  case OP_GREATER:
-    return string("OP_GREATER");
-  case OP_GREATER_EQUAL:
-    return string("OP_GREATER_EQUAL");
-  case OP_STRINGIZING:
-    return string("OP_STRINGIZING");
-  case OP_CONCAT:
-    return string("OP_CONCAT");
-  case OP_PLUS:
-    return string("OP_PLUS");
-  case OP_MINUS:
-    return string("OP_MINUS");
-  case OP_STAR:
-    return string("OP_STAR");
-  case OP_SLASH:
-    return string("OP_SLASH");
-  case BANG:
-    return string("BANG");
-  case LPAREN:
-    return string("LPAREN");
-  case RPAREN:
-    return string("RPAREN");
-  case LANGLE:
-    return string("LANGLE");
-  case RANGLE:
-    return string("RANGLE");
-  case QUOTE:
-    return string("QUOTE");
-  case LIT_CHAR:
-    return string("LIT_CHAR");
-  case LIT_STRING:
-    return string("LIT_STRING");
-  case LIT_INT:
-    return string("LIT_INT");
-  case LIT_HEX:
-    return string("LIT_HEX");
-  case LIT_OCTAL:
-    return string("LIT_OCTAL");
-  case LIT_BINARY:
-    return string("LIT_BINARY");
-  case LIT_FLOAT:
-    return string("LIT_FLOAT");
-  case LEXEME:
-    return string("LEXEME");
-  }
-}
-
 // TODO: extract all of these delim strings into variables that we can check on
-auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
-                              size_t i) -> size_t {
+auto PP_Lexer::handle_hashif(size_t const size, char const *const buffer,
+                             size_t i) -> size_t {
   auto constexpr defined_str = string_view{"defined"};
   auto looping = true;
   while (looping && i < size) {
@@ -713,11 +621,13 @@ auto IR::Lexer::handle_hashif(size_t const size, char const *const buffer,
 }
 
 #ifdef DEBUG
-auto IR::Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
+auto PP_Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
+  out << "Types:\n\t";
   for (auto const &type : types) {
     out << '[' << to_string(type) << ']';
   }
   out << '\n';
+  out << "Lexemes:\n\t";
   for (auto const &lexeme : lexemes) {
     out << '[' << lexeme << ']';
   }
@@ -741,42 +651,54 @@ auto Interpret_Exc::what() const noexcept -> string {
                      line, message);
 }
 
-IR::IR()
-    : size(0), cap(8), types(std::make_unique<enum types[]>(cap)),
-      exprs(std::make_unique<std::string[]>(cap)) {}
+IR_AST::IR_AST()
+    : size(0), cap(8), ast(std::make_unique<IR_Types[]>(cap)),
+      exprs(std::make_unique<std::unique_ptr<Expr_Node>[]>(cap)) {}
 
-auto IR::parse(FixedString const &file) -> IR {
+auto parse(FixedString const &file) -> IR_AST {
 #ifdef DEBUG
-  auto lexer = Lexer::lex(file);
+  auto lexer = PP_Lexer::lex(file);
   lexer.display(std::cerr);
-  return lexer.parse_to_ir();
+  return lexer.parse_to_ast();
 #else
-  return Lexer::lex(file).parse_to_ir();
+  return PP_Lexer::lex(file).parse_to_ast();
 #endif
 }
 
-auto IR::check_size() -> void {
+auto IR_AST::check_size() -> void {
   if (size == cap) {
     auto const new_cap = cap * 2;
-    auto new_types = std::make_unique<enum IR::types[]>(new_cap);
-    auto new_exprs = std::make_unique<std::string[]>(new_cap);
+    auto new_ast = std::make_unique<IR_AST::IR_Types[]>(new_cap);
+    auto new_exprs = std::make_unique<std::unique_ptr<Expr_Node>[]>(new_cap);
 
-    std::memmove(new_types.get(), types.get(), sizeof(enum IR::types) * cap);
+    std::memmove(new_ast.get(), ast.get(), sizeof(enum IR_AST::IR_Types) * cap);
     for (auto i = size_t{}; i < cap; ++i) {
       new_exprs[i] = std::move(exprs[i]);
     }
-    types = std::move(new_types);
+    ast = std::move(new_ast);
     exprs = std::move(new_exprs);
     cap = new_cap;
   }
 }
 
-auto IR::push(enum types &&t, string_view &&sv) -> void {
-  types[size] = t;
-  exprs[size++] = sv;
+auto IR_AST::push(IR_AST::IR_Types t, std::unique_ptr<Expr_Node> &&expr)
+    -> void {
+  ast[size] = t;
+  exprs[size] = std::move(expr);
+  ++size;
 }
 
-auto IR_Interpreter::interpret(IR const &ir) -> vector<fs::path> {
+auto IR_AST::make_charlit(std::string_view const sv)
+    -> std::unique_ptr<Expr_Node> {
+  auto const start = static_cast<unsigned int>(lexemes.size);
+  lexemes.append(sv);
+  auto const end = static_cast<unsigned int>(lexemes.size);
+
+  auto res = std::make_unique<CharLit>(StringViews{start, end});
+  return nullptr;
+}
+
+auto IR_Interpreter::interpret(IR_AST const &ir) -> vector<fs::path> {
   auto vec = vector<fs::path>();
   for (auto i = size_t{}; i < ir.size;) {
     interpret_impl(false, ir, i, vec);
@@ -784,26 +706,34 @@ auto IR_Interpreter::interpret(IR const &ir) -> vector<fs::path> {
   return vec;
 }
 
-auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
+auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
                                     size_t &i, vector<fs::path> &vec) -> void {
+  auto constexpr terminating_nodes = std::array<IR_AST::IR_Types, 3>{
+      {IR_AST::IR_Types::ENDIF, IR_AST::IR_Types::ELSE,
+       IR_AST::IR_Types::ELIF}};
 #ifdef DEBUG
-  std::cerr << "\tLooking at [" << IR::pretty_types(ir.types[i]) << "]\n";
+  std::cerr << "\tLooking at [" << IR_AST::pretty_types(ir.ast[i]) << "]\n";
 #endif // DEBUG
-  switch (ir.types[i]) {
-  case IR::GLOBAL_INCLUDE: {
+  switch (ir.ast[i]) {
+  case IR_AST::IR_Types::GLOBAL_INCLUDE: {
     // TODO: check that this file *actually exists*
     ++i;
   } break;
-  case IR::LOCAL_INCLUDE: {
-    vec.push_back(ir.exprs[i++]);
+  case IR_AST::IR_Types::LOCAL_INCLUDE: {
+    auto const lit = ((CharLit *)(ir.exprs.get() + i))->lit;
+    auto const include_name = string(string_view{ir.lexemes.buffer + lit.start,
+                                                 ir.lexemes.buffer + lit.end});
+    vec.push_back(include_name);
   } break;
-  case IR::IF: {
+  case IR_AST::IR_Types::IF: {
     ++i;
     auto const expr = eval(ir, i);
     if (expr == 1) {
       while (i < ir.size) {
-        if (ir.types[i] == IR::ENDIF || ir.types[i] == IR::ELSE ||
-            ir.types[i] == IR::ELIF) {
+        if (std::any_of(terminating_nodes.cbegin(), terminating_nodes.cend(),
+                        [node = ir.ast[i]](auto &&cur_node) {
+                          return node == cur_node;
+                        })) {
           break;
         } else {
           interpret_impl(false, ir, i, vec);
@@ -812,30 +742,34 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
     } else {
     }
   } break;
-  case IR::IFDEF: {
-    auto const checking_macro = ir.exprs[i];
+  case IR_AST::IR_Types::IFDEF: {
+    auto const lit = ((CharLit *)(ir.exprs.get() + i))->lit;
+    auto const checking_macro = string(string_view{
+        ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
     auto const defined =
         macros.contains(checking_macro) || def_macros.contains(checking_macro);
     ++i;
     if (defined) {
       while (i < ir.size) {
-        if (ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
-            ir.types[i] == IR::ELIF)
+        if (std::any_of(terminating_nodes.cbegin(), terminating_nodes.cend(),
+                        [node = ir.ast[i]](auto &&cur_node) {
+                          return node == cur_node;
+                        }))
           break;
         interpret_impl(false, ir, i, vec);
       }
       if (i == ir.size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
-      while (i < ir.size && ir.types[i] != ir.ENDIF) {
-        ++i;
-      }
+      i = skip_until(i, ir.size, ir.ast.get(), IR_AST::IR_Types::ENDIF);
       if (i == ir.size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
       ++i; // move over the ENDIF
     } else {
       while (i < ir.size) {
-        if (!(ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
-              ir.types[i] == IR::ELIF)) {
+        if (!(std::any_of(terminating_nodes.begin(), terminating_nodes.end(),
+                          [node = ir.ast[i]](auto &&cur_node) {
+                            return cur_node == node;
+                          }))) {
           ++i;
         } else {
           break;
@@ -846,38 +780,40 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
 
       interpret_impl(true, ir, i, vec);
 
-      while (i < ir.size && ir.types[i] != IR::ENDIF) {
-        ++i;
-      }
+      i = skip_until(i, ir.size, ir.ast.get(), IR_AST::IR_Types::ENDIF);
       if (i == ir.size) {
         throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
       }
       ++i; // move over the #endif
     }
   } break;
-  case IR::IFNDEF: {
-    auto const checking_macro = ir.exprs[i++];
+  case IR_AST::IR_Types::IFNDEF: {
+    auto const lit = ((CharLit *)(ir.exprs.get() + i))->lit;
+    auto const checking_macro = string(string_view{
+        ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
     auto const defined =
         macros.contains(checking_macro) || def_macros.contains(checking_macro);
     if (!defined) {
       while (i < ir.size) {
-        if (ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
-            ir.types[i] == IR::ELIF)
+        if (std::any_of(terminating_nodes.begin(), terminating_nodes.end(),
+                        [node = ir.ast[i]](auto &&cur_node) {
+                          return node == cur_node;
+                        }))
           break;
         interpret_impl(false, ir, i, vec);
       }
       if (i == ir.size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
-      while (i < ir.size && ir.types[i] != ir.ENDIF) {
-        ++i;
-      }
+      i = skip_until(i, ir.size, ir.ast.get(), IR_AST::IR_Types::ENDIF);
       if (i == ir.size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
       ++i; // move over the ENDIF
     } else {
       while (i < ir.size) {
-        if (!(ir.types[i] == IR::ELSE || ir.types[i] == IR::ENDIF ||
-              ir.types[i] == IR::ELIF)) {
+        if (!std::any_of(terminating_nodes.begin(), terminating_nodes.end(),
+                         [node = ir.ast[i]](auto &&cur_node) {
+                           return cur_node == node;
+                         })) {
           ++i;
         } else {
           break;
@@ -886,28 +822,26 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
       if (i == ir.size)
         throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
 
-      if (ir.types[i] == IR::ENDIF) {
+      if (ir.ast[i] == IR_AST::IR_Types::ENDIF) {
         ++i;
         return;
       }
       interpret_impl(true, ir, i, vec);
 
-      while (i < ir.size && ir.types[i] != IR::ENDIF) {
-        ++i;
-      }
+      i = skip_until(i, ir.size, ir.ast.get(), IR_AST::IR_Types::ENDIF);
       if (i == ir.size) {
         throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
       }
     }
   } break;
-  case IR::ELSE: {
+  case IR_AST::IR_Types::ELSE: {
     if (!interpret_elses) {
       throw Interpret_Exc(__LINE__, "Unsupported interpretation of #else, "
                                     "possibly misformatted preprocessor");
     } else {
       ++i;
       while (i < ir.size) {
-        if (ir.types[i] == IR::ENDIF) {
+        if (ir.ast[i] == IR_AST::IR_Types::ENDIF) {
           break;
         } else {
           interpret_impl(false, ir, i, vec);
@@ -915,24 +849,35 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR const &ir,
       }
     }
   } break;
-  case IR::DEFINE: {
+  case IR_AST::IR_Types::DEFINE: {
     // TODO: parse object like macros
-    def_macros.emplace(ir.exprs[i++]);
+    // NOTE: this should be a dynamic_cast, but we have the fno-rtti flag, so we
+    // have to do the conversions ourselves
+    auto const lit = ((CharLit *)(ir.exprs.get() + i))->lit;
+    auto const defining_macro = string(string_view{
+        ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
+    def_macros.emplace(defining_macro);
   } break;
   default:
     throw Interpret_Exc(__LINE__, std::format("Not implimented, type = [{}]",
-                                              IR::pretty_types(ir.types[i])));
+                                              IR_AST::pretty_types(ir.ast[i])));
   }
 }
 
 // TODO
-auto IR_Interpreter::eval(IR const &ir, size_t &i) const -> int { return 0; }
+auto IR_Interpreter::eval(IR_AST const &ir, size_t &i) const -> int {
+  return 0;
+}
 
-auto IR_Interpreter::search_for_next_scope(IR const &ir, size_t i) const
+auto IR_Interpreter::search_for_next_scope(IR_AST const &ir, size_t i) const
     -> size_t {
+  auto constexpr terminating_nodes = std::array<IR_AST::IR_Types, 3>{
+      {IR_AST::IR_Types::ENDIF, IR_AST::IR_Types::ELSE,
+       IR_AST::IR_Types::ELIF}};
   while (i < ir.size) {
-    if (ir.types[i] == IR::ENDIF || ir.types[i] == IR::ELSE ||
-        ir.types[i] == IR::ELIF) {
+    if (std::any_of(
+            terminating_nodes.begin(), terminating_nodes.end(),
+            [node = ir.ast[i]](auto &&cur_node) { return cur_node == node; })) {
       break;
     } else {
       ++i;
