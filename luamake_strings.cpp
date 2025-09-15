@@ -4,9 +4,9 @@
 #include <iostream>
 
 namespace luamake {
-auto OwnedString::append(std::string &&str) noexcept -> void {
+auto OwnedString::append(std::string_view str) noexcept -> void {
   auto const str_len = str.length();
-  if (!(size < capacity - str_len - 1)) {
+  if (!(size + str_len + 1 < capacity)) {
     /* resize */
     auto next_cap = 3 * (capacity + str_len + 1) / 2;
     buffer = (char *)realloc(buffer, next_cap * sizeof(char));
