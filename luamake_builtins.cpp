@@ -523,14 +523,14 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   tree.files[this_idx].start = start;
   tree.files[this_idx].end = end;
 
-  auto const ir = ir::IR::parse(file_string);
+  auto const ir = ir::parse(file_string);
   auto const files_deps = interpreter.interpret(ir);
 
   for (auto const &file : files_deps) {
     auto const maybe_file = [&]() -> std::optional<fs::path> {
       for (auto const &include : includes) {
         auto const p = fs::canonical(include / file);
-#if DEBUG
+#ifdef DEBUG
         std::cerr << std::format("p.parent_path()/p.stem() = [{}], "
                                  "dep.parent_path()/dep.stem() = [{}]\n",
                                  (p.parent_path() / p.stem()).string(),
@@ -1179,7 +1179,7 @@ Module::Module(Module_t &&type, lua_State *state)
 
   lua_pop(state, 6);
 
-#if DEBUG
+#ifdef DEBUG
   std::cout << "---displaying---\n";
   display(std::cout);
 #endif
@@ -1193,7 +1193,7 @@ auto Module::gen_dep_tree() -> void {
     append_dep(root, DepTree::ROOT_IDX);
   }
 
-#if DEBUG
+#ifdef DEBUG
   tree.display(std::cout);
 #endif
 }
