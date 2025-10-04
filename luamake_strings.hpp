@@ -30,6 +30,10 @@ struct OwnedString final {
   OwnedString &operator=(OwnedString const &) = delete;
 
   auto append(std::string_view const) noexcept -> void;
+
+  auto constexpr view() const noexcept -> std::string_view {
+    return std::string_view{buffer, size};
+  }
 };
 
 constexpr OwnedString::OwnedString(char *&buffer, size_t size) noexcept
@@ -87,6 +91,10 @@ struct FixedString final {
 
   FixedString(FixedString const &) = delete;
   FixedString &operator=(FixedString const &) = delete;
+
+  auto constexpr view() const noexcept -> std::string_view {
+    return std::string_view{buffer, size};
+  }
 };
 
 constexpr FixedString::FixedString() noexcept : buffer(nullptr), size(0) {}
