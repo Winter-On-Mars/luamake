@@ -1180,8 +1180,8 @@ Module::Module(Module_t &&type, lua_State *state)
   lua_pop(state, 6);
 
 #ifdef DEBUG
-  std::cout << "---displaying---\n";
-  display(std::cout);
+  // std::cout << "---displaying---\n";
+  // display(std::cout);
 #endif
 }
 
@@ -1194,7 +1194,7 @@ auto Module::gen_dep_tree() -> void {
   }
 
 #ifdef DEBUG
-  tree.display(std::cout);
+  // tree.display(std::cout);
 #endif
 }
 
@@ -1448,10 +1448,10 @@ auto install_exe(lua_State *state) noexcept -> int {
                     "table, found [%s]",
                     lua_typename(state, ret_t));
 
-  // TODO: update these functions to throw exceptions
   try {
     auto main_mod = Module(Module::EXE, state);
 
+    // TODO: update these functions to throw exceptions
     auto ec = std::error_code{};
     if (fs::create_directories(
             fs::path(
@@ -1465,8 +1465,9 @@ auto install_exe(lua_State *state) noexcept -> int {
     ec.clear();
 
     main_mod.gen_dep_tree();
+    return 0;
 
-    // #if 0
+#if 0
     auto const actually_compiled_files = Compiler::compile(main_mod);
 
     // because of the format of `actually_compiled_files` for the best
@@ -1485,7 +1486,7 @@ auto install_exe(lua_State *state) noexcept -> int {
     } else {
       return 0;
     }
-    // #endif
+#endif
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
