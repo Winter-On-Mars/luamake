@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -82,7 +83,7 @@ struct PP_Lexer final {
     ELSE,
     ENDIF,
     DEFINE,
-    DEFINE_FUNC,
+    SPACE, // only used when dealing with #define directives
     INCLUDE,
     UNDEF,
     PRAGMA,
@@ -113,6 +114,7 @@ struct PP_Lexer final {
     RANGLE,
     QUOTE,
     // values
+    MACRO, // this is used when lexing, we leave the parsing to later
     LIT_CHAR,
     LIT_STRING,
     LIT_INT,
@@ -153,7 +155,8 @@ private:
 
   auto matching(size_t, std::initializer_list<enum PP_Lexer::types> &&) -> bool;
   auto handle_hashif(std::string_view const, size_t) -> size_t;
-  auto handle_hashdefine(std::string_view const, size_t) -> size_t;
+  auto parse_define_args(std::string_view const, size_t) -> size_t;
+  auto produce_string(std::string_view const, size_t &) -> std::string;
   // auto parse_expr(size_t &, size_t &, IR_AST &) -> Expr_Node;
   auto grab_string(size_t &, size_t &, IR_AST &) -> Expr_Node;
 
@@ -170,6 +173,26 @@ private:
    * @throws
    */
   auto expect(size_t, enum types) -> void;
+
+  /**
+   * @throws
+   */
+  template <class... Args> auto push_lexeme(Args &&...args) -> void {
+    types.push_back(LEXEME);
+    lexemes.push_back(std::string(args...));
+    // idk it should be like this but i think i'm using std::forward wrong
+    // lexemes.push_back(std::string(std::forward<std::string>(args)...));
+  }
+
+  /**
+   * @throws
+   */
+  template <class... Args> auto push_macro(Args &&...args) -> void {
+    types.push_back(MACRO);
+    lexemes.push_back(std::string(args...));
+    // idk it should be like this but i think i'm using std::forward wrong
+    // lexemes.push_back(std::string(std::forward<std::string>(args)...));
+  }
 };
 
 struct IR_Interpreter;
@@ -319,8 +342,8 @@ auto constexpr PP_Lexer::to_string(enum types t) -> std::string {
     return std::string("ENDIF");
   case DEFINE:
     return std::string("DEFINE");
-  case DEFINE_FUNC:
-    return std::string("DEFINE_FUNC");
+  case SPACE:
+    return std::string("SPACE");
   case UNDEF:
     return std::string("UNDEF");
   case PRAGMA:
@@ -375,6 +398,8 @@ auto constexpr PP_Lexer::to_string(enum types t) -> std::string {
     return std::string("RANGLE");
   case QUOTE:
     return std::string("QUOTE");
+  case MACRO:
+    return std::string("MACRO");
   case LIT_CHAR:
     return std::string("LIT_CHAR");
   case LIT_STRING:

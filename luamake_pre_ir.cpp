@@ -29,38 +29,30 @@ namespace ir {
 namespace {
 auto constexpr skip_ws(string_view const buf, size_t i) -> size_t {
   auto constexpr ws = std::string_view{" \t\n\r"};
+  // idk could probably just use this for this function
+  // it might be faster, something to test, also maybe more readable,
+  // maybe somebody could commit a pr with this as a commit that would be a good
+  // first commit :)
+  // [[auto const x = buf.find(ws, i);]]
   while (i < buf.size()) {
-    for (auto &&ch : ws) {
-      if (ch == buf[i]) {
-        return i;
-      }
+    if (ws.find(buf[i]) != ws.npos) {
+      return i;
     }
     ++i;
   }
   return i;
+}
+
+auto constexpr is_ws(char const ch) -> bool {
+  auto constexpr ws = std::string_view{" \t\n\r"};
+  return ws.find(ch) != ws.npos;
 }
 
 auto constexpr skip_until(string_view const delims, string_view const buf,
                           size_t i) -> size_t {
   while (i < buf.size()) {
-    for (auto &&delim : delims) {
-      if (delim == buf[i]) {
-        return i;
-      }
-    }
-    ++i;
-  }
-  return i;
-}
-
-template <size_t num_elements, std::array<char, num_elements> delims>
-auto constexpr skip_until(size_t const size, char const *buffer, size_t i)
-    -> size_t {
-  while (i < size) {
-    for (auto const ch : delims) {
-      if (ch == buffer[i]) {
-        return i;
-      }
+    if (delims.find(buf[i]) != delims.npos) {
+      return i;
     }
     ++i;
   }
@@ -221,32 +213,44 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
         lex.types.push_back(IFDEF);
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" \t\n\r", fcontent, i + 1);
-        lex.types.push_back(LEXEME);
-        lex.lexemes.push_back(string(start + i, start + end));
+        lex.push_lexeme(start + i, start + end);
       } break;
       case IFNDEF: {
         lex.types.push_back(IFNDEF);
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" \t\n\r", fcontent, i + 1);
-        lex.types.push_back(LEXEME);
-        lex.lexemes.push_back(string(start + i, start + end));
+        lex.push_lexeme(start + i, start + end);
       } break;
       case DEFINE: {
+        lex.types.push_back(DEFINE);
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" (\t\n\r", fcontent, i + 1);
-        lex.types.push_back(fcontent[end] == '(' ? DEFINE_FUNC : DEFINE);
-        lex.types.push_back(LEXEME);
-        lex.lexemes.push_back(string(start + i, start + end));
-
-        // TODO: add the rest of the lexemes
-
+        lex.push_lexeme(string(start + i, start + end));
+        if (fcontent[end] == '(') {
+          lex.types.push_back(SPACE);
+          lex.types.push_back(LPAREN);
+          i = lex.parse_define_args(fcontent, i + 1);
+          if (fcontent[i] != ')') {
+            throw Lex_Exc(__LINE__,
+                          std::format("Expected closing ')' when parsing a "
+                                      "function macros arguments"));
+          } else {
+            lex.types.push_back(RPAREN);
+          }
+          throw std::runtime_error(
+              "lexing args to a define macro is not currently implimented");
+        } else {
+          i = skip_ws(fcontent, i) + 1;
+          if (!is_ws(fcontent[i])) {
+            lex.push_macro(lex.produce_string(fcontent, i));
+          }
+        }
       } break;
       case UNDEF: {
         lex.types.push_back(UNDEF);
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" \t\n\r", fcontent, i + 1);
-        lex.types.push_back(LEXEME);
-        lex.lexemes.push_back(string(start + i, start + end));
+        lex.push_lexeme(start + i, start + end);
       } break;
       case IF:
         lex.types.push_back(IF);
@@ -362,7 +366,9 @@ auto PP_Lexer::parse_to_ast() -> IR_AST {
 }
 
 // TODO: extract all of these delim strings into variables that we can check on
-// TODO: add support for parsing != and == characters
+// TODO: update this to have a string that we build up, in case there's a '\'
+// char in there that we have to ignore, bc it can probably make the later steps
+// more annoying if we leave it in the lexemes string
 auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
   auto constexpr defined_str = string_view{"defined"};
   auto looping = true;
@@ -712,9 +718,43 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
   return i;
 }
 
+auto PP_Lexer::parse_define_args(string_view const fcontent, size_t i)
+    -> size_t {
+  auto end = i + 1;
+  auto looping = true;
+  while (looping) {
+    switch (fcontent[end]) {
+    case ')': {
+      if (end != i + 1) {
+        push_lexeme(fcontent.data() + i,
+                    fcontent.data() + end - 1); // fcontent[end] == ')'
+      }
+      looping = false;
+    } break;
+    case '.': {
+      throw std::runtime_error("Variatic macros are not currently supported");
+    } break;
+    case ',': {
+      push_lexeme(fcontent.data() + i,
+                  fcontent.data() + end - 1); // fcontent[end] == ','
+      i = skip_ws(fcontent, end + 1) + 1;
+      end = i;
+    } break;
+    default:
+      ++i;
+      break;
+    }
+  }
+  return i;
+}
+
 auto PP_Lexer::grab_string(size_t &cur_t, size_t &cur_lex, IR_AST &ir)
     -> Expr_Node {
-  throw std::runtime_error("Not impl");
+  throw std::runtime_error("grab_string Not impl");
+}
+
+auto PP_Lexer::produce_string(string_view const fcontent, size_t &i) -> string {
+  throw std::runtime_error("produce_string Not impl");
 }
 
 /*
@@ -1120,7 +1160,7 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
 
 // TODO
 auto IR_Interpreter::eval(IR_AST const &ir, size_t &i) const -> int {
-  return 0;
+  throw std::runtime_error("IR_Interpreter::eval not impl");
 }
 
 auto IR_Interpreter::search_for_next_scope(IR_AST const &ir, size_t i) const
