@@ -1,11 +1,12 @@
 #include "luamake_pre_ir.hpp"
+#include "common.hpp"
 #include "luamake_strings.hpp"
 
 #include <cctype>
 #include <cstddef>
 #include <cstring>
 #include <format>
-#include <iostream>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -23,6 +24,11 @@
 namespace fs = std::filesystem;
 
 using std::string, std::string_view, std::vector, std::unordered_map;
+
+// TODO: this system is over complicated, i think that we only really need 2
+// components instead of the 3 currently, a change to this would require a
+// complete rearchitecure of the code, and i'm too fucking exhaused to do that
+// rn, so i'll get to it in a later commit
 
 namespace luamake {
 namespace ir {
@@ -116,6 +122,51 @@ auto constexpr delims_list = std::array<string_view, 7>{
 auto constexpr delims_at(delims &&del) -> string_view {
   return delims_list[static_cast<std::underlying_type_t<delims>>(del)];
 }
+
+constexpr auto find_next_non_alpha(string_view const sv, size_t idx) -> size_t {
+  auto constexpr alphabet =
+      string_view{"dabcefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"};
+  while (idx < sv.size()) {
+    if (alphabet.find(sv[idx]) != alphabet.npos) {
+      ++idx;
+    }
+  }
+
+  return idx;
+}
+
+constexpr auto contains_lexemes(string_view const sv)
+    -> std::pair<bool, std::pair<size_t, size_t>> {
+  // reordered the alphabet to be a bit better to work with
+  auto constexpr alphabet =
+      string_view{"dabcefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"};
+  auto constexpr defined = string_view{"defined"};
+  auto idx = sv.find_first_of(alphabet);
+  while (idx != sv.npos) {
+    if (sv[idx] == 'd') {
+      // possibly the defined string
+      auto const possible_lex = sv.substr(idx, defined.size());
+      if (possible_lex == defined) {
+        // skip over the lexeme
+        idx = sv.find_first_of(alphabet, idx + defined.size());
+      } else {
+        return {true, {idx, find_next_non_alpha(sv, idx)}};
+      }
+    } else {
+      return {true, {idx, find_next_non_alpha(sv, idx)}};
+    }
+  }
+  return {false, {0, 0}};
+}
+
+static_assert(contains_lexemes(string_view{"alpha"}).first);
+static_assert(!contains_lexemes(string_view{"defined"}).first);
+static_assert(contains_lexemes(string_view{"1 + 2 * SIZE"}).first);
+static_assert(contains_lexemes(string_view{"1 + 2 * SIZE"}).second.first == 8);
+static_assert(contains_lexemes(string_view{"1 + 2 * SIZE"}).second.second ==
+              12);
+static_assert(string_view{"1 + 2 * SIZE"}.size() == 12);
+static_assert(!contains_lexemes(string_view{"defined(LIB1)"}).first);
 } // namespace
 
 // i would like to add lexical short cutting, where if we see a macro that's
@@ -179,7 +230,7 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
         lex.types.push_back(INCLUDE);
         switch (fcontent[i]) {
         case '<': {
-          lex.types.push_back(LANGLE);
+          lex.types.push_back(LESS);
 
           end = skip_until<'>'>(fcontent, i + 1);
 
@@ -189,7 +240,7 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
           lex.types.push_back(LIT_STRING);
           lex.lexemes.push_back(string(start + i + 1, start + end));
           i = end + 1;
-          lex.types.push_back(RANGLE);
+          lex.types.push_back(GREATER);
         } break;
         case '"': {
           lex.types.push_back(QUOTE);
@@ -307,16 +358,14 @@ auto PP_Lexer::parse_to_ast() -> IR_AST {
     case INCLUDE:
       ++cur_t;
       switch (types[cur_t]) {
-      case LANGLE:
+      case LESS:
         cur_t += 3; // LANGLE CHAR_LIT RANGLE
-        ir.push(IR_AST::IR_Types::GLOBAL_INCLUDE,
-                ir.make_charlit(lexemes[cur_lex]));
+        ir.push(IR_AST::IR_Types::GLOBAL_INCLUDE, lexemes[cur_lex]);
         ++cur_lex;
         break;
       case QUOTE:
         cur_t += 3; // QUOTE CHAR_LIT QUOTE
-        ir.push(IR_AST::IR_Types::LOCAL_INCLUDE,
-                ir.make_charlit(lexemes[cur_lex]));
+        ir.push(IR_AST::IR_Types::LOCAL_INCLUDE, lexemes[cur_lex]);
         ++cur_lex;
         break;
       default:
@@ -332,25 +381,25 @@ auto PP_Lexer::parse_to_ast() -> IR_AST {
     } break;
     case IFDEF:
       cur_t += 2;
-      ir.push(IR_AST::IR_Types::IFDEF, ir.make_charlit(lexemes[cur_lex]));
+      ir.push(IR_AST::IR_Types::IFDEF, lexemes[cur_lex]);
       ++cur_lex;
       break;
     case IFNDEF:
       cur_t += 2;
-      ir.push(IR_AST::IR_Types::IFNDEF, ir.make_charlit(lexemes[cur_lex]));
+      ir.push(IR_AST::IR_Types::IFNDEF, lexemes[cur_lex]);
       ++cur_lex;
       break;
     case ENDIF:
       ++cur_t;
-      ir.push(IR_AST::IR_Types::ENDIF, ir.make_nonelit());
+      ir.push(IR_AST::IR_Types::ENDIF, "");
       break;
     case ELSE:
       ++cur_t;
-      ir.push(IR_AST::IR_Types::ELSE, ir.make_nonelit());
+      ir.push(IR_AST::IR_Types::ELSE, "");
       break;
     case DEFINE:
       cur_t += 2;
-      ir.push(IR_AST::IR_Types::DEFINE, ir.make_charlit(lexemes[cur_lex]));
+      ir.push(IR_AST::IR_Types::DEFINE, "");
       ++cur_lex;
       break;
     default:
@@ -360,6 +409,7 @@ auto PP_Lexer::parse_to_ast() -> IR_AST {
     }
   }
 #ifdef DEBUG
+  std::cout << "IR\n";
   ir.shitty_display(std::cout).flush();
 #endif // DEBUG
   return ir;
@@ -749,8 +799,132 @@ auto PP_Lexer::parse_define_args(string_view const fcontent, size_t i)
 }
 
 auto PP_Lexer::grab_string(size_t &cur_t, size_t &cur_lex, IR_AST &ir)
-    -> Expr_Node {
-  throw std::runtime_error("grab_string Not impl");
+    -> string {
+  auto constexpr is_terminator = [](enum PP_Lexer::types const t) -> bool {
+    auto constexpr terminator_list = std::array<enum PP_Lexer::types, 11>{
+        {PP_Lexer::IF, PP_Lexer::IFDEF, PP_Lexer::IFNDEF, PP_Lexer::ELIF,
+         PP_Lexer::ELSE, PP_Lexer::ENDIF, PP_Lexer::DEFINE,
+         PP_Lexer::SPACE, // only used when dealing with #define directives
+         PP_Lexer::INCLUDE, PP_Lexer::UNDEF, PP_Lexer::PRAGMA}};
+    return std::any_of(terminator_list.begin(), terminator_list.end(),
+                       [t](auto &&x) { return x == t; });
+  };
+  auto str = string();
+  while (!is_terminator(types[cur_t])) {
+    switch (types[cur_t]) {
+    case PP_Lexer::AND:
+      str += "&&";
+      ++cur_t;
+      break;
+    case PP_Lexer::OR:
+      str += "||";
+      ++cur_t;
+      break;
+    case PP_Lexer::BIT_AND:
+      str += "&";
+      ++cur_t;
+      break;
+    case PP_Lexer::BIT_OR:
+      str += "|";
+      ++cur_t;
+      break;
+    case PP_Lexer::DEFINED:
+      str += "defined";
+      ++cur_t;
+      break;
+    case PP_Lexer::LESS:
+      str += "<";
+      ++cur_t;
+      break;
+    case PP_Lexer::LESS_EQ:
+      str += "<=";
+      ++cur_t;
+      break;
+    case PP_Lexer::GREATER:
+      str += ">";
+      ++cur_t;
+      break;
+    case PP_Lexer::GREATER_EQ:
+      str += ">=";
+      ++cur_t;
+      break;
+    case PP_Lexer::STRINGIZING:
+      str += "#";
+      ++cur_t;
+      break;
+    case PP_Lexer::CONCAT:
+      str += "##";
+      ++cur_t;
+      break;
+    case PP_Lexer::PLUS:
+      str += "+";
+      ++cur_t;
+      break;
+    case PP_Lexer::MINUS:
+      str += "-";
+      ++cur_t;
+      break;
+    case PP_Lexer::STAR:
+      str += "*";
+      ++cur_t;
+      break;
+    case PP_Lexer::SLASH:
+      str += "/";
+      ++cur_t;
+      break;
+    case PP_Lexer::BANG_EQ:
+      str += "!=";
+      ++cur_t;
+      break;
+    case PP_Lexer::EQ:
+      str += "=";
+      ++cur_t;
+      break;
+    case PP_Lexer::EQ_EQ:
+      str += "==";
+      ++cur_t;
+      break;
+    case PP_Lexer::BANG:
+      str += "!";
+      ++cur_t;
+      break;
+    case PP_Lexer::LPAREN:
+      str += "(";
+      ++cur_t;
+      break;
+    case PP_Lexer::RPAREN:
+      str += ")";
+      ++cur_t;
+      break;
+    case PP_Lexer::QUOTE:
+      str += "\"";
+      ++cur_t;
+      break;
+    case PP_Lexer::MACRO:
+      [[fallthrough]];
+    case PP_Lexer::LIT_CHAR:
+      [[fallthrough]];
+    case PP_Lexer::LIT_STRING:
+      [[fallthrough]];
+    case PP_Lexer::LIT_INT:
+      [[fallthrough]];
+    case PP_Lexer::LIT_HEX:
+      [[fallthrough]];
+    case PP_Lexer::LIT_OCTAL:
+      [[fallthrough]];
+    case PP_Lexer::LIT_BINARY:
+      [[fallthrough]];
+    case PP_Lexer::LIT_FLOAT:
+      [[fallthrough]];
+    case PP_Lexer::LEXEME:
+      str += lexemes[cur_lex++];
+      ++cur_t;
+      break;
+    default:
+      break;
+    }
+  }
+  return str;
 }
 
 auto PP_Lexer::produce_string(string_view const fcontent, size_t &i) -> string {
@@ -897,14 +1071,20 @@ auto Interpret_Exc::what() const noexcept -> string {
                      line, message);
 }
 
+auto Expr_Node::eval() const -> int {
+  throw std::runtime_error("Expr_Node::eval not impl");
+}
+
 IR_AST::IR_AST()
     : size(0), cap(8), ast(std::make_unique<IR_Types[]>(cap)),
-      exprs(std::make_unique<Expr_Node[]>(cap)) {}
+      exprs(std::make_unique<StringViews[]>(cap)) {}
 
 auto parse(FixedString const &file) -> IR_AST {
 #ifdef DEBUG
   auto lexer = PP_Lexer::lex(file);
-  lexer.display(std::cerr);
+  std::cout << "lexer\n";
+  lexer.display(std::cout);
+  std::cout.flush();
   return lexer.parse_to_ast();
 #else
   return PP_Lexer::lex(file).parse_to_ast();
@@ -915,22 +1095,39 @@ auto IR_AST::check_size() -> void {
   if (size == cap) {
     auto const new_cap = cap * 2;
     auto new_ast = std::make_unique<IR_AST::IR_Types[]>(new_cap);
-    auto new_exprs = std::make_unique<Expr_Node[]>(new_cap);
+    auto new_exprs = std::make_unique<StringViews[]>(new_cap);
 
     std::memmove(new_ast.get(), ast.get(), sizeof(enum IR_AST::IR_Types) * cap);
-    for (auto i = size_t{}; i < cap; ++i) {
-      new_exprs[i] = std::move(exprs[i]);
-    }
+    std::memmove(new_exprs.get(), exprs.get(), sizeof(StringViews) * cap);
     ast = std::move(new_ast);
     exprs = std::move(new_exprs);
     cap = new_cap;
   }
 }
 
-auto IR_AST::push(IR_AST::IR_Types t, Expr_Node &&expr) -> void {
-  ast[size] = t;
-  exprs[size] = std::move(expr);
-  ++size;
+auto IR_AST::push(IR_AST::IR_Types t, string const &expr) -> void {
+  if (expr == "") {
+    ast[size] = t;
+    exprs[size] = {0, 0};
+    ++size;
+  } else {
+    auto const start = lexemes.size;
+    lexemes.append(expr);
+    auto const end = lexemes.size;
+    if (start >= std::numeric_limits<unsigned int>::max() ||
+        end >= std::numeric_limits<unsigned int>::max()) {
+      throw std::runtime_error(std::format(
+          "Damn you have a lot of macros defined, idk what to do here because "
+          "you have more than [{}] macro strings. Feel free to open an issue "
+          "and fix this, all you have to do is change how StringViews is "
+          "implimented and everything to do with it :)",
+          std::numeric_limits<unsigned int>::max()));
+    }
+    ast[size] = t;
+    exprs[size] = {static_cast<unsigned int>(start),
+                   static_cast<unsigned int>(end)};
+    ++size;
+  }
 }
 
 auto IR_AST::make_charlit(std::string_view const sv) -> Expr_Node {
@@ -939,15 +1136,12 @@ auto IR_AST::make_charlit(std::string_view const sv) -> Expr_Node {
   auto const end = lexemes.size;
   if (start >= std::numeric_limits<unsigned int>::max() ||
       end >= std::numeric_limits<unsigned int>::max()) {
-    // TODO: throw some length too large error, and remove the non guarded
-    // #include <iostream>
-    std::cerr << std::format(
-        "Damn you have a lot of path strings, more than [{}], idk see about "
-        "opening an issue to change how the indexing work, increasing the "
-        "size "
-        "of the StringViews class?",
-        std::numeric_limits<unsigned int>::max());
-    std::terminate();
+    throw std::runtime_error(std::format(
+        "Damn you have a lot of macros defined, idk what to do here because "
+        "you have more than [{}] macro strings. Feel free to open an issue "
+        "and fix this, all you have to do is change how StringViews is "
+        "implimented and everything to do with it :)",
+        std::numeric_limits<unsigned int>::max()));
   }
   return Expr_Node(Expr_Node::CHARLIT, Expr_Node::CharLit(StringViews{
                                            static_cast<unsigned int>(start),
@@ -967,16 +1161,10 @@ auto IR_AST::shitty_display(std::ostream &out) const -> std::ostream & {
 
   out << "exprs:\n\t";
   for (auto i = size_t{}; i < size; ++i) {
-    switch (exprs[i].t) {
-    case Expr_Node::CHARLIT: {
-      auto const lit = std::get<Expr_Node::CharLit>((exprs.get() + i)->val).x;
-      auto str = string(lexemes.buffer + lit.start, lexemes.buffer + lit.end);
-      out << '[' << str << ']';
-    } break;
-
-    default:
-      out << '[' << Expr_Node::readable_type(exprs[i].t) << ']';
-    }
+    auto const lit = exprs[i];
+    out << '['
+        << string_view{lexemes.buffer + lit.start, lexemes.buffer + lit.end}
+        << ']';
   }
   out << "\n\n";
 
@@ -1007,16 +1195,17 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
     ++i;
   } break;
   case IR_AST::IR_Types::LOCAL_INCLUDE: {
-    auto const lit = std::get<Expr_Node::CharLit>((ir.exprs.get() + i)->val);
-    auto const include_name = string(string_view{
-        ir.lexemes.buffer + lit.x.start, ir.lexemes.buffer + lit.x.end});
+    auto const lit = ir.exprs[i];
+
+    auto const include_name = string(string_view{ir.lexemes.buffer + lit.start,
+                                                 ir.lexemes.buffer + lit.end});
     vec.push_back(include_name);
     ++i;
   } break;
   case IR_AST::IR_Types::IF: {
-    ++i;
     auto const expr = eval(ir, i);
     if (expr == 1) {
+      ++i;
       while (i < ir.size) {
         if (std::any_of(terminating_nodes.cbegin(), terminating_nodes.cend(),
                         [node = ir.ast[i]](auto &&cur_node) {
@@ -1028,10 +1217,11 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
         }
       }
     } else {
+      ++i;
     }
   } break;
   case IR_AST::IR_Types::IFDEF: {
-    auto const lit = std::get<Expr_Node::CharLit>((ir.exprs.get() + i)->val).x;
+    auto const lit = ir.exprs[i];
     auto const checking_macro = string(string_view{
         ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
     auto const defined =
@@ -1078,7 +1268,7 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
     }
   } break;
   case IR_AST::IR_Types::IFNDEF: {
-    auto const lit = std::get<Expr_Node::CharLit>((ir.exprs.get() + i)->val).x;
+    auto const lit = ir.exprs[i];
     auto const checking_macro = string(string_view{
         ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
     auto const defined =
@@ -1144,9 +1334,7 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
   } break;
   case IR_AST::IR_Types::DEFINE: {
     // TODO: parse object like macros
-    // NOTE: this should be a dynamic_cast, but we have the fno-rtti flag, so
-    // we have to do the conversions ourselves
-    auto const lit = std::get<Expr_Node::CharLit>((ir.exprs.get() + i)->val).x;
+    auto const lit = ir.exprs[i];
     auto const defining_macro = string(string_view{
         ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
     ++i;
@@ -1158,9 +1346,9 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
   }
 }
 
-// TODO
 auto IR_Interpreter::eval(IR_AST const &ir, size_t &i) const -> int {
-  throw std::runtime_error("IR_Interpreter::eval not impl");
+  auto const expr = expand_expr(ir, i);
+  return expr.eval();
 }
 
 auto IR_Interpreter::search_for_next_scope(IR_AST const &ir, size_t i) const
@@ -1178,6 +1366,56 @@ auto IR_Interpreter::search_for_next_scope(IR_AST const &ir, size_t i) const
     }
   }
   return i;
+}
+
+// TODO: the way we do this is by splitting the string around the lexemes, then
+// combining them together, it results in a lot of allocations and
+// deallocations, there is 100% a better way of doing this, like with just a
+// buffer, and some pointers showing where we have space
+// [[https://www.youtube.com/watch?v=g2hiVp6oPZc]] this video talks about a neat
+// data structure that should be able to solve the problem, but i'm just trying
+// to get this to work :)
+// TODO: handle function macros
+auto IR_Interpreter::expand_expr(IR_AST const &ir, size_t &i) const
+    -> Expr_Node {
+  fn_print();
+  auto &&[start, end] = ir.exprs[i];
+  auto str = string(ir.lexemes.buffer + start, ir.lexemes.buffer + end);
+#ifdef DEBUG
+  std::cout << "trying to expand [" << str << "]\n";
+  std::cout.flush();
+#endif // DEBUG
+  auto expanding = true;
+  while (expanding) {
+#ifdef DEBUG
+    std::cout << "expanding [" << str << "]\n";
+    std::cout.flush();
+#endif // DEBUG
+    if (auto &&[found, poses] = contains_lexemes(str); found) {
+      auto const head = str.substr(0, poses.first);
+      auto const lex = str.substr(poses.first, poses.second);
+#ifdef DEBUG
+      std::cout << "lex looking for = [" << lex << "]\n";
+      std::cout.flush();
+#endif // DEBUG
+      // TODO: emit a warning when the lexeme is not found, it's well defined by
+      // the standard, but it's really weird
+      auto const val = macros.find(lex) != macros.end()
+                           ? macros.find(lex)->second
+                       : def_macros.find(lex) != def_macros.end() ? string("")
+                                                                  : string("0");
+      auto const tail = str.substr(poses.second, str.npos);
+      str = std::format("{}{}{}", head, val, tail);
+    } else {
+      // done expanding, now we have to parse this into an ast
+      expanding = false;
+    }
+  }
+#ifdef DEBUG
+  std::cout << "fully macro expanded expr = [" << str << "]\n";
+  std::cout.flush();
+#endif // DEBUG
+  throw std::runtime_error("expand_expr not impl");
 }
 } // namespace ir
 } // namespace luamake
