@@ -15,7 +15,6 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <endian.h>
 #include <exception>
 #include <filesystem>
 #include <format>
@@ -30,11 +29,14 @@ extern "C" {
 #include <system_error>
 #include <thread>
 #include <tuple>
-#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <endian.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define LUA_ASSERT(L, A, B, ERROR)                                             \
   if ((A) != (B)) {                                                            \
@@ -899,10 +901,15 @@ auto Module::append_include_paths(string_view const compiler) -> void {
       }
       start_path = skip_ws(end_path);
     }
+    (void)waitpid(pid, nullptr, WNOHANG);
   } break;
   }
 }
 
+// TODO: update this so that macros that are just defined but don't have a value
+// are treated as being set to 1, this *should* be conformant with the std, and
+// it means we only have to carry around a single hashmap instead of a hashmap +
+// hashset
 auto Module::append_predefined_macros(string_view const compiler) -> void {
   auto _pipes = array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
@@ -1007,6 +1014,7 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
       throw CAPI(strerror(errno));
     }
 
+    (void)waitpid(pid, nullptr, WNOHANG);
     fclose(read_me);
     free(buffer);
     close(read_pipe);
