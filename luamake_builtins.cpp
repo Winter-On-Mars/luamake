@@ -794,7 +794,7 @@ auto Module::display(std::ostream &out) const noexcept -> void {
 
   out << "macros = {\n";
   for (auto &&[name, value] : macros) {
-    out << name << "=" << value.m << ",\n";
+    out << name << "=" << value << ",\n";
   }
   out << "}\n";
 
@@ -1005,9 +1005,8 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
         ++macro_cur;
       }
 
-      macros.emplace(macro_name,
-                     ir::Macro{ir::Macro::STRING, string(buffer + macro_start,
-                                                         buffer + macro_cur)});
+      macros.emplace(macro_name, ir::Macro{string(buffer + macro_start,
+                                                  buffer + macro_cur)});
     }
 
     if (errno != 0) {
