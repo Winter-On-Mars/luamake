@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -57,21 +58,9 @@ struct Interpret_Exc final : public Exception {
   auto what() const noexcept -> std::string final;
 };
 
-struct Macro final {
-  enum MacroType {
-    INT,
-    FLOAT,
-    STRING,
-    TYPE,
-    ATTRIBUTE,
-  };
-
-  MacroType t;
-  std::string m;
-};
+using Macro = std::string;
 
 struct IR_AST;
-struct Expr_Node;
 
 struct PP_Lexer final {
   enum types : unsigned char {
@@ -110,8 +99,6 @@ struct PP_Lexer final {
     BANG,
     LPAREN,
     RPAREN,
-    LANGLE,
-    RANGLE,
     QUOTE,
     // values
     MACRO, // this is used when lexing, we leave the parsing to later
@@ -140,7 +127,6 @@ struct PP_Lexer final {
 
   /**
    * @throws Lex_Exc
-   * TODO: rework this to entierly use a recursive descent parser
    */
   auto parse_to_ast() -> ir::IR_AST;
 
@@ -158,7 +144,7 @@ private:
   auto parse_define_args(std::string_view const, size_t) -> size_t;
   auto produce_string(std::string_view const, size_t &) -> std::string;
   // auto parse_expr(size_t &, size_t &, IR_AST &) -> Expr_Node;
-  auto grab_string(size_t &, size_t &, IR_AST &) -> Expr_Node;
+  auto grab_string(size_t &, size_t &, IR_AST &) -> std::string;
 
 #if 0
   auto equality(size_t &, size_t &, IR_AST &) -> Expr_Node;
@@ -190,8 +176,6 @@ private:
   template <class... Args> auto push_macro(Args &&...args) -> void {
     types.push_back(MACRO);
     lexemes.push_back(std::string(args...));
-    // idk it should be like this but i think i'm using std::forward wrong
-    // lexemes.push_back(std::string(std::forward<std::string>(args)...));
   }
 };
 
@@ -242,7 +226,12 @@ struct Expr_Node {
   Expr_Node(Expr_Node const &) = delete;
   Expr_Node &operator=(Expr_Node const &) = delete;
 
-  static auto constexpr readable_type(Expr_t) noexcept -> char const *;
+  static auto constexpr readable_type(Expr_t) noexcept -> std::string_view;
+  /**
+   * @throws Interpret_Exc
+   * (if a float is found)
+   */
+  auto eval() const -> int;
 };
 
 // TODO: current the parser is an aggressive parser,
@@ -279,14 +268,14 @@ struct IR_AST final {
   size_t size;
   size_t cap;
   std::unique_ptr<IR_Types[]> ast;
-  std::unique_ptr<Expr_Node[]> exprs;
+  std::unique_ptr<StringViews[]> exprs;
 
 private:
   /**
    * @throws std::bad_alloc
    */
   auto check_size() -> void;
-  auto push(IR_Types, Expr_Node &&) -> void;
+  auto push(IR_Types, std::string const &) -> void;
 
   auto make_charlit(std::string_view const) -> Expr_Node;
   auto make_nonelit() const -> Expr_Node;
@@ -322,6 +311,8 @@ private:
   auto eval(IR_AST const &, size_t &i) const -> int;
   // looks for the next #else, #elif, or #endif
   auto search_for_next_scope(IR_AST const &, size_t) const -> size_t;
+  auto expand_expr(IR_AST const &, size_t &) const -> Expr_Node;
+  auto get_lexeme(IR_AST const &, size_t) const -> std::string_view;
 };
 
 auto parse(FixedString const &) -> IR_AST;
@@ -392,10 +383,6 @@ auto constexpr PP_Lexer::to_string(enum types t) -> std::string {
     return std::string("LPAREN");
   case RPAREN:
     return std::string("RPAREN");
-  case LANGLE:
-    return std::string("LANGLE");
-  case RANGLE:
-    return std::string("RANGLE");
   case QUOTE:
     return std::string("QUOTE");
   case MACRO:
@@ -419,18 +406,18 @@ auto constexpr PP_Lexer::to_string(enum types t) -> std::string {
   }
 }
 
-auto constexpr Expr_Node::readable_type(Expr_t t) noexcept -> char const * {
+auto constexpr Expr_Node::readable_type(Expr_t t) noexcept -> std::string_view {
   switch (t) {
   case INT:
-    return "INT";
+    return std::string_view{"INT"};
   case NUMBER:
-    return "NUMBER";
+    return std::string_view{"NUMBER"};
   case DEFINED:
-    return "DEFINED";
+    return std::string_view{"DEFINED"};
   case CHARLIT:
-    return "CHARLIT";
+    return std::string_view{"CHARLIT"};
   case NONE:
-    return "NONE";
+    return std::string_view{"NONE"};
   }
 }
 
