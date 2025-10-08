@@ -412,10 +412,10 @@ struct Module final {
   vector<fs::path> roots;
   vector<fs::path> includes;
   vector<fs::path> linking;
-  std::unordered_map<string, ir::Macro>
+  std::unordered_map<string, pp::Macro>
       macros; // these are all macros with values
   std::unordered_set<string> def_macros;
-  ir::IR_Interpreter interpreter;
+  pp::Interpreter interpreter;
   std::string compiler;
   char const *name;
   char const *install_dir;
@@ -520,12 +520,7 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   tree.types[this_idx] = ftype;
   tree.files[this_idx] = str;
 
-#ifdef DEBUG
-  auto const ir = ir::parse(file_string);
-  auto const files_deps = interpreter.interpret(ir);
-#else
-  auto const files_deps = interpreter.interpret(ir::parse(file_string));
-#endif // DEBUG
+  auto const files_deps = interpreter.interpret(file_string);
 
   for (auto const &file : files_deps) {
     auto const maybe_file = [&]() -> std::optional<fs::path> {
@@ -1004,7 +999,7 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
         ++macro_cur;
       }
 
-      macros.emplace(macro_name, ir::Macro{string(buffer + macro_start,
+      macros.emplace(macro_name, pp::Macro{string(buffer + macro_start,
                                                   buffer + macro_cur)});
     }
 
@@ -1499,7 +1494,7 @@ auto install_exe(lua_State *state) noexcept -> int {
   } catch (DepTreeErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
-  } catch (ir::Exception const &e) {
+  } catch (pp::Exception const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
   } catch (std::exception const &e) {
@@ -1558,7 +1553,7 @@ auto install_static(lua_State *state) noexcept -> int {
   } catch (DepTreeErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
-  } catch (ir::Exception const &e) {
+  } catch (pp::Exception const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
   } catch (std::exception const &e) {
