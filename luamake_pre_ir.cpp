@@ -14,7 +14,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
-#include <unordered_set>
+#include <variant>
 #include <vector>
 
 #ifdef DEBUG
@@ -31,7 +31,7 @@ using std::string, std::string_view, std::vector, std::unordered_map;
 // rn, so i'll get to it in a later commit
 
 namespace luamake {
-namespace ir {
+namespace pp {
 namespace {
 auto constexpr skip_ws(string_view const buf, size_t i) -> size_t {
   auto constexpr ws = std::string_view{" \t\n\r"};
@@ -122,52 +122,372 @@ auto constexpr delims_list = std::array<string_view, 7>{
 auto constexpr delims_at(delims &&del) -> string_view {
   return delims_list[static_cast<std::underlying_type_t<delims>>(del)];
 }
-
-constexpr auto find_next_non_alpha(string_view const sv, size_t idx) -> size_t {
-  auto constexpr alphabet =
-      string_view{"dabcefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"};
-  while (idx < sv.size()) {
-    if (alphabet.find(sv[idx]) != alphabet.npos) {
-      ++idx;
-    }
-  }
-
-  return idx;
-}
-
-constexpr auto contains_lexemes(string_view const sv)
-    -> std::pair<bool, std::pair<size_t, size_t>> {
-  // reordered the alphabet to be a bit better to work with
-  auto constexpr alphabet =
-      string_view{"dabcefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"};
-  auto constexpr defined = string_view{"defined"};
-  auto idx = sv.find_first_of(alphabet);
-  while (idx != sv.npos) {
-    if (sv[idx] == 'd') {
-      // possibly the defined string
-      auto const possible_lex = sv.substr(idx, defined.size());
-      if (possible_lex == defined) {
-        // skip over the lexeme
-        idx = sv.find_first_of(alphabet, idx + defined.size());
-      } else {
-        return {true, {idx, find_next_non_alpha(sv, idx)}};
-      }
-    } else {
-      return {true, {idx, find_next_non_alpha(sv, idx)}};
-    }
-  }
-  return {false, {0, 0}};
-}
-
-static_assert(contains_lexemes(string_view{"alpha"}).first);
-static_assert(!contains_lexemes(string_view{"defined"}).first);
-static_assert(contains_lexemes(string_view{"1 + 2 * SIZE"}).first);
-static_assert(contains_lexemes(string_view{"1 + 2 * SIZE"}).second.first == 8);
-static_assert(contains_lexemes(string_view{"1 + 2 * SIZE"}).second.second ==
-              12);
-static_assert(string_view{"1 + 2 * SIZE"}.size() == 12);
-static_assert(!contains_lexemes(string_view{"defined(LIB1)"}).first);
 } // namespace
+
+struct Ast;
+
+enum class ir_t : u8 {
+  // preprocessor stuff
+  IF,
+  IFDEF,
+  IFNDEF,
+  ELIF,
+  ELSE,
+  ENDIF,
+  DEFINE,
+  SPACE, // only used when dealing with #define directives
+  INCLUDE,
+  UNDEF,
+  PRAGMA,
+  // operators
+  // TODO: add other operators
+  AND,
+  OR,
+  BIT_AND,
+  BIT_OR,
+  DEFINED,
+  LESS,
+  LESS_EQ,
+  GREATER,
+  GREATER_EQ,
+  STRINGIZING,
+  CONCAT,
+  PLUS,
+  MINUS,
+  STAR,
+  SLASH,
+  BANG_EQ,
+  EQ,
+  EQ_EQ,
+  BANG,
+  LPAREN,
+  RPAREN,
+  QUOTE,
+  // values
+  MACRO, // this is used when lexing, we leave the parsing to later
+  LIT_CHAR,
+  LIT_STRING,
+  LIT_INT,
+  LIT_HEX,
+  LIT_OCTAL,
+  LIT_BINARY,
+  LIT_FLOAT,
+  LEXEME,
+};
+
+constexpr auto to_string(ir_t) -> std::string_view;
+
+struct Lexer final {
+  Lexer(Lexer const &) = delete;
+  Lexer &operator=(Lexer const &) = delete;
+  Lexer(Lexer &&) = default;
+  Lexer &operator=(Lexer &&) = default;
+  ~Lexer() = default;
+
+  std::vector<ir_t> types;
+  std::vector<std::string> lexemes;
+
+  /**
+   * @throws Lex_Exc
+   */
+  static auto lex(FixedString const &) -> Lexer;
+
+  /**
+   * @throws Lex_Exc
+   */
+  auto parse_to_ast() -> Ast;
+
+#ifdef DEBUG
+  auto display(std::ostream &) const noexcept -> std::ostream &;
+#endif
+
+  Lexer() = default;
+
+  auto matching(size_t, std::initializer_list<ir_t> &&) -> bool;
+  auto handle_hashif(std::string_view const, size_t) -> size_t;
+  auto parse_define_args(std::string_view const, size_t) -> size_t;
+  auto produce_string(std::string_view const, size_t &) -> std::string;
+  // auto parse_expr(size_t &, size_t &, IR_AST &) -> Expr_Node;
+  auto grab_string(size_t &, size_t &, Ast &) -> std::string;
+
+  /**
+   * @throws
+   */
+  auto expect(size_t, ir_t) -> void;
+
+  /**
+   * @throws
+   */
+  template <class... Args> auto push_lexeme(Args &&...args) -> void {
+    types.push_back(ir_t::LEXEME);
+    lexemes.push_back(std::string(args...));
+    // idk it should be like this but i think i'm using std::forward wrong
+    // lexemes.push_back(std::string(std::forward<std::string>(args)...));
+  }
+
+  /**
+   * @throws
+   */
+  template <class... Args> auto push_macro(Args &&...args) -> void {
+    types.push_back(ir_t::MACRO);
+    lexemes.push_back(std::string(args...));
+  }
+};
+
+// TODO: optimize this struct, you can probably combine the Expr_t variable with
+// the binary/unary operator in some bit field being or'd, but for now i'm just
+// trying to get this working
+struct Expr_Node {
+  struct Integer final {
+    size_t x;
+  };
+  struct Number final {
+    double x;
+  };
+  struct Defined final {
+    StringViews x;
+  };
+  struct CharLit final {
+    StringViews x;
+  };
+  struct Binary final {
+    enum Binary_t { PLUS, MINUS, GREATER, GREATER_EQ, LESS, LESS_EQ };
+    std::unique_ptr<Expr_Node> lhs;
+    std::unique_ptr<Expr_Node> rhs;
+    Binary_t t;
+  };
+  struct Unary final {
+    enum Unary_t { BANG, MINUS };
+    std::unique_ptr<Expr_Node> un;
+    Unary_t t;
+  };
+  enum Expr_t {
+    INT,
+    NUMBER,
+    DEFINED,
+    CHARLIT,
+    NONE,
+  } t;
+  using Value =
+      std::variant<Integer, Number, Defined, CharLit, Binary, Unary, void *>;
+  Value val;
+  Expr_Node() noexcept : t(NONE), val((void *)nullptr) {}
+  Expr_Node(Expr_t &&t, Value &&val) noexcept : t(t), val(std::move(val)) {}
+  Expr_Node(Expr_Node &&) = default;
+  Expr_Node &operator=(Expr_Node &&) = default;
+
+  Expr_Node(Expr_Node const &) = delete;
+  Expr_Node &operator=(Expr_Node const &) = delete;
+
+  static auto constexpr readable_type(Expr_t) noexcept -> std::string_view;
+  /**
+   * @throws Interpret_Exc
+   * (if a float is found)
+   */
+  auto eval() const -> int;
+};
+
+struct Ast final {
+  /**
+   * @throws std::bad_alloc
+   */
+  Ast();
+  Ast(Ast const &) = delete;
+  Ast &operator=(Ast const &) = delete;
+  Ast(Ast &&) = default;
+  Ast &operator=(Ast &&) = default;
+  ~Ast() = default;
+  // these are all pp directives
+  enum class Ast_t {
+    IF,
+    IFDEF,
+    IFNDEF,
+    ELIF,
+    ELSE,
+    ENDIF,
+    GLOBAL_INCLUDE,
+    LOCAL_INCLUDE,
+    DEFINE,
+    UNDEF,
+  };
+
+  static auto constexpr pretty_types(Ast_t) -> string_view;
+
+  OwnedString lexemes;
+  size_t size;
+  size_t cap;
+  std::unique_ptr<Ast_t[]> ast;
+  std::unique_ptr<StringViews[]> exprs;
+
+  /**
+   * @throws std::bad_alloc
+   */
+  auto check_size() -> void;
+  auto push(Ast_t, std::string const &) -> void;
+
+  auto make_charlit(std::string_view const) -> Expr_Node;
+  auto make_nonelit() const -> Expr_Node;
+
+#ifdef DEBUG
+  auto shitty_display(std::ostream &) const -> std::ostream &;
+#endif // DEBUG
+
+  auto constexpr num_includes() const noexcept -> size_t;
+};
+
+struct State final {
+  enum state : u8 {
+    DEFAULT,
+    IF,
+    ELSE,
+    ENDIF,
+    DEFINE,
+    GINCLUDE,
+    LINCLUDE
+  } t = DEFAULT;
+  auto interpret(size_t, Interpreter &, Ast const &,
+                 std::vector<std::filesystem::path> &) -> size_t;
+};
+
+auto constexpr to_string(ir_t t) -> std::string_view {
+  switch (t) {
+  case ir_t::IF:
+    return std::string_view("IF");
+  case ir_t::IFDEF:
+    return std::string_view("IFDEF");
+  case ir_t::IFNDEF:
+    return std::string_view("IFNDEF");
+  case ir_t::ELIF:
+    return std::string_view("ELIF");
+  case ir_t::ELSE:
+    return std::string_view("ELSE");
+  case ir_t::ENDIF:
+    return std::string_view("ENDIF");
+  case ir_t::DEFINE:
+    return std::string_view("DEFINE");
+  case ir_t::SPACE:
+    return std::string_view("SPACE");
+  case ir_t::UNDEF:
+    return std::string_view("UNDEF");
+  case ir_t::PRAGMA:
+    return std::string_view("PRAGMA");
+  case ir_t::INCLUDE:
+    return std::string_view("INCLUDE");
+  case ir_t::AND:
+    return std::string_view("AND");
+  case ir_t::OR:
+    return std::string_view("OR");
+  case ir_t::BIT_AND:
+    return std::string_view("BIT_AND");
+  case ir_t::BIT_OR:
+    return std::string_view("BIT_OR");
+  case ir_t::DEFINED:
+    return std::string_view("DEFINED");
+  case ir_t::LESS:
+    return std::string_view("LESS");
+  case ir_t::LESS_EQ:
+    return std::string_view("LESS_EQ");
+  case ir_t::GREATER:
+    return std::string_view("GREATER");
+  case ir_t::GREATER_EQ:
+    return std::string_view("GREATER_EQ");
+  case ir_t::STRINGIZING:
+    return std::string_view("STRINGIZING");
+  case ir_t::CONCAT:
+    return std::string_view("CONCAT");
+  case ir_t::PLUS:
+    return std::string_view("PLUS");
+  case ir_t::MINUS:
+    return std::string_view("MINUS");
+  case ir_t::STAR:
+    return std::string_view("STAR");
+  case ir_t::SLASH:
+    return std::string_view("SLASH");
+  case ir_t::BANG_EQ:
+    return std::string_view("BANG_EQ");
+  case ir_t::EQ:
+    return std::string_view("EQ");
+  case ir_t::EQ_EQ:
+    return std::string_view("EQ_EQ");
+  case ir_t::BANG:
+    return std::string_view("BANG");
+  case ir_t::LPAREN:
+    return std::string_view("LPAREN");
+  case ir_t::RPAREN:
+    return std::string_view("RPAREN");
+  case ir_t::QUOTE:
+    return std::string_view("QUOTE");
+  case ir_t::MACRO:
+    return std::string_view("MACRO");
+  case ir_t::LIT_CHAR:
+    return std::string_view("LIT_CHAR");
+  case ir_t::LIT_STRING:
+    return std::string_view("LIT_STRING");
+  case ir_t::LIT_INT:
+    return std::string_view("LIT_INT");
+  case ir_t::LIT_HEX:
+    return std::string_view("LIT_HEX");
+  case ir_t::LIT_OCTAL:
+    return std::string_view("LIT_OCTAL");
+  case ir_t::LIT_BINARY:
+    return std::string_view("LIT_BINARY");
+  case ir_t::LIT_FLOAT:
+    return std::string_view("LIT_FLOAT");
+  case ir_t::LEXEME:
+    return std::string_view("LEXEME");
+  }
+}
+
+auto constexpr Expr_Node::readable_type(Expr_t t) noexcept -> std::string_view {
+  switch (t) {
+  case INT:
+    return std::string_view{"INT"};
+  case NUMBER:
+    return std::string_view{"NUMBER"};
+  case DEFINED:
+    return std::string_view{"DEFINED"};
+  case CHARLIT:
+    return std::string_view{"CHARLIT"};
+  case NONE:
+    return std::string_view{"NONE"};
+  }
+}
+
+auto constexpr Ast::pretty_types(Ast_t t) -> string_view {
+  switch (t) {
+  case Ast_t::IF:
+    return string_view{"IF"};
+  case Ast_t::IFDEF:
+    return string_view{"IFDEF"};
+  case Ast_t::IFNDEF:
+    return string_view{"IFNDEF"};
+  case Ast_t::ELIF:
+    return string_view{"ELIF"};
+  case Ast_t::ELSE:
+    return string_view{"ELSE"};
+  case Ast_t::ENDIF:
+    return string_view{"ENDIF"};
+  case Ast_t::GLOBAL_INCLUDE:
+    return string_view{"GLOBAL_INCLUDE"};
+  case Ast_t::LOCAL_INCLUDE:
+    return string_view{"LOCAL_INCLUDE"};
+  case Ast_t::DEFINE:
+    return string_view{"DEFINE"};
+  case Ast_t::UNDEF:
+    return string_view{"UNDEF"};
+  }
+}
+
+auto constexpr Ast::num_includes() const noexcept -> size_t {
+  auto num_includes = size_t{};
+  for (auto i = size_t{}; i < size; ++i) {
+    if (ast[i] == Ast::Ast_t::GLOBAL_INCLUDE ||
+        ast[i] == Ast::Ast_t::LOCAL_INCLUDE) {
+      ++num_includes;
+    }
+  }
+  return num_includes;
+}
 
 // i would like to add lexical short cutting, where if we see a macro that's
 // already been defined in something like a header guard, then we completely
@@ -178,24 +498,24 @@ static_assert(!contains_lexemes(string_view{"defined(LIB1)"}).first);
 // interpreted as an int (0 == false, x == true), so we can just have our
 // interpreter worry about int's and their expressions, how they get converted
 // to int's etc
-auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
+auto Lexer::lex(FixedString const &file) -> Lexer {
   // clang-format off
-  static auto const keywords = unordered_map<string_view, enum PP_Lexer::types>{{
-    {string_view{"#if"}, IF},
-    {string_view{"#ifdef"}, IFDEF},
-    {string_view{"#ifndef"}, IFNDEF},
-    {string_view{"#elif"}, ELIF},
-    {string_view{"#else"}, ELSE},
-    {string_view{"#endif"}, ENDIF},
-    {string_view{"#define"}, DEFINE},
-    {string_view{"#include"}, INCLUDE},
-    {string_view{"defined"}, DEFINED},
-    {string_view{"#undef"}, UNDEF},
-    {string_view{"#pragma"}, PRAGMA}
+  static auto const keywords = unordered_map<string_view, ir_t>{{
+    {string_view{"#if"}, ir_t::IF},
+    {string_view{"#ifdef"}, ir_t::IFDEF},
+    {string_view{"#ifndef"}, ir_t::IFNDEF},
+    {string_view{"#elif"}, ir_t::ELIF},
+    {string_view{"#else"}, ir_t::ELSE},
+    {string_view{"#endif"}, ir_t::ENDIF},
+    {string_view{"#define"}, ir_t::DEFINE},
+    {string_view{"#include"}, ir_t::INCLUDE},
+    {string_view{"defined"}, ir_t::DEFINED},
+    {string_view{"#undef"}, ir_t::UNDEF},
+    {string_view{"#pragma"}, ir_t::PRAGMA}
   }};
   auto constexpr chars_of_interest = string_view{"#/\""};
   // clang-format on
-  auto lex = PP_Lexer();
+  auto lex = Lexer();
   lex.types.reserve(64);
   lex.lexemes.reserve(10);
 
@@ -212,81 +532,83 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
       if (keyword == keywords.end()) {
         // continue to next character of interest
         i = skip_until(chars_of_interest, fcontent, i);
-        throw Lex_Exc(
+        throw Exception(
             __LINE__,
             std::format("Hash keyword [{}], is not implimented", hash_keyword));
       }
 
       switch (keyword->second) {
-      case INCLUDE: {
+      case ir_t::INCLUDE: {
         if (i >= file.size)
-          throw Lex_Exc(__LINE__, string("Unable to parse include parameter"));
+          throw Exception(__LINE__,
+                          string("Unable to parse include parameter"));
 
         i = skip_ws(fcontent, i) + 1;
 
         if (i >= file.size)
-          throw Lex_Exc(__LINE__, string("Unable to parse include parameter"));
+          throw Exception(__LINE__,
+                          string("Unable to parse include parameter"));
 
-        lex.types.push_back(INCLUDE);
+        lex.types.push_back(ir_t::INCLUDE);
         switch (fcontent[i]) {
         case '<': {
-          lex.types.push_back(LESS);
+          lex.types.push_back(ir_t::LESS);
 
           end = skip_until<'>'>(fcontent, i + 1);
 
           if (!(end < file.size))
-            throw Lex_Exc(__LINE__, string("Non terminated global include"));
+            throw Exception(__LINE__, string("Non terminated global include"));
 
-          lex.types.push_back(LIT_STRING);
+          lex.types.push_back(ir_t::LIT_STRING);
           lex.lexemes.push_back(string(start + i + 1, start + end));
           i = end + 1;
-          lex.types.push_back(GREATER);
+          lex.types.push_back(ir_t::GREATER);
         } break;
         case '"': {
-          lex.types.push_back(QUOTE);
+          lex.types.push_back(ir_t::QUOTE);
 
           end = skip_until<'"'>(fcontent, i + 1);
 
           if (!(end < file.size))
-            throw Lex_Exc(__LINE__, string("Non terminated local include"));
+            throw Exception(__LINE__, string("Non terminated local include"));
 
-          lex.types.push_back(LIT_STRING);
+          lex.types.push_back(ir_t::LIT_STRING);
           lex.lexemes.push_back(string(start + i + 1, start + end));
           i = end + 1;
-          lex.types.push_back(QUOTE);
+          lex.types.push_back(ir_t::QUOTE);
         } break;
         default:
-          throw Lex_Exc(__LINE__,
-                        std::format("character found = {}", fcontent[i]));
+          throw Exception(__LINE__,
+                          std::format("character found = {}", fcontent[i]));
         }
       } break;
-      case IFDEF: {
-        lex.types.push_back(IFDEF);
+      case ir_t::IFDEF: {
+        lex.types.push_back(ir_t::IFDEF);
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" \t\n\r", fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
-      case IFNDEF: {
-        lex.types.push_back(IFNDEF);
+      case ir_t::IFNDEF: {
+        lex.types.push_back(ir_t::IFNDEF);
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" \t\n\r", fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
-      case DEFINE: {
-        lex.types.push_back(DEFINE);
+      case ir_t::DEFINE: {
+        lex.types.push_back(ir_t::DEFINE);
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" (\t\n\r", fcontent, i + 1);
         lex.push_lexeme(string(start + i, start + end));
         if (fcontent[end] == '(') {
-          lex.types.push_back(SPACE);
-          lex.types.push_back(LPAREN);
+          lex.types.push_back(ir_t::SPACE);
+          lex.types.push_back(ir_t::LPAREN);
           i = lex.parse_define_args(fcontent, i + 1);
           if (fcontent[i] != ')') {
-            throw Lex_Exc(__LINE__,
-                          std::format("Expected closing ')' when parsing a "
-                                      "function macros arguments"));
+            throw Exception(__LINE__,
+                            std::format("Expected closing ')' when parsing a "
+                                        "function macros arguments"));
           } else {
-            lex.types.push_back(RPAREN);
+            lex.types.push_back(ir_t::RPAREN);
           }
           throw std::runtime_error(
               "lexing args to a define macro is not currently implimented");
@@ -297,14 +619,14 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
           }
         }
       } break;
-      case UNDEF: {
-        lex.types.push_back(UNDEF);
+      case ir_t::UNDEF: {
+        lex.types.push_back(ir_t::UNDEF);
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" \t\n\r", fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
-      case IF:
-        lex.types.push_back(IF);
+      case ir_t::IF:
+        lex.types.push_back(ir_t::IF);
         i = skip_ws(fcontent, i) + 1;
         i = lex.handle_hashif(fcontent, i);
         break;
@@ -315,7 +637,7 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
     } break;
     case '/': {
       if (!(i + 1 < file.size)) {
-        throw Lex_Exc(__LINE__, string("'/' found at end of file"));
+        throw Exception(__LINE__, string("'/' found at end of file"));
       }
       ++i;
       switch (fcontent[i]) {
@@ -327,7 +649,8 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
         // ends with a multi line comment, i.e. */ at the end of the file
         i = skip_until_close_multicomment(fcontent, i + 1);
         if (i == file.size)
-          throw Lex_Exc(__LINE__, string("Non terminated multi line comment"));
+          throw Exception(__LINE__,
+                          string("Non terminated multi line comment"));
       } break;
       default: // probably just an op /
         i = skip_until("#/\"", fcontent, i + 1);
@@ -337,7 +660,7 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
     case '"': {
       i = skip_until<'"'>(fcontent, i + 1) + 1;
       if (!(i < file.size))
-        throw Lex_Exc(__LINE__, string("Non terminated string"));
+        throw Exception(__LINE__, string("Non terminated string"));
     } break;
     default:
       i = skip_until("#/\"", fcontent, i + 1);
@@ -348,63 +671,64 @@ auto PP_Lexer::lex(FixedString const &file) -> PP_Lexer {
   return lex;
 }
 
-auto PP_Lexer::parse_to_ast() -> IR_AST {
-  auto ir = IR_AST();
+auto Lexer::parse_to_ast() -> Ast {
+  auto ir = Ast();
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
   while (cur_t < types.size()) {
     ir.check_size();
     switch (types[cur_t]) {
-    case INCLUDE:
+    case ir_t::INCLUDE:
       ++cur_t;
       switch (types[cur_t]) {
-      case LESS:
+      case ir_t::LESS:
         cur_t += 3; // LANGLE CHAR_LIT RANGLE
-        ir.push(IR_AST::IR_Types::GLOBAL_INCLUDE, lexemes[cur_lex]);
+        ir.push(Ast::Ast_t::GLOBAL_INCLUDE, lexemes[cur_lex]);
         ++cur_lex;
         break;
-      case QUOTE:
+      case ir_t::QUOTE:
         cur_t += 3; // QUOTE CHAR_LIT QUOTE
-        ir.push(IR_AST::IR_Types::LOCAL_INCLUDE, lexemes[cur_lex]);
+        ir.push(Ast::Ast_t::LOCAL_INCLUDE, lexemes[cur_lex]);
         ++cur_lex;
         break;
       default:
-        throw Lex_Exc(__LINE__, std::format("Malformed #include statement, "
-                                            "expected '<' or '\"', found [{}]",
-                                            to_string(types[cur_t])));
+        throw Exception(__LINE__,
+                        std::format("Malformed #include statement, "
+                                    "expected '<' or '\"', found [{}]",
+                                    to_string(types[cur_t])));
       }
       break;
-    case IF: {
+    case ir_t::IF: {
       ++cur_t;
       auto expr = grab_string(cur_t, cur_lex, ir);
-      ir.push(IR_AST::IR_Types::IF, std::move(expr));
+      ir.push(Ast::Ast_t::IF, std::move(expr));
     } break;
-    case IFDEF:
+    case ir_t::IFDEF:
       cur_t += 2;
-      ir.push(IR_AST::IR_Types::IFDEF, lexemes[cur_lex]);
+      ir.push(Ast::Ast_t::IFDEF, lexemes[cur_lex]);
       ++cur_lex;
       break;
-    case IFNDEF:
+    case ir_t::IFNDEF:
       cur_t += 2;
-      ir.push(IR_AST::IR_Types::IFNDEF, lexemes[cur_lex]);
+      ir.push(Ast::Ast_t::IFNDEF, lexemes[cur_lex]);
       ++cur_lex;
       break;
-    case ENDIF:
+    case ir_t::ENDIF:
       ++cur_t;
-      ir.push(IR_AST::IR_Types::ENDIF, "");
+      ir.push(Ast::Ast_t::ENDIF, "");
       break;
-    case ELSE:
+    case ir_t::ELSE:
       ++cur_t;
-      ir.push(IR_AST::IR_Types::ELSE, "");
+      ir.push(Ast::Ast_t::ELSE, "");
       break;
-    case DEFINE:
+    case ir_t::DEFINE:
       cur_t += 2;
-      ir.push(IR_AST::IR_Types::DEFINE, "");
+      ir.push(Ast::Ast_t::DEFINE, "");
       ++cur_lex;
       break;
     default:
-      throw Lex_Exc(__LINE__, std::format("Not implimented, type = [{}]",
-                                          to_string(types[cur_t])));
+      throw Exception(__LINE__, std::format("Not implimented, type = [{}]",
+                                            to_string(types[cur_t])));
       break;
     }
   }
@@ -419,7 +743,7 @@ auto PP_Lexer::parse_to_ast() -> IR_AST {
 // TODO: update this to have a string that we build up, in case there's a '\'
 // char in there that we have to ignore, bc it can probably make the later steps
 // more annoying if we leave it in the lexemes string
-auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
+auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
   auto constexpr defined_str = string_view{"defined"};
   auto looping = true;
   while (looping && i < buf.size()) {
@@ -436,74 +760,74 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
       ++i;
     } break;
     case '(': {
-      types.push_back(LPAREN);
+      types.push_back(ir_t::LPAREN);
       ++i;
     } break;
     case ')': {
-      types.push_back(RPAREN);
+      types.push_back(ir_t::RPAREN);
       ++i;
     } break;
     case '|': {
       ++i;
       if (i < buf.size() && buf[i] == '|') {
         ++i;
-        types.push_back(OR);
+        types.push_back(ir_t::OR);
       } else {
-        types.push_back(BIT_OR);
+        types.push_back(ir_t::BIT_OR);
       }
     } break;
     case '&': {
       ++i;
       if (i < buf.size() && buf[i] == '&') {
         ++i;
-        types.push_back(AND);
+        types.push_back(ir_t::AND);
       } else {
-        types.push_back(BIT_AND);
+        types.push_back(ir_t::BIT_AND);
       }
     } break;
     case '=': {
       ++i;
       if (i < buf.size() && buf[i] == '=') {
         ++i;
-        types.push_back(EQ_EQ);
+        types.push_back(ir_t::EQ_EQ);
       } else {
-        types.push_back(EQ);
+        types.push_back(ir_t::EQ);
       }
     } break;
     case '!': {
       ++i;
       if (i < buf.size() && buf[i] == '=') {
         ++i;
-        types.push_back(BANG_EQ);
+        types.push_back(ir_t::BANG_EQ);
       } else {
-        types.push_back(BANG);
+        types.push_back(ir_t::BANG);
       }
     } break;
     case '<': {
       ++i;
       if (i < buf.size() && buf[i] == '=') {
         ++i;
-        types.push_back(LESS_EQ);
+        types.push_back(ir_t::LESS_EQ);
       } else {
-        types.push_back(LESS);
+        types.push_back(ir_t::LESS);
       }
     } break;
     case '>': {
       ++i;
       if (i < buf.size() && buf[i] == '=') {
         ++i;
-        types.push_back(GREATER_EQ);
+        types.push_back(ir_t::GREATER_EQ);
       } else {
-        types.push_back(GREATER);
+        types.push_back(ir_t::GREATER);
       }
     } break;
     case '#': {
       ++i;
       if (i < buf.size() && buf[i] == '#') {
         ++i;
-        types.push_back(STRINGIZING);
+        types.push_back(ir_t::STRINGIZING);
       } else {
-        types.push_back(CONCAT);
+        types.push_back(ir_t::CONCAT);
       }
     } break;
     case 'd': {
@@ -511,11 +835,11 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
           strncmp(buf.data() + i, defined_str.data(), defined_str.size()) ==
               0) {
         i += defined_str.size();
-        types.push_back(DEFINED);
+        types.push_back(ir_t::DEFINED);
       } else {
         auto const start = i;
         i = skip_until(delims_at(delims::LEXEME), buf, i);
-        types.push_back(LEXEME);
+        types.push_back(ir_t::LEXEME);
         lexemes.push_back(string(buf.data() + start, buf.data() + i));
       }
     } break;
@@ -523,7 +847,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
     case '0': {
       ++i;
       if (!(i < buf.size())) {
-        types.push_back(LIT_INT);
+        types.push_back(ir_t::LIT_INT);
         lexemes.push_back("0");
       } else {
         switch (buf[i]) {
@@ -533,7 +857,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
           // be an error, the same goes with "'" character
           ++i;
           if (!(i < buf.size())) {
-            throw Lex_Exc(
+            throw Exception(
                 __LINE__,
                 std::format("Found string [0b], this is treated as an octal "
                             "number by the compiler, and is therefore "
@@ -556,7 +880,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
                 ++i;
                 allow_quote = false;
               } else {
-                throw Lex_Exc(
+                throw Exception(
                     __LINE__,
                     std::format(
                         "When parsing a binary number, found two ' characters "
@@ -568,14 +892,14 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
               // these two cases can probably just be combined then b/c they
               // throw the same thing
               if (is_any_of(delims_at(delims::BINARY_FAIL), buf.data(), i)) {
-                throw Lex_Exc(
+                throw Exception(
                     __LINE__,
                     std::format("Found [{}], while parsing a binary numbers, "
                                 "only 0 and 1 are allowed in binary numbers "
                                 "(and ' characters for delimiters)",
                                 buf[i]));
               } else if (std::isalpha(buf[i])) {
-                throw Lex_Exc(
+                throw Exception(
                     __LINE__,
                     std::format("Found [{}], while parsing a binary numbers, "
                                 "only 0 and 1 are allowed in binary numbers "
@@ -586,7 +910,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
             }
             }
           }
-          types.push_back(LIT_BINARY);
+          types.push_back(ir_t::LIT_BINARY);
           lexemes.push_back(string(buf.data() + start, buf.data() + i));
         } break;
 #pragma endregion binary
@@ -594,7 +918,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
         case 'x': {
           ++i;
           if (!(i < buf.size())) {
-            throw Lex_Exc(
+            throw Exception(
                 __LINE__,
                 std::format("Found string [0x], this is treated as an octal "
                             "number by the compiler, and is therefore "
@@ -613,7 +937,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
                 ++i;
                 allow_quote = false;
               } else {
-                throw Lex_Exc(
+                throw Exception(
                     __LINE__,
                     std::format(
                         "When parsing a hex number, found two ' characters "
@@ -622,14 +946,14 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
               }
             } else if (is_any_of(delims_at(delims::ALPHA_SANS_HEX), buf.data(),
                                  i)) {
-              throw Lex_Exc(__LINE__,
-                            std::format("While parsing a hex number, found a "
-                                        "character that's not supported."));
+              throw Exception(__LINE__,
+                              std::format("While parsing a hex number, found a "
+                                          "character that's not supported."));
             } else {
               inner_looping = false;
             }
           }
-          types.push_back(LIT_HEX);
+          types.push_back(ir_t::LIT_HEX);
           lexemes.push_back(string(buf.data() + start, buf.data() + i));
         } break;
 #pragma endregion hex
@@ -662,7 +986,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
                 allow_quote = false;
                 ++i;
               } else {
-                throw Lex_Exc(
+                throw Exception(
                     __LINE__,
                     std::format(
                         "While parsing an octal number encounter a double ' "
@@ -673,7 +997,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
               if (is_any_of(delims_at(delims::LEXEME), buf.data(), i)) {
                 break;
               } else {
-                throw Lex_Exc(
+                throw Exception(
                     __LINE__,
                     std::format(
                         "While parsing an octal number, encounter [{}], a non "
@@ -682,13 +1006,13 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
               }
             }
           }
-          types.push_back(LIT_OCTAL);
+          types.push_back(ir_t::LIT_OCTAL);
           lexemes.push_back(string(buf.data() + start, buf.data() + i));
         } break;
         case '8':
           [[fallthrough]];
         case '9': {
-          throw Lex_Exc(
+          throw Exception(
               __LINE__,
               std::format("While parsing an octal number came across an 8 or "
                           "9. Note that when you start a number with 0 it will "
@@ -727,7 +1051,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
             allow_quote = false;
             ++i;
           } else {
-            throw Lex_Exc(
+            throw Exception(
                 __LINE__,
                 std::format("While parsing a decimal number, found a double '. "
                             "These are treated as introducing a char literal, "
@@ -736,7 +1060,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
           // These two cases should probably be rolled into one
         } else if (is_any_of(delims_at(delims::HEX_SANS_DIGITS), buf.data(),
                              i)) {
-          throw Lex_Exc(
+          throw Exception(
               __LINE__,
               std::format("While parsing a decimal number, encountered the "
                           "following unsupported character [{}]",
@@ -745,7 +1069,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
           if (is_any_of(delims_at(delims::LEXEME), buf.data(), i)) {
             break;
           } else {
-            throw Lex_Exc(
+            throw Exception(
                 __LINE__,
                 std::format("While parsing a decimal number, encountered the "
                             "following unsupported character [{}]",
@@ -753,14 +1077,14 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
           }
         }
       }
-      types.push_back(LIT_INT);
+      types.push_back(ir_t::LIT_INT);
       lexemes.push_back(string(buf.data() + start, buf.data() + i));
     } break;
 #pragma endregion decimal
     default: {
       auto const start = i;
       i = skip_until(delims_at(delims::LEXEME), buf, i);
-      types.push_back(LEXEME);
+      types.push_back(ir_t::LEXEME);
       lexemes.push_back(string(buf.data() + start, buf.data() + i));
     } break;
     }
@@ -768,8 +1092,7 @@ auto PP_Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
   return i;
 }
 
-auto PP_Lexer::parse_define_args(string_view const fcontent, size_t i)
-    -> size_t {
+auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
   auto end = i + 1;
   auto looping = true;
   while (looping) {
@@ -798,125 +1121,124 @@ auto PP_Lexer::parse_define_args(string_view const fcontent, size_t i)
   return i;
 }
 
-auto PP_Lexer::grab_string(size_t &cur_t, size_t &cur_lex, IR_AST &ir)
-    -> string {
-  auto constexpr is_terminator = [](enum PP_Lexer::types const t) -> bool {
-    auto constexpr terminator_list = std::array<enum PP_Lexer::types, 11>{
-        {PP_Lexer::IF, PP_Lexer::IFDEF, PP_Lexer::IFNDEF, PP_Lexer::ELIF,
-         PP_Lexer::ELSE, PP_Lexer::ENDIF, PP_Lexer::DEFINE,
-         PP_Lexer::SPACE, // only used when dealing with #define directives
-         PP_Lexer::INCLUDE, PP_Lexer::UNDEF, PP_Lexer::PRAGMA}};
+auto Lexer::grab_string(size_t &cur_t, size_t &cur_lex, Ast &ir) -> string {
+  auto constexpr is_terminator = [](ir_t t) -> bool {
+    auto constexpr terminator_list = std::array<ir_t, 11>{
+        {ir_t::IF, ir_t::IFDEF, ir_t::IFNDEF, ir_t::ELIF, ir_t::ELSE,
+         ir_t::ENDIF, ir_t::DEFINE,
+         ir_t::SPACE, // only used when dealing with #define directives
+         ir_t::INCLUDE, ir_t::UNDEF, ir_t::PRAGMA}};
     return std::any_of(terminator_list.begin(), terminator_list.end(),
                        [t](auto &&x) { return x == t; });
   };
   auto str = string();
   while (!is_terminator(types[cur_t])) {
     switch (types[cur_t]) {
-    case PP_Lexer::AND:
+    case ir_t::AND:
       str += "&&";
       ++cur_t;
       break;
-    case PP_Lexer::OR:
+    case ir_t::OR:
       str += "||";
       ++cur_t;
       break;
-    case PP_Lexer::BIT_AND:
+    case ir_t::BIT_AND:
       str += "&";
       ++cur_t;
       break;
-    case PP_Lexer::BIT_OR:
+    case ir_t::BIT_OR:
       str += "|";
       ++cur_t;
       break;
-    case PP_Lexer::DEFINED:
+    case ir_t::DEFINED:
       str += "defined";
       ++cur_t;
       break;
-    case PP_Lexer::LESS:
+    case ir_t::LESS:
       str += "<";
       ++cur_t;
       break;
-    case PP_Lexer::LESS_EQ:
+    case ir_t::LESS_EQ:
       str += "<=";
       ++cur_t;
       break;
-    case PP_Lexer::GREATER:
+    case ir_t::GREATER:
       str += ">";
       ++cur_t;
       break;
-    case PP_Lexer::GREATER_EQ:
+    case ir_t::GREATER_EQ:
       str += ">=";
       ++cur_t;
       break;
-    case PP_Lexer::STRINGIZING:
+    case ir_t::STRINGIZING:
       str += "#";
       ++cur_t;
       break;
-    case PP_Lexer::CONCAT:
+    case ir_t::CONCAT:
       str += "##";
       ++cur_t;
       break;
-    case PP_Lexer::PLUS:
+    case ir_t::PLUS:
       str += "+";
       ++cur_t;
       break;
-    case PP_Lexer::MINUS:
+    case ir_t::MINUS:
       str += "-";
       ++cur_t;
       break;
-    case PP_Lexer::STAR:
+    case ir_t::STAR:
       str += "*";
       ++cur_t;
       break;
-    case PP_Lexer::SLASH:
+    case ir_t::SLASH:
       str += "/";
       ++cur_t;
       break;
-    case PP_Lexer::BANG_EQ:
+    case ir_t::BANG_EQ:
       str += "!=";
       ++cur_t;
       break;
-    case PP_Lexer::EQ:
+    case ir_t::EQ:
       str += "=";
       ++cur_t;
       break;
-    case PP_Lexer::EQ_EQ:
+    case ir_t::EQ_EQ:
       str += "==";
       ++cur_t;
       break;
-    case PP_Lexer::BANG:
+    case ir_t::BANG:
       str += "!";
       ++cur_t;
       break;
-    case PP_Lexer::LPAREN:
+    case ir_t::LPAREN:
       str += "(";
       ++cur_t;
       break;
-    case PP_Lexer::RPAREN:
+    case ir_t::RPAREN:
       str += ")";
       ++cur_t;
       break;
-    case PP_Lexer::QUOTE:
+    case ir_t::QUOTE:
       str += "\"";
       ++cur_t;
       break;
-    case PP_Lexer::MACRO:
+    case ir_t::MACRO:
       [[fallthrough]];
-    case PP_Lexer::LIT_CHAR:
+    case ir_t::LIT_CHAR:
       [[fallthrough]];
-    case PP_Lexer::LIT_STRING:
+    case ir_t::LIT_STRING:
       [[fallthrough]];
-    case PP_Lexer::LIT_INT:
+    case ir_t::LIT_INT:
       [[fallthrough]];
-    case PP_Lexer::LIT_HEX:
+    case ir_t::LIT_HEX:
       [[fallthrough]];
-    case PP_Lexer::LIT_OCTAL:
+    case ir_t::LIT_OCTAL:
       [[fallthrough]];
-    case PP_Lexer::LIT_BINARY:
+    case ir_t::LIT_BINARY:
       [[fallthrough]];
-    case PP_Lexer::LIT_FLOAT:
+    case ir_t::LIT_FLOAT:
       [[fallthrough]];
-    case PP_Lexer::LEXEME:
+    case ir_t::LEXEME:
       str += lexemes[cur_lex++];
       ++cur_t;
       break;
@@ -927,121 +1249,20 @@ auto PP_Lexer::grab_string(size_t &cur_t, size_t &cur_lex, IR_AST &ir)
   return str;
 }
 
-auto PP_Lexer::produce_string(string_view const fcontent, size_t &i) -> string {
+auto Lexer::produce_string(string_view const fcontent, size_t &i) -> string {
   throw std::runtime_error("produce_string Not impl");
 }
 
-/*
-auto PP_Lexer::parse_expr(size_t &cur_t, size_t &cur_lex, IR_AST &ir)
-    -> Expr_Node {
-
-  return equality(cur_t, cur_lex, ir);
-}
-*/
-
-#if 0
-auto PP_Lexer::equality(size_t &cur_t, size_t &cur_lex, IR_AST &ir)
-    -> Expr_Node {
-  auto lhs = comparison(cur_t, cur_lex, ir);
-
-  while (matching(cur_t, {PP_Lexer::BANG_EQ, PP_Lexer::EQ_EQ})) {
-    auto const tkn_t = types[cur_t++];
-    auto rhs = comparison(cur_t, cur_lex, ir);
-    lhs = ir.make_binary(tkn_t, lhs, rhs);
-  }
-
-  return lhs;
-}
-
-auto PP_Lexer::comparison(size_t &cur_t, size_t &cur_lex, IR_AST &ir)
-    -> Expr_Node {
-  auto lhs = term(cur_t, cur_lex, ir);
-
-  while (matching(cur_t, {PP_Lexer::GREATER, PP_Lexer::GREATER_EQ,
-                          PP_Lexer::LESS, PP_Lexer::LESS_EQ})) {
-    auto const tkn_t = types[cur_t++];
-    auto rhs = term(cur_t, cur_lex, ir);
-    lhs = ir.make_binary(tkn_t, lhs, rhs);
-  }
-
-  return lhs;
-}
-
-auto PP_Lexer::term(size_t &cur_t, size_t &cur_lex, IR_AST &ir) -> Expr_Node {
-  auto lhs = factor(cur_t, cur_lex, ir);
-
-  while (matching(cur_t, {PP_Lexer::MINUS, PP_Lexer::PLUS})) {
-    auto const tkn_t = types[cur_t++];
-    auto rhs = factor(cur_t, cur_lex, ir);
-    lhs = ir.make_binary(tkn_t, lhs, rhs);
-  }
-
-  return lhs;
-}
-
-auto PP_Lexer::factor(size_t &cur_t, size_t &cur_lex, IR_AST &ir) -> Expr_Node {
-  auto lhs = unary(cur_t, cur_lex, ir);
-
-  while (matching(cur_t, {PP_Lexer::SLASH, PP_Lexer::STAR})) {
-    auto const tkn_t = types[cur_t++];
-    auto rhs = unary(cur_t, cur_lex, ir);
-    lhs = ir.make_binary(tkn_t, lhs, rhs);
-  }
-
-  return lhs;
-}
-
-auto PP_Lexer::unary(size_t &cur_t, size_t &cur_lex, IR_AST &ir) -> Expr_Node {
-  if (matching(cur_t, {PP_Lexer::BANG, PP_Lexer::MINUS})) {
-    auto const tkn_t = types[cur_t++];
-    auto un = unary(cur_t, cur_lex, ir);
-    return ir.make_unary(tkn_t, un);
-  } else {
-    return primary(cur_t, cur_lex, ir);
-  }
-}
-
-auto PP_Lexer::primary(size_t &cur_t, size_t &cur_lex, IR_AST &ir)
-    -> Expr_Node {
-  switch (types[cur_t]) {
-  case LIT_CHAR:
-    return ir.make_charlit(LIT_CHAR, lexemes[cur_lex++]);
-  case LIT_STRING:
-    return ir.make_primary(LIT_STRING, lexemes[cur_lex++]);
-  case LIT_INT:
-    return ir.make_primary(LIT_INT, lexemes[cur_lex++]);
-  case LIT_HEX:
-    return ir.make_primary(LIT_HEX, lexemes[cur_lex++]);
-  case LIT_OCTAL:
-    return ir.make_primary(LIT_OCTAL, lexemes[cur_lex++]);
-  case LIT_BINARY:
-    return ir.make_primary(LIT_BINARY, lexemes[cur_lex++]);
-  case LIT_FLOAT:
-    return ir.make_primary(LIT_FLOAT, lexemes[cur_lex++]);
-  case LEXEME:
-    return ir.make_primary(LEXEME, lexemes[cur_lex++]);
-  case LPAREN: {
-    ++cur_t;
-    auto const expr = parse_expr(cur_t, cur_lex, ir);
-    expect(cur_t, PP_Lexer::RPAREN);
-    return ir.grouping(expr);
-  }
-  default:
-    throw std::runtime_error("Unsupported token in expression.");
-  }
-}
-#endif
-
-auto PP_Lexer::expect(size_t cur_t, enum PP_Lexer::types tkn) -> void {
+auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
   if (types[cur_t] != tkn) {
-    throw Parse_Exc(__LINE__,
+    throw Exception(__LINE__,
                     std::format("Unexpected token, expected {}, found {}",
                                 to_string(tkn), to_string(types[cur_t])));
   }
 }
 
 #ifdef DEBUG
-auto PP_Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
+auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
   out << "Types:\n\t";
   for (auto const &type : types) {
     out << '[' << to_string(type) << ']';
@@ -1056,48 +1277,33 @@ auto PP_Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
 }
 #endif
 
-auto Lex_Exc::what() const noexcept -> std::string {
-  return std::format("Lex Error on line {}\n\tAdditional info: [{}]", line,
-                     message);
-}
-
-auto Parse_Exc::what() const noexcept -> string {
-  return std::format("Parse Error on line {}\n\tAdditional info: {}", line,
-                     message);
-}
-
-auto Interpret_Exc::what() const noexcept -> string {
-  return std::format("Interpreter Error on line {}\n\tAdditional info: {}",
-                     line, message);
-}
-
 auto Expr_Node::eval() const -> int {
   throw std::runtime_error("Expr_Node::eval not impl");
 }
 
-IR_AST::IR_AST()
-    : size(0), cap(8), ast(std::make_unique<IR_Types[]>(cap)),
+Ast::Ast()
+    : size(0), cap(8), ast(std::make_unique<Ast::Ast_t[]>(cap)),
       exprs(std::make_unique<StringViews[]>(cap)) {}
 
-auto parse(FixedString const &file) -> IR_AST {
+auto parse(FixedString const &file) -> Ast {
 #ifdef DEBUG
-  auto lexer = PP_Lexer::lex(file);
+  auto lexer = Lexer::lex(file);
   std::cout << "lexer\n";
   lexer.display(std::cout);
   std::cout.flush();
   return lexer.parse_to_ast();
 #else
-  return PP_Lexer::lex(file).parse_to_ast();
+  return Lexer::lex(file).parse_to_ast();
 #endif
 }
 
-auto IR_AST::check_size() -> void {
+auto Ast::check_size() -> void {
   if (size == cap) {
     auto const new_cap = cap * 2;
-    auto new_ast = std::make_unique<IR_AST::IR_Types[]>(new_cap);
+    auto new_ast = std::make_unique<Ast::Ast_t[]>(new_cap);
     auto new_exprs = std::make_unique<StringViews[]>(new_cap);
 
-    std::memmove(new_ast.get(), ast.get(), sizeof(enum IR_AST::IR_Types) * cap);
+    std::memmove(new_ast.get(), ast.get(), sizeof(ir_t) * cap);
     std::memmove(new_exprs.get(), exprs.get(), sizeof(StringViews) * cap);
     ast = std::move(new_ast);
     exprs = std::move(new_exprs);
@@ -1105,7 +1311,7 @@ auto IR_AST::check_size() -> void {
   }
 }
 
-auto IR_AST::push(IR_AST::IR_Types t, string const &expr) -> void {
+auto Ast::push(Ast::Ast_t t, string const &expr) -> void {
   if (expr == "") {
     ast[size] = t;
     exprs[size] = {0, 0};
@@ -1130,7 +1336,7 @@ auto IR_AST::push(IR_AST::IR_Types t, string const &expr) -> void {
   }
 }
 
-auto IR_AST::make_charlit(std::string_view const sv) -> Expr_Node {
+auto Ast::make_charlit(std::string_view const sv) -> Expr_Node {
   auto const start = lexemes.size;
   lexemes.append(sv);
   auto const end = lexemes.size;
@@ -1148,14 +1354,14 @@ auto IR_AST::make_charlit(std::string_view const sv) -> Expr_Node {
                                            static_cast<unsigned int>(end)}));
 }
 
-auto IR_AST::make_nonelit() const -> Expr_Node { return Expr_Node(); }
+auto Ast::make_nonelit() const -> Expr_Node { return Expr_Node(); }
 
 #ifdef DEBUG
-auto IR_AST::shitty_display(std::ostream &out) const -> std::ostream & {
+auto Ast::shitty_display(std::ostream &out) const -> std::ostream & {
   out << "lexemes = [" << string_view{lexemes.buffer, lexemes.size} << "]\n";
   out << "ast:\n\t";
   for (auto i = size_t{}; i < size; ++i) {
-    out << '[' << IR_AST::pretty_types(ast[i]) << ']';
+    out << '[' << Ast::pretty_types(ast[i]) << ']';
   }
   out << '\n';
 
@@ -1172,29 +1378,22 @@ auto IR_AST::shitty_display(std::ostream &out) const -> std::ostream & {
 }
 #endif // DEBUG
 
-auto IR_Interpreter::interpret(IR_AST const &ir) -> vector<fs::path> {
-  auto vec = vector<fs::path>();
-  vec.reserve(ir.num_includes());
-  for (auto i = size_t{}; i < ir.size;) {
-    interpret_impl(false, ir, i, vec);
-  }
-  return vec;
-}
+auto State::interpret(size_t i, Interpreter &interpreter, Ast const &ir,
+                      vector<fs::path> &vec) -> size_t {
+  throw std::runtime_error("State::interpret not impl");
 
-auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
-                                    size_t &i, vector<fs::path> &vec) -> void {
-  auto constexpr terminating_nodes = std::array<IR_AST::IR_Types, 3>{
-      {IR_AST::IR_Types::ENDIF, IR_AST::IR_Types::ELSE,
-       IR_AST::IR_Types::ELIF}};
+#if 0
+  auto constexpr terminating_nodes = std::array<Ast::Ast_t, 3>{
+      {Ast::Ast_t::ENDIF, Ast::Ast_t::ELSE, Ast::Ast_t::ELIF}};
 #ifdef DEBUG
-  std::cerr << "\tLooking at [" << IR_AST::pretty_types(ir.ast[i]) << "]\n";
+  std::cerr << "\tLooking at [" << Ast::pretty_types(ir.ast[i]) << "]\n";
 #endif // DEBUG
   switch (ir.ast[i]) {
-  case IR_AST::IR_Types::GLOBAL_INCLUDE: {
+  case Ast::Ast_t::GLOBAL_INCLUDE: {
     // TODO: check that this file *actually exists*
     ++i;
   } break;
-  case IR_AST::IR_Types::LOCAL_INCLUDE: {
+  case Ast::Ast_t::LOCAL_INCLUDE: {
     auto const lit = ir.exprs[i];
 
     auto const include_name = string(string_view{ir.lexemes.buffer + lit.start,
@@ -1202,7 +1401,7 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
     vec.push_back(include_name);
     ++i;
   } break;
-  case IR_AST::IR_Types::IF: {
+  case Ast::Ast_t::IF: {
     auto const expr = eval(ir, i);
     if (expr == 1) {
       ++i;
@@ -1220,7 +1419,7 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
       ++i;
     }
   } break;
-  case IR_AST::IR_Types::IFDEF: {
+  case Ast::Ast_t::IFDEF: {
     auto const lit = ir.exprs[i];
     auto const checking_macro = string(string_view{
         ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
@@ -1237,11 +1436,11 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
         interpret_impl(false, ir, i, vec);
       }
       if (i == ir.size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+        throw Exception(__LINE__, "Unterminated #ifdef expression");
       i = skip_until(i, std::span(ir.ast.get(), ir.size),
                      IR_AST::IR_Types::ENDIF);
       if (i == ir.size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+        throw Exception(__LINE__, "Unterminated #ifdef expression");
       ++i; // move over the ENDIF
     } else {
       while (i < ir.size) {
@@ -1255,19 +1454,18 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
         }
       }
       if (i == ir.size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+        throw Exception(__LINE__, "Unterminated #ifdef expression");
 
       interpret_impl(true, ir, i, vec);
 
-      i = skip_until(i, std::span(ir.ast.get(), ir.size),
-                     IR_AST::IR_Types::ENDIF);
+      i = skip_until(i, std::span(ir.ast.get(), ir.size), Ast::Ast_t::ENDIF);
       if (i == ir.size) {
-        throw Interpret_Exc(__LINE__, "Unterminated #ifdef expression");
+        throw Exception(__LINE__, "Unterminated #ifdef expression");
       }
       ++i; // move over the #endif
     }
   } break;
-  case IR_AST::IR_Types::IFNDEF: {
+  case Ast::Ast_t::IFNDEF: {
     auto const lit = ir.exprs[i];
     auto const checking_macro = string(string_view{
         ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
@@ -1284,11 +1482,10 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
         interpret_impl(false, ir, i, vec);
       }
       if (i == ir.size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
-      i = skip_until(i, std::span(ir.ast.get(), ir.size),
-                     IR_AST::IR_Types::ENDIF);
+        throw Exception(__LINE__, "Unterminated #ifndef expression");
+      i = skip_until(i, std::span(ir.ast.get(), ir.size), Ast::Ast_t::ENDIF);
       if (i == ir.size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
+        throw Exception(__LINE__, "Unterminated #ifndef expression");
       ++i; // move over the ENDIF
     } else {
       while (i < ir.size) {
@@ -1302,29 +1499,28 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
         }
       }
       if (i == ir.size)
-        throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
+        throw Exception(__LINE__, "Unterminated #ifndef expression");
 
-      if (ir.ast[i] == IR_AST::IR_Types::ENDIF) {
+      if (ir.ast[i] == Ast::Ast_t::ENDIF) {
         ++i;
         return;
       }
       interpret_impl(true, ir, i, vec);
 
-      i = skip_until(i, std::span(ir.ast.get(), ir.size),
-                     IR_AST::IR_Types::ENDIF);
+      i = skip_until(i, std::span(ir.ast.get(), ir.size), Ast::Ast_t::ENDIF);
       if (i == ir.size) {
-        throw Interpret_Exc(__LINE__, "Unterminated #ifndef expression");
+        throw Exception(__LINE__, "Unterminated #ifndef expression");
       }
     }
   } break;
-  case IR_AST::IR_Types::ELSE: {
+  case Ast::Ast_t::ELSE: {
     if (!interpret_elses) {
-      throw Interpret_Exc(__LINE__, "Unsupported interpretation of #else, "
-                                    "possibly misformatted preprocessor");
+      throw Exception(__LINE__, "Unsupported interpretation of #else, "
+                                "possibly misformatted preprocessor");
     } else {
       ++i;
       while (i < ir.size) {
-        if (ir.ast[i] == IR_AST::IR_Types::ENDIF) {
+        if (ir.ast[i] == Ast::Ast_t::ENDIF) {
           break;
         } else {
           interpret_impl(false, ir, i, vec);
@@ -1332,7 +1528,7 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
       }
     }
   } break;
-  case IR_AST::IR_Types::DEFINE: {
+  case Ast::Ast_t::DEFINE: {
     // TODO: parse object like macros
     auto const lit = ir.exprs[i];
     auto const defining_macro = string(string_view{
@@ -1341,81 +1537,25 @@ auto IR_Interpreter::interpret_impl(bool interpret_elses, IR_AST const &ir,
     def_macros.emplace(defining_macro);
   } break;
   default:
-    throw Interpret_Exc(__LINE__, std::format("Not implimented, type = [{}]",
-                                              IR_AST::pretty_types(ir.ast[i])));
+    throw Exception(__LINE__, std::format("Not implimented, type = [{}]",
+                                          IR_AST::pretty_types(ir.ast[i])));
   }
+#endif
 }
 
-auto IR_Interpreter::eval(IR_AST const &ir, size_t &i) const -> int {
-  auto const expr = expand_expr(ir, i);
-  return expr.eval();
+auto Exception::what() const noexcept -> string {
+  return std::format("On line {}, had following error [{}]", line, message);
 }
 
-auto IR_Interpreter::search_for_next_scope(IR_AST const &ir, size_t i) const
-    -> size_t {
-  auto constexpr terminating_nodes = std::array<IR_AST::IR_Types, 3>{
-      {IR_AST::IR_Types::ENDIF, IR_AST::IR_Types::ELSE,
-       IR_AST::IR_Types::ELIF}};
-  while (i < ir.size) {
-    if (std::any_of(
-            terminating_nodes.begin(), terminating_nodes.end(),
-            [node = ir.ast[i]](auto &&cur_node) { return cur_node == node; })) {
-      break;
-    } else {
-      ++i;
-    }
+auto Interpreter::interpret(FixedString const &file) -> vector<fs::path> {
+  auto ir = Lexer::lex(file).parse_to_ast();
+  auto vec = vector<fs::path>();
+  auto state = State{};
+  vec.reserve(ir.num_includes());
+  for (auto i = size_t{}; i < ir.size;) {
+    i = state.interpret(i, *this, ir, vec);
   }
-  return i;
+  return vec;
 }
-
-// TODO: the way we do this is by splitting the string around the lexemes, then
-// combining them together, it results in a lot of allocations and
-// deallocations, there is 100% a better way of doing this, like with just a
-// buffer, and some pointers showing where we have space
-// [[https://www.youtube.com/watch?v=g2hiVp6oPZc]] this video talks about a neat
-// data structure that should be able to solve the problem, but i'm just trying
-// to get this to work :)
-// TODO: handle function macros
-auto IR_Interpreter::expand_expr(IR_AST const &ir, size_t &i) const
-    -> Expr_Node {
-  fn_print();
-  auto &&[start, end] = ir.exprs[i];
-  auto str = string(ir.lexemes.buffer + start, ir.lexemes.buffer + end);
-#ifdef DEBUG
-  std::cout << "trying to expand [" << str << "]\n";
-  std::cout.flush();
-#endif // DEBUG
-  auto expanding = true;
-  while (expanding) {
-#ifdef DEBUG
-    std::cout << "expanding [" << str << "]\n";
-    std::cout.flush();
-#endif // DEBUG
-    if (auto &&[found, poses] = contains_lexemes(str); found) {
-      auto const head = str.substr(0, poses.first);
-      auto const lex = str.substr(poses.first, poses.second);
-#ifdef DEBUG
-      std::cout << "lex looking for = [" << lex << "]\n";
-      std::cout.flush();
-#endif // DEBUG
-      // TODO: emit a warning when the lexeme is not found, it's well defined by
-      // the standard, but it's really weird
-      auto const val = macros.find(lex) != macros.end()
-                           ? macros.find(lex)->second
-                       : def_macros.find(lex) != def_macros.end() ? string("")
-                                                                  : string("0");
-      auto const tail = str.substr(poses.second, str.npos);
-      str = std::format("{}{}{}", head, val, tail);
-    } else {
-      // done expanding, now we have to parse this into an ast
-      expanding = false;
-    }
-  }
-#ifdef DEBUG
-  std::cout << "fully macro expanded expr = [" << str << "]\n";
-  std::cout.flush();
-#endif // DEBUG
-  throw std::runtime_error("expand_expr not impl");
-}
-} // namespace ir
+} // namespace pp
 } // namespace luamake
