@@ -28,7 +28,6 @@ extern "C" {
 #include <string_view>
 #include <system_error>
 #include <thread>
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -372,13 +371,11 @@ struct Module final {
     std::unique_ptr<vector<unsigned int>[]> deps;
     std::unique_ptr<size_t[]> hashes;
     [[nodiscard]]
-    auto append_path(fs::path const &) noexcept
-        -> std::tuple<bool, unsigned int, unsigned int>;
+    auto append_path(fs::path const &) -> std::pair<bool, StringViews>;
     [[nodiscard]]
     auto get_path(size_t const) const noexcept -> fs::path;
     [[nodiscard]]
-    auto find(string_view const) const noexcept
-        -> std::tuple<bool, unsigned int, unsigned int>;
+    auto find(string_view const) const noexcept -> std::pair<bool, StringViews>;
     /**
      * @throws std::bad_alloc
      */
@@ -460,11 +457,11 @@ Module::DepTree::DepTree(size_t const num_files) {
   cap_files = num_files;
 }
 
-auto Module::DepTree::append_path(fs::path const &path) noexcept
-    -> std::tuple<bool, unsigned int, unsigned int> {
+auto Module::DepTree::append_path(fs::path const &path)
+    -> std::pair<bool, StringViews> {
   auto const canonical_path = fs::canonical(path);
-  if (auto &&[found, start, end] = find(canonical_path.c_str()); found) {
-    return std::make_tuple(true, start, end);
+  if (auto &&[found, str] = find(canonical_path.c_str()); found) {
+    return std::make_pair(true, str);
   }
   auto const start = all_paths.size;
   all_paths.append(canonical_path.string());
@@ -472,16 +469,15 @@ auto Module::DepTree::append_path(fs::path const &path) noexcept
 
   if (start >= std::numeric_limits<unsigned int>::max() ||
       end >= std::numeric_limits<unsigned int>::max()) {
-    std::cerr << std::format(
+    throw std::runtime_error(std::format(
         "Damn you have a lot of path strings, more than [{}], idk see about "
         "opening an issue to change how the indexing work, increasing the size "
         "of the StringViews class?",
-        std::numeric_limits<unsigned int>::max());
-    std::terminate();
+        std::numeric_limits<unsigned int>::max()));
   }
 
-  return std::make_tuple(false, static_cast<unsigned int>(start),
-                         static_cast<unsigned int>(end));
+  return std::make_pair(false, StringViews{static_cast<unsigned int>(start),
+                                           static_cast<unsigned int>(end)});
 }
 
 auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
@@ -493,7 +489,7 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
     tree.deps[parent_idx].push_back(static_cast<unsigned int>(this_idx));
   ++tree.num_files;
 
-  auto &&[found, start, end] = tree.append_path(dep);
+  auto &&[found, str] = tree.append_path(dep);
   if (found) // early return if file was already processed
     return;
 
@@ -522,11 +518,14 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   }
 
   tree.types[this_idx] = ftype;
-  tree.files[this_idx].start = start;
-  tree.files[this_idx].end = end;
+  tree.files[this_idx] = str;
 
+#ifdef DEBUG
   auto const ir = ir::parse(file_string);
   auto const files_deps = interpreter.interpret(ir);
+#else
+  auto const files_deps = interpreter.interpret(ir::parse(file_string));
+#endif // DEBUG
 
   for (auto const &file : files_deps) {
     auto const maybe_file = [&]() -> std::optional<fs::path> {
@@ -567,7 +566,7 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
 // this could (and probably should (if possible)) be rewritten to use the files
 // array(?)
 auto Module::DepTree::find(string_view const path) const noexcept
-    -> std::tuple<bool, unsigned int, unsigned int> {
+    -> std::pair<bool, StringViews> {
   auto const *start = all_paths.buffer;
   auto const *current = all_paths.buffer;
   auto end = size_t{};
@@ -580,16 +579,16 @@ auto Module::DepTree::find(string_view const path) const noexcept
       if (path_view.size() == path.size() &&
           *path_view.data() == *path.data() &&
           strncmp(path_view.data(), path.data(), path_view.size()) == 0) {
-        return std::make_tuple(
-            true, static_cast<unsigned int>(start - all_paths.buffer),
-            static_cast<unsigned int>(end));
+        return std::pair(true, StringViews{static_cast<unsigned int>(
+                                               start - all_paths.buffer),
+                                           static_cast<unsigned int>(end)});
       }
       start = current + 1;
     }
     ++end;
   }
 
-  return std::make_tuple(false, 0, 0);
+  return std::make_pair(false, StringViews{0, 0});
 }
 
 auto Module::DepTree::resize() noexcept(false) -> void {
