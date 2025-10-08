@@ -153,4 +153,7 @@ auto constexpr operator|(File::permissions lhs, File::permissions rhs) noexcept
       static_cast<std::underlying_type_t<File::permissions>>(rhs));
 }
 
+static_assert(sizeof(unsigned char) == 1);
+using u8 = unsigned char;
+
 #endif
