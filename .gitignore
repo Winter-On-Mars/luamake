@@ -2,3 +2,4 @@ luamake_c
 *.log
 *.o
 *.so
+build/*

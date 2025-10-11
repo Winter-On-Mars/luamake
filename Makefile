@@ -27,7 +27,7 @@ $(lua_a):
 	$(MAKE) -C lua a -j4
 
 clean:
-	rm $(bin_name) *.o
+	rm $(bin_name) build/*.o
 
 clean_submod:
 	rm $(lua_a) lua/*.o
