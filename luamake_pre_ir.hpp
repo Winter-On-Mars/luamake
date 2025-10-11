@@ -32,7 +32,7 @@ struct Interpreter final {
       : macros(macros), def_macros(def_macros) {}
 
   /**
-   * @throws Interpret_Exc <: Exception
+   * @throws Exception
    */
   [[nodiscard]]
   auto interpret(FixedString const &) -> std::vector<std::filesystem::path>;

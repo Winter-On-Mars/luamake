@@ -25,6 +25,8 @@ namespace fs = std::filesystem;
 
 using std::string, std::string_view, std::vector, std::unordered_map;
 
+using buffer_views = luamake::StringViews;
+
 // TODO: this system is over complicated, i think that we only really need 2
 // components instead of the 3 currently, a change to this would require a
 // complete rearchitecure of the code, and i'm too fucking exhaused to do that
@@ -206,9 +208,6 @@ struct Lexer final {
   auto matching(size_t, std::initializer_list<ir_t> &&) -> bool;
   auto handle_hashif(std::string_view const, size_t) -> size_t;
   auto parse_define_args(std::string_view const, size_t) -> size_t;
-  auto produce_string(std::string_view const, size_t &) -> std::string;
-  // auto parse_expr(size_t &, size_t &, IR_AST &) -> Expr_Node;
-  auto grab_string(size_t &, size_t &, Ast &) -> std::string;
 
   /**
    * @throws
@@ -313,17 +312,21 @@ struct Ast final {
 
   static auto constexpr pretty_types(Ast_t) -> string_view;
 
+  vector<ir_t> tokens;
   OwnedString lexemes;
   size_t size;
   size_t cap;
   std::unique_ptr<Ast_t[]> ast;
-  std::unique_ptr<StringViews[]> exprs;
+  std::unique_ptr<buffer_views[]> exprs; // -> tokens
 
   /**
    * @throws std::bad_alloc
    */
   auto check_size() -> void;
-  auto push(Ast_t, std::string const &) -> void;
+
+  auto push_node(Ast_t) -> void;
+  auto push_str(Ast_t, string const &) -> void;
+  auto push_macro(Ast_t, string const &) -> void;
 
   auto make_charlit(std::string_view const) -> Expr_Node;
   auto make_nonelit() const -> Expr_Node;
@@ -556,8 +559,9 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
 
           end = skip_until<'>'>(fcontent, i + 1);
 
-          if (!(end < file.size))
+          if (!(end < file.size)) {
             throw Exception(__LINE__, string("Non terminated global include"));
+          }
 
           lex.types.push_back(ir_t::LIT_STRING);
           lex.lexemes.push_back(string(start + i + 1, start + end));
@@ -569,8 +573,9 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
 
           end = skip_until<'"'>(fcontent, i + 1);
 
-          if (!(end < file.size))
+          if (!(end < file.size)) {
             throw Exception(__LINE__, string("Non terminated local include"));
+          }
 
           lex.types.push_back(ir_t::LIT_STRING);
           lex.lexemes.push_back(string(start + i + 1, start + end));
@@ -610,6 +615,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
           } else {
             lex.types.push_back(ir_t::RPAREN);
           }
+          // TODO
           throw std::runtime_error(
               "lexing args to a define macro is not currently implimented");
         } else {
@@ -659,36 +665,36 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
     } break;
     case '"': {
       i = skip_until<'"'>(fcontent, i + 1) + 1;
-      if (!(i < file.size))
+      if (!(i < file.size)) {
         throw Exception(__LINE__, string("Non terminated string"));
+      }
     } break;
     default:
       i = skip_until("#/\"", fcontent, i + 1);
       break;
     }
   }
-
   return lex;
 }
 
 auto Lexer::parse_to_ast() -> Ast {
-  auto ir = Ast();
+  auto ast = Ast();
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
   while (cur_t < types.size()) {
-    ir.check_size();
+    ast.check_size();
     switch (types[cur_t]) {
     case ir_t::INCLUDE:
       ++cur_t;
       switch (types[cur_t]) {
       case ir_t::LESS:
-        cur_t += 3; // LANGLE CHAR_LIT RANGLE
-        ir.push(Ast::Ast_t::GLOBAL_INCLUDE, lexemes[cur_lex]);
+        cur_t += 3; // LANGLE LIT_STRING RANGLE
+        ast.push_str(Ast::Ast_t::GLOBAL_INCLUDE, lexemes[cur_lex]);
         ++cur_lex;
         break;
       case ir_t::QUOTE:
-        cur_t += 3; // QUOTE CHAR_LIT QUOTE
-        ir.push(Ast::Ast_t::LOCAL_INCLUDE, lexemes[cur_lex]);
+        cur_t += 3; // QUOTE LIT_STRING QUOTE
+        ast.push_str(Ast::Ast_t::LOCAL_INCLUDE, lexemes[cur_lex]);
         ++cur_lex;
         break;
       default:
@@ -699,32 +705,28 @@ auto Lexer::parse_to_ast() -> Ast {
       }
       break;
     case ir_t::IF: {
-      ++cur_t;
-      auto expr = grab_string(cur_t, cur_lex, ir);
-      ir.push(Ast::Ast_t::IF, std::move(expr));
+      throw std::runtime_error("Lexer::parse_to_ast ir_t::IF not impl");
     } break;
-    case ir_t::IFDEF:
+    case ir_t::IFDEF: {
       cur_t += 2;
-      ir.push(Ast::Ast_t::IFDEF, lexemes[cur_lex]);
+      ast.push_macro(Ast::Ast_t::IFDEF, lexemes[cur_lex]);
       ++cur_lex;
-      break;
-    case ir_t::IFNDEF:
+    } break;
+    case ir_t::IFNDEF: {
       cur_t += 2;
-      ir.push(Ast::Ast_t::IFNDEF, lexemes[cur_lex]);
+      ast.push_macro(Ast::Ast_t::IFNDEF, lexemes[cur_lex]);
       ++cur_lex;
-      break;
-    case ir_t::ENDIF:
+    } break;
+    case ir_t::ENDIF: {
       ++cur_t;
-      ir.push(Ast::Ast_t::ENDIF, "");
-      break;
-    case ir_t::ELSE:
+      ast.push_node(Ast::Ast_t::ENDIF);
+    } break;
+    case ir_t::ELSE: {
       ++cur_t;
-      ir.push(Ast::Ast_t::ELSE, "");
-      break;
+      ast.push_node(Ast::Ast_t::ELSE);
+    } break;
     case ir_t::DEFINE:
-      cur_t += 2;
-      ir.push(Ast::Ast_t::DEFINE, "");
-      ++cur_lex;
+      throw std::runtime_error("Lexer::parse_to_ast ir_t::DEFINE not impl");
       break;
     default:
       throw Exception(__LINE__, std::format("Not implimented, type = [{}]",
@@ -736,7 +738,7 @@ auto Lexer::parse_to_ast() -> Ast {
   std::cout << "IR\n";
   ir.shitty_display(std::cout).flush();
 #endif // DEBUG
-  return ir;
+  return ast;
 }
 
 // TODO: extract all of these delim strings into variables that we can check on
@@ -1121,138 +1123,6 @@ auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
   return i;
 }
 
-auto Lexer::grab_string(size_t &cur_t, size_t &cur_lex, Ast &ir) -> string {
-  auto constexpr is_terminator = [](ir_t t) -> bool {
-    auto constexpr terminator_list = std::array<ir_t, 11>{
-        {ir_t::IF, ir_t::IFDEF, ir_t::IFNDEF, ir_t::ELIF, ir_t::ELSE,
-         ir_t::ENDIF, ir_t::DEFINE,
-         ir_t::SPACE, // only used when dealing with #define directives
-         ir_t::INCLUDE, ir_t::UNDEF, ir_t::PRAGMA}};
-    return std::any_of(terminator_list.begin(), terminator_list.end(),
-                       [t](auto &&x) { return x == t; });
-  };
-  auto str = string();
-  while (!is_terminator(types[cur_t])) {
-    switch (types[cur_t]) {
-    case ir_t::AND:
-      str += "&&";
-      ++cur_t;
-      break;
-    case ir_t::OR:
-      str += "||";
-      ++cur_t;
-      break;
-    case ir_t::BIT_AND:
-      str += "&";
-      ++cur_t;
-      break;
-    case ir_t::BIT_OR:
-      str += "|";
-      ++cur_t;
-      break;
-    case ir_t::DEFINED:
-      str += "defined";
-      ++cur_t;
-      break;
-    case ir_t::LESS:
-      str += "<";
-      ++cur_t;
-      break;
-    case ir_t::LESS_EQ:
-      str += "<=";
-      ++cur_t;
-      break;
-    case ir_t::GREATER:
-      str += ">";
-      ++cur_t;
-      break;
-    case ir_t::GREATER_EQ:
-      str += ">=";
-      ++cur_t;
-      break;
-    case ir_t::STRINGIZING:
-      str += "#";
-      ++cur_t;
-      break;
-    case ir_t::CONCAT:
-      str += "##";
-      ++cur_t;
-      break;
-    case ir_t::PLUS:
-      str += "+";
-      ++cur_t;
-      break;
-    case ir_t::MINUS:
-      str += "-";
-      ++cur_t;
-      break;
-    case ir_t::STAR:
-      str += "*";
-      ++cur_t;
-      break;
-    case ir_t::SLASH:
-      str += "/";
-      ++cur_t;
-      break;
-    case ir_t::BANG_EQ:
-      str += "!=";
-      ++cur_t;
-      break;
-    case ir_t::EQ:
-      str += "=";
-      ++cur_t;
-      break;
-    case ir_t::EQ_EQ:
-      str += "==";
-      ++cur_t;
-      break;
-    case ir_t::BANG:
-      str += "!";
-      ++cur_t;
-      break;
-    case ir_t::LPAREN:
-      str += "(";
-      ++cur_t;
-      break;
-    case ir_t::RPAREN:
-      str += ")";
-      ++cur_t;
-      break;
-    case ir_t::QUOTE:
-      str += "\"";
-      ++cur_t;
-      break;
-    case ir_t::MACRO:
-      [[fallthrough]];
-    case ir_t::LIT_CHAR:
-      [[fallthrough]];
-    case ir_t::LIT_STRING:
-      [[fallthrough]];
-    case ir_t::LIT_INT:
-      [[fallthrough]];
-    case ir_t::LIT_HEX:
-      [[fallthrough]];
-    case ir_t::LIT_OCTAL:
-      [[fallthrough]];
-    case ir_t::LIT_BINARY:
-      [[fallthrough]];
-    case ir_t::LIT_FLOAT:
-      [[fallthrough]];
-    case ir_t::LEXEME:
-      str += lexemes[cur_lex++];
-      ++cur_t;
-      break;
-    default:
-      break;
-    }
-  }
-  return str;
-}
-
-auto Lexer::produce_string(string_view const fcontent, size_t &i) -> string {
-  throw std::runtime_error("produce_string Not impl");
-}
-
 auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
   if (types[cur_t] != tkn) {
     throw Exception(__LINE__,
@@ -1285,18 +1155,6 @@ Ast::Ast()
     : size(0), cap(8), ast(std::make_unique<Ast::Ast_t[]>(cap)),
       exprs(std::make_unique<StringViews[]>(cap)) {}
 
-auto parse(FixedString const &file) -> Ast {
-#ifdef DEBUG
-  auto lexer = Lexer::lex(file);
-  std::cout << "lexer\n";
-  lexer.display(std::cout);
-  std::cout.flush();
-  return lexer.parse_to_ast();
-#else
-  return Lexer::lex(file).parse_to_ast();
-#endif
-}
-
 auto Ast::check_size() -> void {
   if (size == cap) {
     auto const new_cap = cap * 2;
@@ -1311,29 +1169,50 @@ auto Ast::check_size() -> void {
   }
 }
 
-auto Ast::push(Ast::Ast_t t, string const &expr) -> void {
-  if (expr == "") {
-    ast[size] = t;
-    exprs[size] = {0, 0};
-    ++size;
-  } else {
-    auto const start = lexemes.size;
-    lexemes.append(expr);
-    auto const end = lexemes.size;
-    if (start >= std::numeric_limits<unsigned int>::max() ||
-        end >= std::numeric_limits<unsigned int>::max()) {
-      throw std::runtime_error(std::format(
-          "Damn you have a lot of macros defined, idk what to do here because "
-          "you have more than [{}] macro strings. Feel free to open an issue "
-          "and fix this, all you have to do is change how StringViews is "
-          "implimented and everything to do with it :)",
-          std::numeric_limits<unsigned int>::max()));
-    }
-    ast[size] = t;
-    exprs[size] = {static_cast<unsigned int>(start),
-                   static_cast<unsigned int>(end)};
-    ++size;
+auto Ast::push_node(Ast::Ast_t t) -> void {
+  ast[size] = t;
+  exprs[size] = {0, 0};
+  ++size;
+}
+
+auto Ast::push_str(Ast::Ast_t t, string const &expr) -> void {
+  lexemes.append(expr);
+  if (tokens.size() >= std::numeric_limits<unsigned int>::max() ||
+      tokens.size() + 1 >= std::numeric_limits<unsigned int>::max()) {
+    throw std::runtime_error(std::format(
+        "Damn you have a lot of macros defined, idk what to do here because "
+        "you have more than [{}] macro strings. Feel free to open an issue "
+        "and fix this, all you have to do is change how StringViews is "
+        "implimented and everything to do with it :)",
+        std::numeric_limits<unsigned int>::max()));
   }
+  auto const start = static_cast<unsigned int>(tokens.size());
+  tokens.push_back(ir_t::LIT_STRING);
+  auto const end = start + 1;
+  ast[size] = t;
+  exprs[size] = {static_cast<unsigned int>(start),
+                 static_cast<unsigned int>(end)};
+  ++size;
+}
+
+auto Ast::push_macro(Ast::Ast_t t, string const &expr) -> void {
+  lexemes.append(expr);
+  if (tokens.size() >= std::numeric_limits<unsigned int>::max() ||
+      tokens.size() + 1 >= std::numeric_limits<unsigned int>::max()) {
+    throw std::runtime_error(std::format(
+        "Damn you have a lot of macros defined, idk what to do here because "
+        "you have more than [{}] macro strings. Feel free to open an issue "
+        "and fix this, all you have to do is change how StringViews is "
+        "implimented and everything to do with it :)",
+        std::numeric_limits<unsigned int>::max()));
+  }
+  auto const start = static_cast<unsigned int>(tokens.size());
+  tokens.push_back(ir_t::MACRO);
+  auto const end = start + 1;
+  ast[size] = t;
+  exprs[size] = {static_cast<unsigned int>(start),
+                 static_cast<unsigned int>(end)};
+  ++size;
 }
 
 auto Ast::make_charlit(std::string_view const sv) -> Expr_Node {
