@@ -5,7 +5,7 @@
 #include "luamake_strings.hpp"
 
 extern "C" {
-#include "lua/lua.h"
+#include "lua.h"
 }
 
 #include <algorithm>

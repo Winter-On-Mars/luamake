@@ -4,8 +4,10 @@
 #include <string_view>
 
 extern "C" {
-#include "lua/lua.h"
+#include "lua.h"
 }
+
+static_assert(LUA_VERSION_NUM == 504);
 
 namespace luamake {
 namespace builtins {
