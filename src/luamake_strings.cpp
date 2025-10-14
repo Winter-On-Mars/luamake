@@ -2,6 +2,8 @@
 
 #include <cstring>
 #include <iostream>
+#include <string_view>
+#include <utility>
 
 namespace luamake {
 auto OwnedString::append(std::string_view str) noexcept -> void {
@@ -20,6 +22,31 @@ auto OwnedString::append(std::string_view str) noexcept -> void {
   size += str_len;
   buffer[size] = 0;
   ++size;
+}
+
+auto OwnedString::find(std::string_view const str) const noexcept
+    -> std::pair<bool, StringViews> {
+  auto const *start = buffer;
+  auto const *current = buffer;
+  auto end = size_t{};
+
+  while (end != size) {
+    if (buffer[end] == 0) {
+      current = buffer + end;
+      // check
+      auto const path_view = std::string_view{start, current};
+      if (path_view.size() == str.size() && *path_view.data() == *str.data() &&
+          strncmp(path_view.data(), str.data(), path_view.size()) == 0) {
+        return std::pair(true,
+                         StringViews{static_cast<unsigned int>(start - buffer),
+                                     static_cast<unsigned int>(end)});
+      }
+      start = current + 1;
+    }
+    ++end;
+  }
+
+  return std::make_pair(false, StringViews{0, 0});
 }
 
 FixedString::FixedString(char const *buffer, size_t size) noexcept

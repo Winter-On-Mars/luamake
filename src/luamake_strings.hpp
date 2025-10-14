@@ -4,8 +4,11 @@
 #include <cstddef>
 #include <format>
 #include <string_view>
+#include <utility>
 
 namespace luamake {
+
+struct StringViews;
 
 /**
  * @brief takes ownership of the buffer, with buffer.size == size
@@ -30,6 +33,8 @@ struct OwnedString final {
   OwnedString &operator=(OwnedString const &) = delete;
 
   auto append(std::string_view const) noexcept -> void;
+  auto find(std::string_view const) const noexcept
+      -> std::pair<bool, StringViews>;
 
   auto constexpr view() const noexcept -> std::string_view {
     return std::string_view{buffer, size};
@@ -117,7 +122,6 @@ constexpr auto FixedString::operator=(FixedString &&that) noexcept
   that.size = 0;
   return *this;
 }
-
 } // namespace luamake
 
 namespace std {

@@ -562,28 +562,7 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
 // array(?)
 auto Module::DepTree::find(string_view const path) const noexcept
     -> std::pair<bool, StringViews> {
-  auto const *start = all_paths.buffer;
-  auto const *current = all_paths.buffer;
-  auto end = size_t{};
-
-  while (end != all_paths.size) {
-    if (all_paths.buffer[end] == 0) {
-      current = all_paths.buffer + end;
-      // check
-      auto const path_view = string_view{start, current};
-      if (path_view.size() == path.size() &&
-          *path_view.data() == *path.data() &&
-          strncmp(path_view.data(), path.data(), path_view.size()) == 0) {
-        return std::pair(true, StringViews{static_cast<unsigned int>(
-                                               start - all_paths.buffer),
-                                           static_cast<unsigned int>(end)});
-      }
-      start = current + 1;
-    }
-    ++end;
-  }
-
-  return std::make_pair(false, StringViews{0, 0});
+  return all_paths.find(path);
 }
 
 auto Module::DepTree::resize() noexcept(false) -> void {
