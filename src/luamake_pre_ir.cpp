@@ -6,8 +6,8 @@
 #include <cstddef>
 #include <cstring>
 #include <format>
-#include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -24,6 +24,8 @@
 namespace fs = std::filesystem;
 
 using std::string, std::string_view, std::vector, std::unordered_map;
+
+template <class T> using ptr = std::unique_ptr<T>;
 
 using buffer_views = luamake::StringViews;
 
@@ -49,11 +51,6 @@ auto constexpr skip_ws(string_view const buf, size_t i) -> size_t {
     ++i;
   }
   return i;
-}
-
-auto constexpr is_ws(char const ch) -> bool {
-  auto constexpr ws = std::string_view{" \t\n\r"};
-  return ws.find(ch) != ws.npos;
 }
 
 auto constexpr skip_until(string_view const delims, string_view const buf,
@@ -127,6 +124,7 @@ auto constexpr delims_at(delims &&del) -> string_view {
 } // namespace
 
 struct Ast;
+struct AstNode;
 
 enum class ir_t : u8 {
   // preprocessor stuff
@@ -182,9 +180,9 @@ constexpr auto to_string(ir_t) -> std::string_view;
 struct Lexer final {
   Lexer(Lexer const &) = delete;
   Lexer &operator=(Lexer const &) = delete;
-  Lexer(Lexer &&) = default;
-  Lexer &operator=(Lexer &&) = default;
-  ~Lexer() = default;
+  Lexer(Lexer &&) noexcept = default;
+  Lexer &operator=(Lexer &&) noexcept = default;
+  ~Lexer() noexcept = default;
 
   std::vector<ir_t> types;
   std::vector<std::string> lexemes;
@@ -197,7 +195,7 @@ struct Lexer final {
   /**
    * @throws Lex_Exc
    */
-  auto parse_to_ast() -> Ast;
+  auto ast() -> Ast;
 
 #ifdef DEBUG
   auto display(std::ostream &) const noexcept -> std::ostream &;
@@ -206,8 +204,17 @@ struct Lexer final {
   Lexer() = default;
 
   auto matching(size_t, std::initializer_list<ir_t> &&) -> bool;
-  auto handle_hashif(std::string_view const, size_t) -> size_t;
-  auto parse_define_args(std::string_view const, size_t) -> size_t;
+  auto parse_define_args(string_view const, size_t) -> size_t;
+  auto expr(string_view const, size_t) -> size_t;
+
+  auto declaration(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_if(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_ifdef(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_ifndef(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_define(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_undef(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_include(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_pragma(size_t &, size_t &) -> std::unique_ptr<AstNode>;
 
   /**
    * @throws
@@ -236,28 +243,28 @@ struct Lexer final {
 // TODO: optimize this struct, you can probably combine the Expr_t variable with
 // the binary/unary operator in some bit field being or'd, but for now i'm just
 // trying to get this working
-struct Expr_Node {
+struct ExprNode {
   struct Integer final {
-    size_t x;
+    size_t i;
   };
   struct Number final {
-    double x;
+    double f;
   };
   struct Defined final {
-    StringViews x;
+    StringViews str;
   };
   struct CharLit final {
-    StringViews x;
+    StringViews str;
   };
   struct Binary final {
     enum Binary_t { PLUS, MINUS, GREATER, GREATER_EQ, LESS, LESS_EQ };
-    std::unique_ptr<Expr_Node> lhs;
-    std::unique_ptr<Expr_Node> rhs;
+    std::unique_ptr<ExprNode> lhs;
+    std::unique_ptr<ExprNode> rhs;
     Binary_t t;
   };
   struct Unary final {
     enum Unary_t { BANG, MINUS };
-    std::unique_ptr<Expr_Node> un;
+    std::unique_ptr<ExprNode> un;
     Unary_t t;
   };
   enum Expr_t {
@@ -270,13 +277,13 @@ struct Expr_Node {
   using Value =
       std::variant<Integer, Number, Defined, CharLit, Binary, Unary, void *>;
   Value val;
-  Expr_Node() noexcept : t(NONE), val((void *)nullptr) {}
-  Expr_Node(Expr_t &&t, Value &&val) noexcept : t(t), val(std::move(val)) {}
-  Expr_Node(Expr_Node &&) = default;
-  Expr_Node &operator=(Expr_Node &&) = default;
+  ExprNode() noexcept : t(NONE), val((void *)nullptr) {}
+  ExprNode(Expr_t &&t, Value &&val) noexcept : t(t), val(std::move(val)) {}
+  ExprNode(ExprNode &&) = default;
+  ExprNode &operator=(ExprNode &&) = default;
 
-  Expr_Node(Expr_Node const &) = delete;
-  Expr_Node &operator=(Expr_Node const &) = delete;
+  ExprNode(ExprNode const &) = delete;
+  ExprNode &operator=(ExprNode const &) = delete;
 
   static auto constexpr readable_type(Expr_t) noexcept -> std::string_view;
   /**
@@ -286,6 +293,107 @@ struct Expr_Node {
   auto eval() const -> int;
 };
 
+// TODO: devirtualize this if this becomes a perf issue
+struct AstVisitor;
+
+struct AstNode {
+  virtual ~AstNode() = default;
+  virtual auto accept(AstVisitor &) -> void {};
+};
+
+struct ElifNode;
+struct ElseNode;
+
+struct IfNode final : AstNode {
+  virtual ~IfNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  string condition;
+  vector<ptr<AstNode>> if_stmts;
+  vector<ptr<ElifNode>> elif_branches;
+  ptr<ElseNode> else_branch;
+};
+
+struct IfDefNode final : AstNode {
+  virtual ~IfDefNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  string macro;
+  vector<ptr<AstNode>> if_stmts;
+  vector<ptr<ElifNode>> elif_branches;
+  ptr<ElseNode> else_branch;
+};
+
+struct IfNDefNode final : AstNode {
+  virtual ~IfNDefNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  string macro;
+  vector<ptr<AstNode>> if_stmts;
+  vector<ptr<ElifNode>> elif_branches;
+  ptr<ElseNode> else_branch;
+};
+
+struct ElifNode final : AstNode {
+  virtual ~ElifNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  string condition;
+  vector<ptr<AstNode>> if_stmts;
+};
+
+struct ElseNode final : AstNode {
+  virtual ~ElseNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  vector<ptr<AstNode>> stmts;
+};
+
+struct GlobalIncludeNode final : AstNode {
+  GlobalIncludeNode(string const &str) noexcept : path(str) {}
+  virtual ~GlobalIncludeNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  fs::path path;
+};
+
+struct LocalIncludeNode final : AstNode {
+  LocalIncludeNode(string const &str) noexcept : path(str) {}
+  virtual ~LocalIncludeNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  fs::path path;
+};
+
+struct DefineNode final : AstNode {
+  DefineNode(string const &str, string &&lexeme) noexcept
+      : name(str), lexeme(lexeme) {}
+  DefineNode(string const &str) noexcept : name(str), lexeme(std::nullopt) {}
+
+  virtual ~DefineNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  string name;
+  std::optional<string> lexeme;
+};
+
+struct DefineFuncNode final : AstNode {
+  virtual ~DefineFuncNode() = default;
+  virtual auto accept(AstVisitor &) -> void;
+
+  string name;
+  vector<string> parameters;
+  string body;
+};
+
+struct UndefNode final : AstNode {
+  UndefNode(string const &str) noexcept : name(str) {}
+  virtual ~UndefNode() = default;
+  virtual auto accept(AstVisitor &visitor) -> void;
+
+  string name;
+};
+
 struct Ast final {
   /**
    * @throws std::bad_alloc
@@ -293,64 +401,87 @@ struct Ast final {
   Ast();
   Ast(Ast const &) = delete;
   Ast &operator=(Ast const &) = delete;
-  Ast(Ast &&) = default;
-  Ast &operator=(Ast &&) = default;
-  ~Ast() = default;
+  Ast(Ast &&) noexcept = default;
+  Ast &operator=(Ast &&) noexcept = default;
+  ~Ast() noexcept = default;
   // these are all pp directives
-  enum class Ast_t {
-    IF,
-    IFDEF,
-    IFNDEF,
-    ELIF,
-    ELSE,
-    ENDIF,
-    GLOBAL_INCLUDE,
-    LOCAL_INCLUDE,
-    DEFINE,
-    UNDEF,
-  };
+  vector<std::unique_ptr<AstNode>> nodes;
 
-  static auto constexpr pretty_types(Ast_t) -> string_view;
-
-  vector<ir_t> tokens;
-  OwnedString lexemes;
-  size_t size;
-  size_t cap;
-  std::unique_ptr<Ast_t[]> ast;
-  std::unique_ptr<buffer_views[]> exprs; // -> tokens
-
-  /**
-   * @throws std::bad_alloc
-   */
-  auto check_size() -> void;
-
-  auto push_node(Ast_t) -> void;
-  auto push_str(Ast_t, string const &) -> void;
-  auto push_macro(Ast_t, string const &) -> void;
-
-  auto make_charlit(std::string_view const) -> Expr_Node;
-  auto make_nonelit() const -> Expr_Node;
-
-#ifdef DEBUG
-  auto shitty_display(std::ostream &) const -> std::ostream &;
-#endif // DEBUG
-
-  auto constexpr num_includes() const noexcept -> size_t;
+  auto accept(AstVisitor &) const -> void;
 };
 
-struct State final {
-  enum state : u8 {
-    DEFAULT,
-    IF,
-    ELSE,
-    ENDIF,
-    DEFINE,
-    GINCLUDE,
-    LINCLUDE
-  } t = DEFAULT;
-  auto interpret(size_t, Interpreter &, Ast const &,
-                 std::vector<std::filesystem::path> &) -> size_t;
+struct AstVisitor {
+  virtual auto visit_if(IfNode &) -> void = 0;
+  virtual auto visit_ifdef(IfDefNode &) -> void = 0;
+  virtual auto visit_ifndef(IfNDefNode &) -> void = 0;
+  virtual auto visit_elif(ElifNode &) -> void = 0;
+  virtual auto visit_else(ElseNode &) -> void = 0;
+  virtual auto visit_global_include(GlobalIncludeNode &) -> void = 0;
+  virtual auto visit_local_include(LocalIncludeNode &) -> void = 0;
+  virtual auto visit_define(DefineNode &) -> void = 0;
+  virtual auto visit_define_func(DefineFuncNode &) -> void = 0;
+  virtual auto visit_undef(UndefNode &) -> void = 0;
 };
+
+auto IfNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_if(*this);
+}
+auto IfDefNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_ifdef(*this);
+}
+auto IfNDefNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_ifndef(*this);
+}
+auto ElifNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_elif(*this);
+}
+auto ElseNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_else(*this);
+}
+auto GlobalIncludeNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_global_include(*this);
+}
+auto LocalIncludeNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_local_include(*this);
+}
+auto DefineNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_define(*this);
+}
+auto DefineFuncNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_define_func(*this);
+}
+auto UndefNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_undef(*this);
+}
+
+struct AstPrinter final : AstVisitor {
+  std::ostream &out;
+  AstPrinter(std::ostream &out) noexcept : out(out) {}
+
+  auto print(Ast &ast) -> void {
+    for (auto &&node : ast.nodes) {
+      node->accept(*this);
+    }
+  }
+
+  auto visit_if(IfNode &) -> void final;
+  auto visit_ifdef(IfDefNode &) -> void final;
+  auto visit_ifndef(IfNDefNode &) -> void final;
+  auto visit_elif(ElifNode &) -> void final;
+  auto visit_else(ElseNode &) -> void final;
+  auto visit_global_include(GlobalIncludeNode &) -> void final;
+  auto visit_local_include(LocalIncludeNode &) -> void final;
+  auto visit_define(DefineNode &) -> void final;
+  auto visit_define_func(DefineFuncNode &) -> void final;
+  auto visit_undef(UndefNode &) -> void final;
+};
+
+#if 0
+struct AstIncluder final : AstVisitor {
+  vector<fs::path> &paths;
+  AstIncluder(vector<fs::path> &paths) noexcept : paths(paths) {}
+};
+#endif
 
 auto constexpr to_string(ir_t t) -> std::string_view {
   switch (t) {
@@ -441,7 +572,7 @@ auto constexpr to_string(ir_t t) -> std::string_view {
   }
 }
 
-auto constexpr Expr_Node::readable_type(Expr_t t) noexcept -> std::string_view {
+auto constexpr ExprNode::readable_type(Expr_t t) noexcept -> std::string_view {
   switch (t) {
   case INT:
     return std::string_view{"INT"};
@@ -454,42 +585,6 @@ auto constexpr Expr_Node::readable_type(Expr_t t) noexcept -> std::string_view {
   case NONE:
     return std::string_view{"NONE"};
   }
-}
-
-auto constexpr Ast::pretty_types(Ast_t t) -> string_view {
-  switch (t) {
-  case Ast_t::IF:
-    return string_view{"IF"};
-  case Ast_t::IFDEF:
-    return string_view{"IFDEF"};
-  case Ast_t::IFNDEF:
-    return string_view{"IFNDEF"};
-  case Ast_t::ELIF:
-    return string_view{"ELIF"};
-  case Ast_t::ELSE:
-    return string_view{"ELSE"};
-  case Ast_t::ENDIF:
-    return string_view{"ENDIF"};
-  case Ast_t::GLOBAL_INCLUDE:
-    return string_view{"GLOBAL_INCLUDE"};
-  case Ast_t::LOCAL_INCLUDE:
-    return string_view{"LOCAL_INCLUDE"};
-  case Ast_t::DEFINE:
-    return string_view{"DEFINE"};
-  case Ast_t::UNDEF:
-    return string_view{"UNDEF"};
-  }
-}
-
-auto constexpr Ast::num_includes() const noexcept -> size_t {
-  auto num_includes = size_t{};
-  for (auto i = size_t{}; i < size; ++i) {
-    if (ast[i] == Ast::Ast_t::GLOBAL_INCLUDE ||
-        ast[i] == Ast::Ast_t::LOCAL_INCLUDE) {
-      ++num_includes;
-    }
-  }
-  return num_includes;
 }
 
 // i would like to add lexical short cutting, where if we see a macro that's
@@ -536,21 +631,18 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
         // continue to next character of interest
         i = skip_until(chars_of_interest, fcontent, i);
         throw Exception(
-            __LINE__,
             std::format("Hash keyword [{}], is not implimented", hash_keyword));
       }
 
       switch (keyword->second) {
       case ir_t::INCLUDE: {
         if (i >= file.size)
-          throw Exception(__LINE__,
-                          string("Unable to parse include parameter"));
+          throw Exception(string("Unable to parse include parameter"));
 
         i = skip_ws(fcontent, i) + 1;
 
         if (i >= file.size)
-          throw Exception(__LINE__,
-                          string("Unable to parse include parameter"));
+          throw Exception(string("Unable to parse include parameter"));
 
         lex.types.push_back(ir_t::INCLUDE);
         switch (fcontent[i]) {
@@ -560,7 +652,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
           end = skip_until<'>'>(fcontent, i + 1);
 
           if (!(end < file.size)) {
-            throw Exception(__LINE__, string("Non terminated global include"));
+            throw Exception(string("Non terminated global include"));
           }
 
           lex.types.push_back(ir_t::LIT_STRING);
@@ -574,7 +666,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
           end = skip_until<'"'>(fcontent, i + 1);
 
           if (!(end < file.size)) {
-            throw Exception(__LINE__, string("Non terminated local include"));
+            throw Exception(string("Non terminated local include"));
           }
 
           lex.types.push_back(ir_t::LIT_STRING);
@@ -583,8 +675,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
           lex.types.push_back(ir_t::QUOTE);
         } break;
         default:
-          throw Exception(__LINE__,
-                          std::format("character found = {}", fcontent[i]));
+          throw Exception(std::format("character found = {}", fcontent[i]));
         }
       } break;
       case ir_t::IFDEF: {
@@ -604,25 +695,22 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" (\t\n\r", fcontent, i + 1);
         lex.push_lexeme(string(start + i, start + end));
-        if (fcontent[end] == '(') {
+        switch (fcontent[end]) {
+        case '(': {
           lex.types.push_back(ir_t::SPACE);
           lex.types.push_back(ir_t::LPAREN);
-          i = lex.parse_define_args(fcontent, i + 1);
+          i = lex.parse_define_args(fcontent, i);
           if (fcontent[i] != ')') {
-            throw Exception(__LINE__,
-                            std::format("Expected closing ')' when parsing a "
-                                        "function macros arguments"));
-          } else {
-            lex.types.push_back(ir_t::RPAREN);
+            throw Exception(std::format("Expected closing ')' when parsing "
+                                        "function macro arguments"));
           }
-          // TODO
-          throw std::runtime_error(
-              "lexing args to a define macro is not currently implimented");
-        } else {
-          i = skip_ws(fcontent, i) + 1;
-          if (!is_ws(fcontent[i])) {
-            lex.push_macro(lex.produce_string(fcontent, i));
-          }
+          lex.types.push_back(ir_t::RPAREN);
+          throw Exception(std::format("Parsing function macro bodies is not "
+                                      "currently implimented"));
+        } break;
+        default: {
+          i = lex.expr(fcontent, i);
+        } break;
         }
       } break;
       case ir_t::UNDEF: {
@@ -634,7 +722,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
       case ir_t::IF:
         lex.types.push_back(ir_t::IF);
         i = skip_ws(fcontent, i) + 1;
-        i = lex.handle_hashif(fcontent, i);
+        i = lex.expr(fcontent, i);
         break;
       default:
         lex.types.push_back(keyword->second);
@@ -643,7 +731,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
     } break;
     case '/': {
       if (!(i + 1 < file.size)) {
-        throw Exception(__LINE__, string("'/' found at end of file"));
+        throw Exception(string("'/' found at end of file"));
       }
       ++i;
       switch (fcontent[i]) {
@@ -655,8 +743,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
         // ends with a multi line comment, i.e. */ at the end of the file
         i = skip_until_close_multicomment(fcontent, i + 1);
         if (i == file.size)
-          throw Exception(__LINE__,
-                          string("Non terminated multi line comment"));
+          throw Exception(string("Non terminated multi line comment"));
       } break;
       default: // probably just an op /
         i = skip_until("#/\"", fcontent, i + 1);
@@ -666,7 +753,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
     case '"': {
       i = skip_until<'"'>(fcontent, i + 1) + 1;
       if (!(i < file.size)) {
-        throw Exception(__LINE__, string("Non terminated string"));
+        throw Exception(string("Non terminated string"));
       }
     } break;
     default:
@@ -674,78 +761,24 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
       break;
     }
   }
+#ifdef DEBUG
+  std::cout << "Lexer:\n";
+  lex.display(std::cout).flush();
+#endif // DEBUG
   return lex;
 }
 
-auto Lexer::parse_to_ast() -> Ast {
+auto Lexer::ast() -> Ast {
   auto ast = Ast();
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
   while (cur_t < types.size()) {
-    ast.check_size();
-    switch (types[cur_t]) {
-    case ir_t::INCLUDE:
-      ++cur_t;
-      switch (types[cur_t]) {
-      case ir_t::LESS:
-        cur_t += 3; // LANGLE LIT_STRING RANGLE
-        ast.push_str(Ast::Ast_t::GLOBAL_INCLUDE, lexemes[cur_lex]);
-        ++cur_lex;
-        break;
-      case ir_t::QUOTE:
-        cur_t += 3; // QUOTE LIT_STRING QUOTE
-        ast.push_str(Ast::Ast_t::LOCAL_INCLUDE, lexemes[cur_lex]);
-        ++cur_lex;
-        break;
-      default:
-        throw Exception(__LINE__,
-                        std::format("Malformed #include statement, "
-                                    "expected '<' or '\"', found [{}]",
-                                    to_string(types[cur_t])));
-      }
-      break;
-    case ir_t::IF: {
-      throw std::runtime_error("Lexer::parse_to_ast ir_t::IF not impl");
-    } break;
-    case ir_t::IFDEF: {
-      cur_t += 2;
-      ast.push_macro(Ast::Ast_t::IFDEF, lexemes[cur_lex]);
-      ++cur_lex;
-    } break;
-    case ir_t::IFNDEF: {
-      cur_t += 2;
-      ast.push_macro(Ast::Ast_t::IFNDEF, lexemes[cur_lex]);
-      ++cur_lex;
-    } break;
-    case ir_t::ENDIF: {
-      ++cur_t;
-      ast.push_node(Ast::Ast_t::ENDIF);
-    } break;
-    case ir_t::ELSE: {
-      ++cur_t;
-      ast.push_node(Ast::Ast_t::ELSE);
-    } break;
-    case ir_t::DEFINE:
-      throw std::runtime_error("Lexer::parse_to_ast ir_t::DEFINE not impl");
-      break;
-    default:
-      throw Exception(__LINE__, std::format("Not implimented, type = [{}]",
-                                            to_string(types[cur_t])));
-      break;
-    }
+    ast.nodes.push_back(declaration(cur_t, cur_lex));
   }
-#ifdef DEBUG
-  std::cout << "IR\n";
-  ir.shitty_display(std::cout).flush();
-#endif // DEBUG
   return ast;
 }
 
-// TODO: extract all of these delim strings into variables that we can check on
-// TODO: update this to have a string that we build up, in case there's a '\'
-// char in there that we have to ignore, bc it can probably make the later steps
-// more annoying if we leave it in the lexemes string
-auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
+auto Lexer::expr(string_view const buf, size_t i) -> size_t {
   auto constexpr defined_str = string_view{"defined"};
   auto looping = true;
   while (looping && i < buf.size()) {
@@ -859,12 +892,10 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
           // be an error, the same goes with "'" character
           ++i;
           if (!(i < buf.size())) {
-            throw Exception(
-                __LINE__,
-                std::format("Found string [0b], this is treated as an octal "
+            throw Exception("Found string [0b], this is treated as an octal "
                             "number by the compiler, and is therefore "
                             "malformed as only 01234567 are allowed in octal "
-                            "numbers"));
+                            "numbers");
           }
           auto const start = i - 1;
           auto allow_quote = false;
@@ -883,11 +914,9 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
                 allow_quote = false;
               } else {
                 throw Exception(
-                    __LINE__,
-                    std::format(
-                        "When parsing a binary number, found two ' characters "
-                        "back to back, these are treated as identifiers for a "
-                        "char literal, and thus a formatting error."));
+                    "When parsing a binary number, found two ' characters "
+                    "back to back, these are treated as identifiers for a "
+                    "char literal, and thus a formatting error.");
               }
             } break;
             default: {
@@ -895,14 +924,12 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
               // throw the same thing
               if (is_any_of(delims_at(delims::BINARY_FAIL), buf.data(), i)) {
                 throw Exception(
-                    __LINE__,
                     std::format("Found [{}], while parsing a binary numbers, "
                                 "only 0 and 1 are allowed in binary numbers "
                                 "(and ' characters for delimiters)",
                                 buf[i]));
               } else if (std::isalpha(buf[i])) {
                 throw Exception(
-                    __LINE__,
                     std::format("Found [{}], while parsing a binary numbers, "
                                 "only 0 and 1 are allowed in binary numbers "
                                 "(and ' characters for delimiters)",
@@ -920,12 +947,10 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
         case 'x': {
           ++i;
           if (!(i < buf.size())) {
-            throw Exception(
-                __LINE__,
-                std::format("Found string [0x], this is treated as an octal "
+            throw Exception("Found string [0x], this is treated as an octal "
                             "number by the compiler, and is therefore "
                             "malformed, as only 01234567 are allowed in octal "
-                            "numbers"));
+                            "numbers");
           }
           auto const start = i - 1;
           auto allow_quote = false;
@@ -940,17 +965,14 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
                 allow_quote = false;
               } else {
                 throw Exception(
-                    __LINE__,
-                    std::format(
-                        "When parsing a hex number, found two ' characters "
-                        "back to back, these are treated as identifiers for a "
-                        "char literal, and thus a formatting error."));
+                    "When parsing a hex number, found two ' characters "
+                    "back to back, these are treated as identifiers for a "
+                    "char literal, and thus a formatting error.");
               }
             } else if (is_any_of(delims_at(delims::ALPHA_SANS_HEX), buf.data(),
                                  i)) {
-              throw Exception(__LINE__,
-                              std::format("While parsing a hex number, found a "
-                                          "character that's not supported."));
+              throw Exception("While parsing a hex number, found a "
+                              "character that's not supported.");
             } else {
               inner_looping = false;
             }
@@ -989,22 +1011,18 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
                 ++i;
               } else {
                 throw Exception(
-                    __LINE__,
-                    std::format(
-                        "While parsing an octal number encounter a double ' "
-                        "character, these are treated as introducing a char "
-                        "literal, causing an error."));
+                    "While parsing an octal number encounter a double ' "
+                    "character, these are treated as introducing a char "
+                    "literal, causing an error.");
               }
             } else {
               if (is_any_of(delims_at(delims::LEXEME), buf.data(), i)) {
                 break;
               } else {
-                throw Exception(
-                    __LINE__,
-                    std::format(
-                        "While parsing an octal number, encounter [{}], a non "
-                        "supposed character in octal numbers",
-                        buf[i]));
+                throw Exception(std::format(
+                    "While parsing an octal number, encounter [{}], a non "
+                    "supposed character in octal numbers",
+                    buf[i]));
               }
             }
           }
@@ -1014,11 +1032,9 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
         case '8':
           [[fallthrough]];
         case '9': {
-          throw Exception(
-              __LINE__,
-              std::format("While parsing an octal number came across an 8 or "
+          throw Exception("While parsing an octal number came across an 8 or "
                           "9. Note that when you start a number with 0 it will "
-                          "be treated as an octal number by the compiler :)."));
+                          "be treated as an octal number by the compiler :).");
         } break;
         }
       }
@@ -1053,17 +1069,14 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
             allow_quote = false;
             ++i;
           } else {
-            throw Exception(
-                __LINE__,
-                std::format("While parsing a decimal number, found a double '. "
+            throw Exception("While parsing a decimal number, found a double '. "
                             "These are treated as introducing a char literal, "
-                            "causing an error."));
+                            "causing an error.");
           }
           // These two cases should probably be rolled into one
         } else if (is_any_of(delims_at(delims::HEX_SANS_DIGITS), buf.data(),
                              i)) {
           throw Exception(
-              __LINE__,
               std::format("While parsing a decimal number, encountered the "
                           "following unsupported character [{}]",
                           buf[i]));
@@ -1072,7 +1085,6 @@ auto Lexer::handle_hashif(string_view const buf, size_t i) -> size_t {
             break;
           } else {
             throw Exception(
-                __LINE__,
                 std::format("While parsing a decimal number, encountered the "
                             "following unsupported character [{}]",
                             buf[i]));
@@ -1123,10 +1135,106 @@ auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
   return i;
 }
 
+auto Lexer::declaration(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  switch (types[cur_t]) {
+  case ir_t::IF:
+    return handle_if(cur_t, cur_lex);
+  case ir_t::IFDEF:
+    return handle_ifdef(cur_t, cur_lex);
+  case ir_t::IFNDEF:
+    return handle_ifndef(cur_t, cur_lex);
+  case ir_t::DEFINE:
+    return handle_define(cur_t, cur_lex);
+  case ir_t::UNDEF:
+    return handle_undef(cur_t, cur_lex);
+  case ir_t::INCLUDE:
+    return handle_include(cur_t, cur_lex);
+  case ir_t::PRAGMA:
+    return handle_pragma(cur_t, cur_lex);
+  case ir_t::ELIF: // TODO: throw for these with their own special error
+                   // messages
+    [[fallthrough]];
+  case ir_t::ELSE:
+    [[fallthrough]];
+  case ir_t::ENDIF:
+    [[fallthrough]];
+  default:
+    throw Exception(
+        std::format("Unexpected token [{}] found in top level scope.",
+                    to_string(types[cur_t])));
+  }
+}
+
+auto Lexer::handle_if(size_t &, size_t &) -> std::unique_ptr<AstNode> {
+  throw std::runtime_error("Lexer::handle_if not impl");
+}
+auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+#if 0
+  ++cur_t;
+  if (types[cur_t] != ir_t::LEXEME) {
+    throw Exception(std::format("Expected lexeme following #ifdef"));
+  }
+  return std::make_unique<AstNode>(IfDefNode(lexemes[cur_lex++]));
+#endif
+}
+
+auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+#if 0
+  ++cur_t;
+  if (types[cur_t] != ir_t::LEXEME) {
+    throw Exception(std::format("Expected lexeme following #ifndef"));
+  }
+  return std::make_unique<AstNode>(IfDefNode(lexemes[cur_lex++]));
+#endif
+}
+
+auto Lexer::handle_define(size_t &, size_t &) -> std::unique_ptr<AstNode> {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
+auto Lexer::handle_undef(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  ++cur_t;
+  if (types[cur_t] != ir_t::MACRO) {
+    throw Exception(
+        std::format("Expected macro in #undef preprocessor directive"));
+  }
+  return std::make_unique<AstNode>(UndefNode(lexemes[cur_lex++]));
+}
+
+auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  ++cur_t;
+  switch (types[cur_t]) {
+  case ir_t::LESS: {
+    cur_t += 3;
+    return std::make_unique<AstNode>(GlobalIncludeNode(lexemes[cur_lex++]));
+  } break;
+  case ir_t::QUOTE: {
+    cur_t += 3;
+    return std::make_unique<AstNode>(LocalIncludeNode(lexemes[cur_lex++]));
+  } break;
+  default: {
+    throw Exception(std::format("Malformed #include statement, "
+                                "expected '<' or '\"', found [{}]",
+                                to_string(types[cur_t])));
+  }
+  }
+}
+
+auto Lexer::handle_pragma(size_t &, size_t &) -> std::unique_ptr<AstNode> {
+  throw Exception(
+      std::format("#pragma statement parsing is not currently implimented"));
+}
+
 auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
   if (types[cur_t] != tkn) {
-    throw Exception(__LINE__,
-                    std::format("Unexpected token, expected {}, found {}",
+    throw Exception(std::format("Unexpected token, expected {}, found {}",
                                 to_string(tkn), to_string(types[cur_t])));
   }
 }
@@ -1147,293 +1255,38 @@ auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
 }
 #endif
 
-auto Expr_Node::eval() const -> int {
+auto ExprNode::eval() const -> int {
   throw std::runtime_error("Expr_Node::eval not impl");
 }
 
-Ast::Ast()
-    : size(0), cap(8), ast(std::make_unique<Ast::Ast_t[]>(cap)),
-      exprs(std::make_unique<StringViews[]>(cap)) {}
+Ast::Ast() { nodes.reserve(20); }
 
-auto Ast::check_size() -> void {
-  if (size == cap) {
-    auto const new_cap = cap * 2;
-    auto new_ast = std::make_unique<Ast::Ast_t[]>(new_cap);
-    auto new_exprs = std::make_unique<StringViews[]>(new_cap);
-
-    std::memmove(new_ast.get(), ast.get(), sizeof(ir_t) * cap);
-    std::memmove(new_exprs.get(), exprs.get(), sizeof(StringViews) * cap);
-    ast = std::move(new_ast);
-    exprs = std::move(new_exprs);
-    cap = new_cap;
-  }
-}
-
-auto Ast::push_node(Ast::Ast_t t) -> void {
-  ast[size] = t;
-  exprs[size] = {0, 0};
-  ++size;
-}
-
-auto Ast::push_str(Ast::Ast_t t, string const &expr) -> void {
-  lexemes.append(expr);
-  if (tokens.size() >= std::numeric_limits<unsigned int>::max() ||
-      tokens.size() + 1 >= std::numeric_limits<unsigned int>::max()) {
-    throw std::runtime_error(std::format(
-        "Damn you have a lot of macros defined, idk what to do here because "
-        "you have more than [{}] macro strings. Feel free to open an issue "
-        "and fix this, all you have to do is change how StringViews is "
-        "implimented and everything to do with it :)",
-        std::numeric_limits<unsigned int>::max()));
-  }
-  auto const start = static_cast<unsigned int>(tokens.size());
-  tokens.push_back(ir_t::LIT_STRING);
-  auto const end = start + 1;
-  ast[size] = t;
-  exprs[size] = {static_cast<unsigned int>(start),
-                 static_cast<unsigned int>(end)};
-  ++size;
-}
-
-auto Ast::push_macro(Ast::Ast_t t, string const &expr) -> void {
-  lexemes.append(expr);
-  if (tokens.size() >= std::numeric_limits<unsigned int>::max() ||
-      tokens.size() + 1 >= std::numeric_limits<unsigned int>::max()) {
-    throw std::runtime_error(std::format(
-        "Damn you have a lot of macros defined, idk what to do here because "
-        "you have more than [{}] macro strings. Feel free to open an issue "
-        "and fix this, all you have to do is change how StringViews is "
-        "implimented and everything to do with it :)",
-        std::numeric_limits<unsigned int>::max()));
-  }
-  auto const start = static_cast<unsigned int>(tokens.size());
-  tokens.push_back(ir_t::MACRO);
-  auto const end = start + 1;
-  ast[size] = t;
-  exprs[size] = {static_cast<unsigned int>(start),
-                 static_cast<unsigned int>(end)};
-  ++size;
-}
-
-auto Ast::make_charlit(std::string_view const sv) -> Expr_Node {
-  auto const start = lexemes.size;
-  lexemes.append(sv);
-  auto const end = lexemes.size;
-  if (start >= std::numeric_limits<unsigned int>::max() ||
-      end >= std::numeric_limits<unsigned int>::max()) {
-    throw std::runtime_error(std::format(
-        "Damn you have a lot of macros defined, idk what to do here because "
-        "you have more than [{}] macro strings. Feel free to open an issue "
-        "and fix this, all you have to do is change how StringViews is "
-        "implimented and everything to do with it :)",
-        std::numeric_limits<unsigned int>::max()));
-  }
-  return Expr_Node(Expr_Node::CHARLIT, Expr_Node::CharLit(StringViews{
-                                           static_cast<unsigned int>(start),
-                                           static_cast<unsigned int>(end)}));
-}
-
-auto Ast::make_nonelit() const -> Expr_Node { return Expr_Node(); }
-
-#ifdef DEBUG
-auto Ast::shitty_display(std::ostream &out) const -> std::ostream & {
-  out << "lexemes = [" << string_view{lexemes.buffer, lexemes.size} << "]\n";
-  out << "ast:\n\t";
-  for (auto i = size_t{}; i < size; ++i) {
-    out << '[' << Ast::pretty_types(ast[i]) << ']';
-  }
-  out << '\n';
-
-  out << "exprs:\n\t";
-  for (auto i = size_t{}; i < size; ++i) {
-    auto const lit = exprs[i];
-    out << '['
-        << string_view{lexemes.buffer + lit.start, lexemes.buffer + lit.end}
-        << ']';
-  }
-  out << "\n\n";
-
-  return out;
-}
-#endif // DEBUG
-
-auto State::interpret(size_t i, Interpreter &interpreter, Ast const &ir,
-                      vector<fs::path> &vec) -> size_t {
-  throw std::runtime_error("State::interpret not impl");
-
-#if 0
-  auto constexpr terminating_nodes = std::array<Ast::Ast_t, 3>{
-      {Ast::Ast_t::ENDIF, Ast::Ast_t::ELSE, Ast::Ast_t::ELIF}};
-#ifdef DEBUG
-  std::cerr << "\tLooking at [" << Ast::pretty_types(ir.ast[i]) << "]\n";
-#endif // DEBUG
-  switch (ir.ast[i]) {
-  case Ast::Ast_t::GLOBAL_INCLUDE: {
-    // TODO: check that this file *actually exists*
-    ++i;
-  } break;
-  case Ast::Ast_t::LOCAL_INCLUDE: {
-    auto const lit = ir.exprs[i];
-
-    auto const include_name = string(string_view{ir.lexemes.buffer + lit.start,
-                                                 ir.lexemes.buffer + lit.end});
-    vec.push_back(include_name);
-    ++i;
-  } break;
-  case Ast::Ast_t::IF: {
-    auto const expr = eval(ir, i);
-    if (expr == 1) {
-      ++i;
-      while (i < ir.size) {
-        if (std::any_of(terminating_nodes.cbegin(), terminating_nodes.cend(),
-                        [node = ir.ast[i]](auto &&cur_node) {
-                          return node == cur_node;
-                        })) {
-          break;
-        } else {
-          interpret_impl(false, ir, i, vec);
-        }
-      }
-    } else {
-      ++i;
-    }
-  } break;
-  case Ast::Ast_t::IFDEF: {
-    auto const lit = ir.exprs[i];
-    auto const checking_macro = string(string_view{
-        ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
-    auto const defined =
-        macros.contains(checking_macro) || def_macros.contains(checking_macro);
-    ++i;
-    if (defined) {
-      while (i < ir.size) {
-        if (std::any_of(terminating_nodes.cbegin(), terminating_nodes.cend(),
-                        [node = ir.ast[i]](auto &&cur_node) {
-                          return node == cur_node;
-                        }))
-          break;
-        interpret_impl(false, ir, i, vec);
-      }
-      if (i == ir.size)
-        throw Exception(__LINE__, "Unterminated #ifdef expression");
-      i = skip_until(i, std::span(ir.ast.get(), ir.size),
-                     IR_AST::IR_Types::ENDIF);
-      if (i == ir.size)
-        throw Exception(__LINE__, "Unterminated #ifdef expression");
-      ++i; // move over the ENDIF
-    } else {
-      while (i < ir.size) {
-        if (!(std::any_of(terminating_nodes.begin(), terminating_nodes.end(),
-                          [node = ir.ast[i]](auto &&cur_node) {
-                            return cur_node == node;
-                          }))) {
-          ++i;
-        } else {
-          break;
-        }
-      }
-      if (i == ir.size)
-        throw Exception(__LINE__, "Unterminated #ifdef expression");
-
-      interpret_impl(true, ir, i, vec);
-
-      i = skip_until(i, std::span(ir.ast.get(), ir.size), Ast::Ast_t::ENDIF);
-      if (i == ir.size) {
-        throw Exception(__LINE__, "Unterminated #ifdef expression");
-      }
-      ++i; // move over the #endif
-    }
-  } break;
-  case Ast::Ast_t::IFNDEF: {
-    auto const lit = ir.exprs[i];
-    auto const checking_macro = string(string_view{
-        ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
-    auto const defined =
-        macros.contains(checking_macro) || def_macros.contains(checking_macro);
-    ++i;
-    if (!defined) {
-      while (i < ir.size) {
-        if (std::any_of(terminating_nodes.begin(), terminating_nodes.end(),
-                        [node = ir.ast[i]](auto &&cur_node) {
-                          return node == cur_node;
-                        }))
-          break;
-        interpret_impl(false, ir, i, vec);
-      }
-      if (i == ir.size)
-        throw Exception(__LINE__, "Unterminated #ifndef expression");
-      i = skip_until(i, std::span(ir.ast.get(), ir.size), Ast::Ast_t::ENDIF);
-      if (i == ir.size)
-        throw Exception(__LINE__, "Unterminated #ifndef expression");
-      ++i; // move over the ENDIF
-    } else {
-      while (i < ir.size) {
-        if (!std::any_of(terminating_nodes.begin(), terminating_nodes.end(),
-                         [node = ir.ast[i]](auto &&cur_node) {
-                           return cur_node == node;
-                         })) {
-          ++i;
-        } else {
-          break;
-        }
-      }
-      if (i == ir.size)
-        throw Exception(__LINE__, "Unterminated #ifndef expression");
-
-      if (ir.ast[i] == Ast::Ast_t::ENDIF) {
-        ++i;
-        return;
-      }
-      interpret_impl(true, ir, i, vec);
-
-      i = skip_until(i, std::span(ir.ast.get(), ir.size), Ast::Ast_t::ENDIF);
-      if (i == ir.size) {
-        throw Exception(__LINE__, "Unterminated #ifndef expression");
-      }
-    }
-  } break;
-  case Ast::Ast_t::ELSE: {
-    if (!interpret_elses) {
-      throw Exception(__LINE__, "Unsupported interpretation of #else, "
-                                "possibly misformatted preprocessor");
-    } else {
-      ++i;
-      while (i < ir.size) {
-        if (ir.ast[i] == Ast::Ast_t::ENDIF) {
-          break;
-        } else {
-          interpret_impl(false, ir, i, vec);
-        }
-      }
-    }
-  } break;
-  case Ast::Ast_t::DEFINE: {
-    // TODO: parse object like macros
-    auto const lit = ir.exprs[i];
-    auto const defining_macro = string(string_view{
-        ir.lexemes.buffer + lit.start, ir.lexemes.buffer + lit.end});
-    ++i;
-    def_macros.emplace(defining_macro);
-  } break;
-  default:
-    throw Exception(__LINE__, std::format("Not implimented, type = [{}]",
-                                          IR_AST::pretty_types(ir.ast[i])));
-  }
-#endif
-}
+auto AstPrinter::visit_if(IfNode &i) -> void {}
+auto AstPrinter::visit_ifdef(IfDefNode &) -> void {}
+auto AstPrinter::visit_ifndef(IfNDefNode &) -> void {}
+auto AstPrinter::visit_elif(ElifNode &) -> void {}
+auto AstPrinter::visit_else(ElseNode &) -> void {}
+auto AstPrinter::visit_global_include(GlobalIncludeNode &) -> void {}
+auto AstPrinter::visit_local_include(LocalIncludeNode &) -> void {}
+auto AstPrinter::visit_define(DefineNode &) -> void {}
+auto AstPrinter::visit_define_func(DefineFuncNode &) -> void {}
+auto AstPrinter::visit_undef(UndefNode &) -> void {}
 
 auto Exception::what() const noexcept -> string {
-  return std::format("On line {}, had following error [{}]", line, message);
+  return std::format("[{}]", message);
 }
 
 auto Interpreter::interpret(FixedString const &file) -> vector<fs::path> {
-  auto ir = Lexer::lex(file).parse_to_ast();
+  auto ast = Lexer::lex(file).ast();
   auto vec = vector<fs::path>();
-  auto state = State{};
-  vec.reserve(ir.num_includes());
-  for (auto i = size_t{}; i < ir.size;) {
-    i = state.interpret(i, *this, ir, vec);
-  }
+#ifdef DEBUG
+  auto ast_p = AstPrinter(std::cout);
+  ast_p.print(ast);
+#endif // DEBUG
+#if 0
+  auto includer = AstIncluder(vec);
+  ast.accept(includer);
+#endif
   return vec;
 }
 } // namespace pp
