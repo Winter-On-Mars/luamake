@@ -7,6 +7,11 @@
 #include <utility>
 
 namespace luamake {
+#ifdef LAKE_SMALL_STRING
+using len_t = unsigned int;
+#else
+using len_t = size_t;
+#endif
 
 struct StringViews;
 
@@ -17,10 +22,10 @@ struct StringViews;
  */
 struct OwnedString final {
   char *buffer;
-  size_t size;
-  size_t capacity;
+  len_t size;
+  len_t capacity;
 
-  explicit constexpr OwnedString(char *&buffer, size_t size) noexcept;
+  explicit constexpr OwnedString(char *&buffer, len_t size) noexcept;
   constexpr OwnedString() noexcept;
 
   constexpr OwnedString(OwnedString &&that) noexcept;
@@ -41,13 +46,14 @@ struct OwnedString final {
   }
 };
 
-constexpr OwnedString::OwnedString(char *&buffer, size_t size) noexcept
+constexpr OwnedString::OwnedString(char *&buffer, len_t size) noexcept
     : buffer(buffer), size(0), capacity(size) {
   buffer = nullptr;
 }
 
+// TODO: have this alloc
 constexpr OwnedString::OwnedString() noexcept
-    : buffer(nullptr), size(0), capacity(0) {}
+    : buffer(nullptr), size(len_t{0}), capacity(len_t{0}) {}
 
 constexpr OwnedString::OwnedString(OwnedString &&that) noexcept
     : buffer(that.buffer), size(that.size), capacity(that.capacity) {
@@ -77,22 +83,22 @@ constexpr OwnedString::~OwnedString() noexcept {
 }
 
 struct StringViews final {
-  unsigned int start;
-  unsigned int end;
+  len_t start;
+  len_t end;
 };
 
 struct FixedString final {
   char const *buffer;
-  size_t size;
+  len_t size;
 
-  explicit FixedString(char const *buffer, size_t size) noexcept;
+  explicit constexpr FixedString(char *&buffer, len_t size) noexcept;
   constexpr FixedString() noexcept;
 
   constexpr FixedString(FixedString &&that) noexcept;
 
   constexpr auto operator=(FixedString &&that) noexcept -> FixedString &;
 
-  ~FixedString() noexcept;
+  constexpr ~FixedString() noexcept;
 
   FixedString(FixedString const &) = delete;
   FixedString &operator=(FixedString const &) = delete;
@@ -101,6 +107,16 @@ struct FixedString final {
     return std::string_view{buffer, size};
   }
 };
+
+constexpr FixedString::FixedString(char *&buffer, size_t size) noexcept
+    : buffer(buffer), size(size) {
+  buffer = nullptr;
+}
+
+constexpr FixedString::~FixedString() noexcept {
+  if (buffer != nullptr)
+    free((void *)buffer);
+}
 
 constexpr FixedString::FixedString() noexcept : buffer(nullptr), size(0) {}
 

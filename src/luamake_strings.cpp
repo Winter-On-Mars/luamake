@@ -48,12 +48,4 @@ auto OwnedString::find(std::string_view const str) const noexcept
 
   return std::make_pair(false, StringViews{0, 0});
 }
-
-FixedString::FixedString(char const *buffer, size_t size) noexcept
-    : buffer(buffer), size(size) {}
-
-FixedString::~FixedString() noexcept {
-  if (buffer != nullptr)
-    free((void *)buffer);
-}
 } // namespace luamake
