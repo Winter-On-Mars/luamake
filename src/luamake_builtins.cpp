@@ -1318,7 +1318,7 @@ auto CompilationPool::add_task(Module::DepTree const &sf) -> void {
   // this is a really hacky solution to fix the issues of compiling the same
   // source multiple times, this is probably where that hash set solution
   // would probably make things faster :)
-  auto lowest = uint{0};
+  auto lowest = len_t{0};
   remaining_tasks.reserve(sf.num_files);
   for (auto i = size_t{}; i < sf.num_files; ++i) {
     if (sf.types[i] == Module::DepTree::IMPL && sf.files[i].start >= lowest) {
