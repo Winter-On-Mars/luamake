@@ -12,19 +12,15 @@
 namespace luamake {
 namespace pp {
 struct Exception {
-  explicit Exception(decltype(__LINE__) line, std::string &&message) noexcept
-      : line(line), message(message) {}
+  explicit Exception(std::string &&message) noexcept : message(message) {}
 
   ~Exception() = default;
   auto what() const noexcept -> std::string;
 
-  decltype(__LINE__) line;
   std::string message;
 };
 
 using Macro = std::string;
-
-struct Ast;
 
 struct Interpreter final {
   constexpr Interpreter(std::unordered_map<std::string, Macro> &macros,
