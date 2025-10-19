@@ -796,7 +796,7 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     throw CAPI(strerror(errno));
   }
   auto &&[read_pipe, write_pipe] = _pipes;
-  auto const pid = vfork();
+  auto const pid = fork();
   if (pid < 0) {
     close(read_pipe);
     close(write_pipe);
@@ -889,7 +889,7 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
     throw CAPI(strerror(errno));
   }
   auto &&[read_pipe, write_pipe] = _pipes;
-  auto const pid = vfork();
+  auto const pid = fork();
   if (pid < 0) {
     close(read_pipe);
     close(write_pipe);
