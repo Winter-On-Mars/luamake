@@ -125,6 +125,8 @@ auto constexpr delims_at(delims &&del) -> string_view {
 
 struct Ast;
 struct AstNode;
+struct ElifNode;
+struct ElseNode;
 
 enum class ir_t : u8 {
   // preprocessor stuff
@@ -216,6 +218,9 @@ struct Lexer final {
   auto handle_include(size_t &, size_t &) -> std::unique_ptr<AstNode>;
   auto handle_pragma(size_t &, size_t &) -> std::unique_ptr<AstNode>;
 
+  auto handle_elif(size_t &, size_t &) -> ptr<ElifNode>;
+  auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
+
   /**
    * @throws
    */
@@ -298,15 +303,16 @@ struct AstVisitor;
 
 struct AstNode {
   virtual ~AstNode() = default;
-  virtual auto accept(AstVisitor &) -> void {};
+  virtual auto accept(AstVisitor &) -> void = 0;
 };
 
 struct ElifNode;
 struct ElseNode;
 
+// TODO: fix all of these to mark them as final
 struct IfNode final : AstNode {
-  virtual ~IfNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  ~IfNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   string condition;
   vector<ptr<AstNode>> if_stmts;
@@ -315,52 +321,65 @@ struct IfNode final : AstNode {
 };
 
 struct IfDefNode final : AstNode {
-  virtual ~IfDefNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  IfDefNode(string &&str, vector<ptr<AstNode>> &&then_branch,
+            vector<ptr<ElifNode>> &&elif_branches,
+            ptr<ElseNode> &&else_branch) noexcept
+      : macro(std::move(str)), then_branch(std::move(then_branch)),
+        elif_branches(std::move(elif_branches)),
+        else_branch(std::move(else_branch)) {}
+  ~IfDefNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   string macro;
-  vector<ptr<AstNode>> if_stmts;
+  vector<ptr<AstNode>> then_branch;
   vector<ptr<ElifNode>> elif_branches;
   ptr<ElseNode> else_branch;
 };
 
 struct IfNDefNode final : AstNode {
-  virtual ~IfNDefNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  IfNDefNode(string &&str, vector<ptr<AstNode>> &&then_branch,
+             vector<ptr<ElifNode>> &&elif_branches,
+             ptr<ElseNode> &&else_branch) noexcept
+      : macro(std::move(str)), then_branch(std::move(then_branch)),
+        elif_branches(std::move(elif_branches)),
+        else_branch(std::move(else_branch)) {}
+  ~IfNDefNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   string macro;
-  vector<ptr<AstNode>> if_stmts;
+  vector<ptr<AstNode>> then_branch;
   vector<ptr<ElifNode>> elif_branches;
   ptr<ElseNode> else_branch;
 };
 
 struct ElifNode final : AstNode {
-  virtual ~ElifNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  ~ElifNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   string condition;
   vector<ptr<AstNode>> if_stmts;
 };
 
 struct ElseNode final : AstNode {
-  virtual ~ElseNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  ElseNode(vector<ptr<AstNode>> &&stmts) noexcept : stmts(std::move(stmts)) {}
+  ~ElseNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   vector<ptr<AstNode>> stmts;
 };
 
 struct GlobalIncludeNode final : AstNode {
   GlobalIncludeNode(string const &str) noexcept : path(str) {}
-  virtual ~GlobalIncludeNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  ~GlobalIncludeNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   fs::path path;
 };
 
 struct LocalIncludeNode final : AstNode {
   LocalIncludeNode(string const &str) noexcept : path(str) {}
-  virtual ~LocalIncludeNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  ~LocalIncludeNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   fs::path path;
 };
@@ -370,16 +389,16 @@ struct DefineNode final : AstNode {
       : name(str), lexeme(lexeme) {}
   DefineNode(string const &str) noexcept : name(str), lexeme(std::nullopt) {}
 
-  virtual ~DefineNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  ~DefineNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   string name;
   std::optional<string> lexeme;
 };
 
 struct DefineFuncNode final : AstNode {
-  virtual ~DefineFuncNode() = default;
-  virtual auto accept(AstVisitor &) -> void;
+  ~DefineFuncNode() final = default;
+  auto accept(AstVisitor &) -> void final;
 
   string name;
   vector<string> parameters;
@@ -388,8 +407,8 @@ struct DefineFuncNode final : AstNode {
 
 struct UndefNode final : AstNode {
   UndefNode(string const &str) noexcept : name(str) {}
-  virtual ~UndefNode() = default;
-  virtual auto accept(AstVisitor &visitor) -> void;
+  ~UndefNode() final = default;
+  auto accept(AstVisitor &visitor) -> void final;
 
   string name;
 };
@@ -410,6 +429,8 @@ struct Ast final {
   auto accept(AstVisitor &) const -> void;
 };
 
+// no need for a virtual dtor bc you shouldn't be dynamically allocating this
+// ABC
 struct AstVisitor {
   virtual auto visit_if(IfNode &) -> void = 0;
   virtual auto visit_ifdef(IfDefNode &) -> void = 0;
@@ -456,13 +477,18 @@ auto UndefNode::accept(AstVisitor &visitor) -> void {
 
 struct AstPrinter final : AstVisitor {
   std::ostream &out;
-  AstPrinter(std::ostream &out) noexcept : out(out) {}
+  // i really love that in c++ this is a thing you can do :)
+  std::allocator_traits<std::string::allocator_type>::size_type depth;
+  AstPrinter(std::ostream &out) noexcept : out(out), depth(0) {}
 
   auto print(Ast &ast) -> void {
     for (auto &&node : ast.nodes) {
       node->accept(*this);
     }
+    out.flush();
   }
+
+  constexpr auto get_indents() -> string { return string(depth, ' '); }
 
   auto visit_if(IfNode &) -> void final;
   auto visit_ifdef(IfDefNode &) -> void final;
@@ -1171,26 +1197,218 @@ auto Lexer::handle_if(size_t &, size_t &) -> std::unique_ptr<AstNode> {
 }
 auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
-#if 0
   ++cur_t;
   if (types[cur_t] != ir_t::LEXEME) {
     throw Exception(std::format("Expected lexeme following #ifdef"));
   }
-  return std::make_unique<AstNode>(IfDefNode(lexemes[cur_lex++]));
-#endif
+  ++cur_t;
+  auto lex = lexemes[cur_lex++];
+  auto then_branch = vector<ptr<AstNode>>();
+  auto elif_branches = vector<ptr<ElifNode>>();
+  auto else_branch = ptr<ElseNode>(nullptr);
+  enum class FoundEnd {
+    none,
+    elif,
+    _else,
+    endif,
+  } cur = FoundEnd::none;
+  while (cur == FoundEnd::none && cur_t < types.size()) {
+    switch (types[cur_t]) {
+    case ir_t::IF:
+      then_branch.push_back(handle_if(cur_t, cur_lex));
+      break;
+    case ir_t::IFDEF:
+      then_branch.push_back(handle_ifdef(cur_t, cur_lex));
+      break;
+    case ir_t::IFNDEF:
+      then_branch.push_back(handle_ifndef(cur_t, cur_lex));
+      break;
+    case ir_t::DEFINE:
+      then_branch.push_back(handle_define(cur_t, cur_lex));
+      break;
+    case ir_t::UNDEF:
+      then_branch.push_back(handle_undef(cur_t, cur_lex));
+      break;
+    case ir_t::INCLUDE:
+      then_branch.push_back(handle_include(cur_t, cur_lex));
+      break;
+    case ir_t::PRAGMA:
+      then_branch.push_back(handle_pragma(cur_t, cur_lex));
+      break;
+    case ir_t::ELIF:
+      cur = FoundEnd::elif;
+      break;
+    case ir_t::ELSE:
+      cur = FoundEnd::_else;
+      break;
+    case ir_t::ENDIF:
+      cur = FoundEnd::endif;
+      break;
+    default:
+      throw Exception(
+          std::format("Unexpected token [{}] found in top level scope.",
+                      to_string(types[cur_t])));
+    }
+  }
+
+  if (cur == FoundEnd::none) {
+    throw Exception(std::format("Unterminated #ifdef directive found"));
+  }
+
+  while (cur != FoundEnd::none) {
+    switch (cur) {
+    case FoundEnd::elif:
+      if (else_branch != nullptr) {
+        throw Exception(std::format("Found #elif directive following #else "
+                                    "directive in #ifdef directive"));
+      }
+      while (cur_t < types.size() &&
+             (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
+        elif_branches.push_back(handle_elif(cur_t, cur_lex));
+      }
+      cur = [this](auto const cur_t) {
+        switch (types[cur_t]) {
+        case ir_t::ELSE:
+          return FoundEnd::_else;
+        case ir_t::ENDIF:
+          return FoundEnd::endif;
+        case ir_t::ELIF:
+          return FoundEnd::elif;
+        default:
+          throw Exception(std::format(
+              "Unexpected token [{}], found after parsing #else directive",
+              to_string(types[cur_t])));
+        }
+      }(cur_t);
+      break;
+    case FoundEnd::_else:
+      if (else_branch != nullptr) {
+        throw Exception("Found multiple #else directives attached to a single "
+                        "#ifdef directive");
+      }
+      else_branch = handle_else(cur_t, cur_lex);
+      cur = [this](auto const cur_t) {
+        switch (types[cur_t]) {
+        case ir_t::ELSE:
+          return FoundEnd::_else;
+        case ir_t::ENDIF:
+          return FoundEnd::endif;
+        case ir_t::ELIF:
+          return FoundEnd::elif;
+        default:
+          throw Exception(std::format(
+              "Unexpected token [{}], found after parsing #else directive",
+              to_string(types[cur_t])));
+        }
+      }(cur_t);
+      break;
+    case FoundEnd::endif:
+      ++cur_t;
+      cur = FoundEnd::none;
+      break;
+    case FoundEnd::none:
+      unreachable();
+    }
+  }
+
+  return std::make_unique<IfDefNode>(std::move(lex), std::move(then_branch),
+                                     std::move(elif_branches),
+                                     std::move(else_branch));
 }
 
 auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
-#if 0
   ++cur_t;
   if (types[cur_t] != ir_t::LEXEME) {
     throw Exception(std::format("Expected lexeme following #ifndef"));
   }
-  return std::make_unique<AstNode>(IfDefNode(lexemes[cur_lex++]));
-#endif
+  ++cur_t;
+  auto lex = lexemes[cur_lex++];
+  auto then_branch = vector<ptr<AstNode>>();
+  auto elif_branches = vector<ptr<ElifNode>>();
+  auto else_branch = ptr<ElseNode>(nullptr);
+  enum class FoundEnd {
+    none,
+    elif,
+    _else,
+    endif,
+  } cur = FoundEnd::none;
+  while (cur == FoundEnd::none && cur_t < types.size()) {
+    switch (types[cur_t]) {
+    case ir_t::IF:
+      then_branch.push_back(handle_if(cur_t, cur_lex));
+      break;
+    case ir_t::IFDEF:
+      then_branch.push_back(handle_ifdef(cur_t, cur_lex));
+      break;
+    case ir_t::IFNDEF:
+      then_branch.push_back(handle_ifndef(cur_t, cur_lex));
+      break;
+    case ir_t::DEFINE:
+      then_branch.push_back(handle_define(cur_t, cur_lex));
+      break;
+    case ir_t::UNDEF:
+      then_branch.push_back(handle_undef(cur_t, cur_lex));
+      break;
+    case ir_t::INCLUDE:
+      then_branch.push_back(handle_include(cur_t, cur_lex));
+      break;
+    case ir_t::PRAGMA:
+      then_branch.push_back(handle_pragma(cur_t, cur_lex));
+      break;
+    case ir_t::ELIF:
+      cur = FoundEnd::elif;
+      break;
+    case ir_t::ELSE:
+      cur = FoundEnd::_else;
+      break;
+    case ir_t::ENDIF:
+      cur = FoundEnd::endif;
+      break;
+    default:
+      throw Exception(
+          std::format("Unexpected token [{}] found in top level scope.",
+                      to_string(types[cur_t])));
+    }
+  }
+
+  if (cur == FoundEnd::none) {
+    throw Exception(std::format("Unterminated #ifndef directive found"));
+  }
+
+  while (cur != FoundEnd::none) {
+    switch (cur) {
+    case FoundEnd::elif:
+      if (else_branch != nullptr) {
+        throw Exception(std::format("Found #elif directive following #else "
+                                    "directive in #ifndef directive"));
+      }
+      while (cur_t < types.size() &&
+             (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
+        elif_branches.push_back(handle_elif(cur_t, cur_lex));
+      }
+      break;
+    case FoundEnd::_else:
+      if (else_branch != nullptr) {
+        throw Exception("Found multiple #else directives attached to a single "
+                        "#ifndef directive");
+      }
+      else_branch = handle_else(cur_t, cur_lex);
+      break;
+    case FoundEnd::endif:
+      ++cur_t;
+      cur = FoundEnd::none;
+      break;
+    case FoundEnd::none:
+      unreachable();
+      break;
+    }
+  }
+
+  return std::make_unique<IfNDefNode>(std::move(lex), std::move(then_branch),
+                                      std::move(elif_branches),
+                                      std::move(else_branch));
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
 }
 
 auto Lexer::handle_define(size_t &, size_t &) -> std::unique_ptr<AstNode> {
@@ -1204,7 +1422,7 @@ auto Lexer::handle_undef(size_t &cur_t, size_t &cur_lex)
     throw Exception(
         std::format("Expected macro in #undef preprocessor directive"));
   }
-  return std::make_unique<AstNode>(UndefNode(lexemes[cur_lex++]));
+  return std::make_unique<UndefNode>(lexemes[cur_lex++]);
 }
 
 auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
@@ -1213,11 +1431,11 @@ auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
   switch (types[cur_t]) {
   case ir_t::LESS: {
     cur_t += 3;
-    return std::make_unique<AstNode>(GlobalIncludeNode(lexemes[cur_lex++]));
+    return std::make_unique<GlobalIncludeNode>(lexemes[cur_lex++]);
   } break;
   case ir_t::QUOTE: {
     cur_t += 3;
-    return std::make_unique<AstNode>(LocalIncludeNode(lexemes[cur_lex++]));
+    return std::make_unique<LocalIncludeNode>(lexemes[cur_lex++]);
   } break;
   default: {
     throw Exception(std::format("Malformed #include statement, "
@@ -1230,6 +1448,55 @@ auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
 auto Lexer::handle_pragma(size_t &, size_t &) -> std::unique_ptr<AstNode> {
   throw Exception(
       std::format("#pragma statement parsing is not currently implimented"));
+}
+
+auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
+  throw Exception(
+      std::format("#elif statement parsing is not currently implimented"));
+}
+
+// it could be a good idea to have this #else consume the #endif(?)
+auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
+  ++cur_t;
+  auto res = vector<ptr<AstNode>>();
+  auto looping = true;
+  while (looping && cur_t < types.size()) {
+    switch (types[cur_t]) {
+    case ir_t::IF:
+      res.push_back(handle_if(cur_t, cur_lex));
+      break;
+    case ir_t::IFDEF:
+      res.push_back(handle_ifdef(cur_t, cur_lex));
+      break;
+    case ir_t::IFNDEF:
+      res.push_back(handle_ifndef(cur_t, cur_lex));
+      break;
+    case ir_t::DEFINE:
+      res.push_back(handle_define(cur_t, cur_lex));
+      break;
+    case ir_t::UNDEF:
+      res.push_back(handle_undef(cur_t, cur_lex));
+      break;
+    case ir_t::INCLUDE:
+      res.push_back(handle_include(cur_t, cur_lex));
+      break;
+    case ir_t::PRAGMA:
+      res.push_back(handle_pragma(cur_t, cur_lex));
+      break;
+    case ir_t::ELSE: // this error *should* be handled elsewhere
+      [[fallthrough]];
+    case ir_t::ELIF:
+      [[fallthrough]];
+    case ir_t::ENDIF:
+      looping = false;
+      break;
+    default:
+      throw Exception(
+          std::format("Unexpected token [{}] found in top level scope.",
+                      to_string(types[cur_t])));
+    }
+  }
+  return std::make_unique<ElseNode>(std::move(res));
 }
 
 auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
@@ -1261,16 +1528,75 @@ auto ExprNode::eval() const -> int {
 
 Ast::Ast() { nodes.reserve(20); }
 
-auto AstPrinter::visit_if(IfNode &i) -> void {}
-auto AstPrinter::visit_ifdef(IfDefNode &) -> void {}
-auto AstPrinter::visit_ifndef(IfNDefNode &) -> void {}
-auto AstPrinter::visit_elif(ElifNode &) -> void {}
-auto AstPrinter::visit_else(ElseNode &) -> void {}
-auto AstPrinter::visit_global_include(GlobalIncludeNode &) -> void {}
-auto AstPrinter::visit_local_include(LocalIncludeNode &) -> void {}
-auto AstPrinter::visit_define(DefineNode &) -> void {}
-auto AstPrinter::visit_define_func(DefineFuncNode &) -> void {}
-auto AstPrinter::visit_undef(UndefNode &) -> void {}
+auto AstPrinter::visit_if(IfNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __FUNCTION__));
+}
+
+auto AstPrinter::visit_ifdef(IfDefNode &i) -> void {
+  out << get_indents() << "(ifdef (" << i.macro << ")\n";
+  ++depth;
+  for (auto &&thens : i.then_branch) {
+    thens->accept(*this);
+  }
+  for (auto &&elifs : i.elif_branches) {
+    elifs->accept(*this);
+  }
+  if (i.else_branch != nullptr) {
+    i.else_branch->accept(*this);
+  }
+  --depth;
+  out << get_indents() << ")\n";
+}
+
+auto AstPrinter::visit_ifndef(IfNDefNode &i) -> void {
+  out << get_indents() << "(ifndef (" << i.macro << ")\n";
+  ++depth;
+  for (auto &&thens : i.then_branch) {
+    thens->accept(*this);
+  }
+  for (auto &&elifs : i.elif_branches) {
+    elifs->accept(*this);
+  }
+  if (i.else_branch != nullptr) {
+    i.else_branch->accept(*this);
+  }
+  --depth;
+  out << get_indents() << ")\n";
+}
+
+auto AstPrinter::visit_elif(ElifNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
+auto AstPrinter::visit_else(ElseNode &e) -> void {
+  out << get_indents() << "(else (\n";
+  ++depth;
+  for (auto &&elses : e.stmts) {
+    elses->accept(*this);
+  }
+  --depth;
+  out << get_indents() << ")\n";
+}
+
+auto AstPrinter::visit_global_include(GlobalIncludeNode &global) -> void {
+  out << get_indents() << "(include global (" << global.path << "))\n";
+}
+
+auto AstPrinter::visit_local_include(LocalIncludeNode &local) -> void {
+  out << get_indents() << "(include local (" << local.path << "))\n";
+}
+
+auto AstPrinter::visit_define(DefineNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
+auto AstPrinter::visit_define_func(DefineFuncNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
+auto AstPrinter::visit_undef(UndefNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
 
 auto Exception::what() const noexcept -> string {
   return std::format("[{}]", message);
