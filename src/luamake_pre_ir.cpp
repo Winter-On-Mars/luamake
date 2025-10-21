@@ -271,10 +271,10 @@ struct ExprNode {
     double f;
   };
   struct Defined final {
-    StringViews str;
+    string str;
   };
   struct CharLit final {
-    StringViews str;
+    string str;
   };
   struct Binary final {
     enum Binary_t {
@@ -318,6 +318,7 @@ struct ExprNode {
 
   static auto make_binary(ir_t, ExprNode &&, ExprNode &&) noexcept -> ExprNode;
   static auto make_unary(ir_t, ExprNode &&) noexcept -> ExprNode;
+  static auto make_defined(string &&) noexcept -> ExprNode;
 
   ExprNode(ExprNode const &) = delete;
   ExprNode &operator=(ExprNode const &) = delete;
@@ -328,6 +329,9 @@ struct ExprNode {
    * (if a float is found)
    */
   auto eval() const -> int;
+
+  friend auto operator<<(std::ostream &, ExprNode const &) noexcept
+      -> std::ostream &;
 };
 
 // TODO: devirtualize this if this becomes a perf issue
@@ -1749,6 +1753,27 @@ auto Lexer::primary(size_t &cur_t, size_t &cur_lex) -> ExprNode {
     break;
   case ir_t::LEXEME:
     break;
+  case ir_t::LPAREN: {
+    expect(cur_t, ir_t::RPAREN);
+  } break;
+  case ir_t::DEFINED: {
+    ++cur_t;
+    auto lex = string();
+    if (types[cur_t] == ir_t::LPAREN) {
+      ++cur_t;
+      expect(cur_t, ir_t::LEXEME);
+      ++cur_t;
+      lex = lexemes[cur_lex++];
+      expect(cur_t, ir_t::RPAREN);
+      ++cur_t;
+    } else {
+      expect(cur_t, ir_t::LEXEME);
+      ++cur_t;
+      lex = lexemes[cur_lex++];
+    }
+    return ExprNode::make_defined(std::move(lex));
+  } break;
+
   default:
     throw Exception(
         std::format("Unexpected token [{}] found while parsing an expression",
@@ -1757,6 +1782,7 @@ auto Lexer::primary(size_t &cur_t, size_t &cur_lex) -> ExprNode {
   throw Exception(std::format("{} not impl", __PRETTY_FUNCTION__));
 }
 
+// TODO: update this function to allow for optional string for extra info
 auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
   if (types[cur_t] != tkn) {
     throw Exception(std::format("Unexpected token, expected {}, found {}",
@@ -1828,14 +1854,99 @@ auto ExprNode::make_unary(ir_t tkn, ExprNode &&un) noexcept -> ExprNode {
   return ExprNode(ExprNode::UNARY, std::move(_un));
 }
 
+auto ExprNode::make_defined(string &&str) noexcept -> ExprNode {
+  return ExprNode(ExprNode::DEFINED, Defined{std::move(str)});
+}
+
 auto ExprNode::eval() const -> int {
   throw std::runtime_error("Expr_Node::eval not impl");
 }
 
+auto operator<<(std::ostream &out, ExprNode const &en) noexcept
+    -> std::ostream & {
+  switch (en.t) {
+  case ExprNode::INT:
+    out << std::get<ExprNode::Integer>(en.val).i;
+    break;
+  case ExprNode::NUMBER:
+    out << std::get<ExprNode::Number>(en.val).f;
+    break;
+  case ExprNode::DEFINED:
+    out << "defined (" << std::get<ExprNode::Defined>(en.val).str << ")";
+    break;
+  case ExprNode::CHARLIT:
+    out << std::get<ExprNode::CharLit>(en.val).str;
+    break;
+  case ExprNode::BINARY: {
+    auto &bin = std::get<ExprNode::Binary>(en.val);
+    switch (bin.t) {
+    case ExprNode::Binary::PLUS:
+      out << '+';
+      break;
+    case ExprNode::Binary::MINUS:
+      out << '-';
+      break;
+    case ExprNode::Binary::TIMES:
+      out << '*';
+      break;
+    case ExprNode::Binary::DIVIDE:
+      out << '/';
+      break;
+    case ExprNode::Binary::GREATER:
+      out << '>';
+      break;
+    case ExprNode::Binary::GREATER_EQ:
+      out << '>' << '=';
+      break;
+    case ExprNode::Binary::LESS:
+      out << '<';
+      break;
+    case ExprNode::Binary::LESS_EQ:
+      out << '<' << '=';
+      break;
+    case ExprNode::Binary::NEQ:
+      out << '!' << '=';
+      break;
+    case ExprNode::Binary::EQ:
+      out << '=' << '=';
+      break;
+    }
+    out << *bin.lhs << ' ' << *bin.rhs;
+  } break;
+  case ExprNode::UNARY: {
+    auto &un = std::get<ExprNode::Unary>(en.val);
+    switch (un.t) {
+    case ExprNode::Unary::BANG:
+      out << '!';
+      break;
+    case ExprNode::Unary::MINUS:
+      out << '-';
+      break;
+    }
+    out << *un.un;
+  } break;
+  case ExprNode::NONE:
+    break;
+  }
+  return out;
+}
+
 Ast::Ast() { nodes.reserve(20); }
 
-auto AstPrinter::visit_if(IfNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __FUNCTION__));
+auto AstPrinter::visit_if(IfNode &i) -> void {
+  out << get_indents() << "(if (" << i.condition << ")\n";
+  ++depth;
+  for (auto &&thens : i.then_branch) {
+    thens->accept(*this);
+  }
+  for (auto &&elifs : i.elif_branches) {
+    elifs->accept(*this);
+  }
+  if (i.else_branch != nullptr) {
+    i.else_branch->accept(*this);
+  }
+  --depth;
+  out << get_indents() << ")\n";
 }
 
 auto AstPrinter::visit_ifdef(IfDefNode &i) -> void {
