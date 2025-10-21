@@ -2,10 +2,13 @@
 #include "common.hpp"
 #include "luamake_strings.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <cstring>
 #include <format>
+#include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
@@ -128,6 +131,8 @@ struct AstNode;
 struct ElifNode;
 struct ElseNode;
 
+struct ExprNode;
+
 enum class ir_t : u8 {
   // preprocessor stuff
   IF,
@@ -205,7 +210,8 @@ struct Lexer final {
 
   Lexer() = default;
 
-  auto matching(size_t, std::initializer_list<ir_t> &&) -> bool;
+  constexpr auto matching(size_t, std::initializer_list<ir_t> &&) noexcept
+      -> bool;
   auto parse_define_args(string_view const, size_t) -> size_t;
   auto expr(string_view const, size_t) -> size_t;
 
@@ -220,6 +226,15 @@ struct Lexer final {
 
   auto handle_elif(size_t &, size_t &) -> ptr<ElifNode>;
   auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
+
+  auto parse_expr(size_t &, size_t &) -> ExprNode;
+
+  auto equality(size_t &, size_t &) -> ExprNode;
+  auto comparison(size_t &, size_t &) -> ExprNode;
+  auto term(size_t &, size_t &) -> ExprNode;
+  auto factor(size_t &, size_t &) -> ExprNode;
+  auto unary(size_t &, size_t &) -> ExprNode;
+  auto primary(size_t &, size_t &) -> ExprNode;
 
   /**
    * @throws
@@ -262,7 +277,18 @@ struct ExprNode {
     StringViews str;
   };
   struct Binary final {
-    enum Binary_t { PLUS, MINUS, GREATER, GREATER_EQ, LESS, LESS_EQ };
+    enum Binary_t {
+      PLUS,
+      MINUS,
+      TIMES,
+      DIVIDE,
+      GREATER,
+      GREATER_EQ,
+      LESS,
+      LESS_EQ,
+      NEQ,
+      EQ,
+    };
     std::unique_ptr<ExprNode> lhs;
     std::unique_ptr<ExprNode> rhs;
     Binary_t t;
@@ -277,15 +303,21 @@ struct ExprNode {
     NUMBER,
     DEFINED,
     CHARLIT,
+    BINARY,
+    UNARY,
     NONE,
   } t;
   using Value =
       std::variant<Integer, Number, Defined, CharLit, Binary, Unary, void *>;
   Value val;
   ExprNode() noexcept : t(NONE), val((void *)nullptr) {}
-  ExprNode(Expr_t &&t, Value &&val) noexcept : t(t), val(std::move(val)) {}
+  ExprNode(Expr_t &&type, Value &&val) noexcept
+      : t(type), val(std::move(val)) {}
   ExprNode(ExprNode &&) = default;
   ExprNode &operator=(ExprNode &&) = default;
+
+  static auto make_binary(ir_t, ExprNode &&, ExprNode &&) noexcept -> ExprNode;
+  static auto make_unary(ir_t, ExprNode &&) noexcept -> ExprNode;
 
   ExprNode(ExprNode const &) = delete;
   ExprNode &operator=(ExprNode const &) = delete;
@@ -309,13 +341,18 @@ struct AstNode {
 struct ElifNode;
 struct ElseNode;
 
-// TODO: fix all of these to mark them as final
 struct IfNode final : AstNode {
+  IfNode(ExprNode &&condition, vector<ptr<AstNode>> &&then_branch,
+         vector<ptr<ElifNode>> &&elif_branches,
+         ptr<ElseNode> &&else_branch) noexcept
+      : condition(std::move(condition)), then_branch(std::move(then_branch)),
+        elif_branches(std::move(elif_branches)),
+        else_branch(std::move(else_branch)) {}
   ~IfNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  string condition;
-  vector<ptr<AstNode>> if_stmts;
+  ExprNode condition;
+  vector<ptr<AstNode>> then_branch;
   vector<ptr<ElifNode>> elif_branches;
   ptr<ElseNode> else_branch;
 };
@@ -608,6 +645,10 @@ auto constexpr ExprNode::readable_type(Expr_t t) noexcept -> std::string_view {
     return std::string_view{"DEFINED"};
   case CHARLIT:
     return std::string_view{"CHARLIT"};
+  case BINARY:
+    return std::string_view{"BINARY"};
+  case UNARY:
+    return std::string_view{"UNARY"};
   case NONE:
     return std::string_view{"NONE"};
   }
@@ -803,6 +844,19 @@ auto Lexer::ast() -> Ast {
   }
   return ast;
 }
+
+constexpr auto Lexer::matching(size_t cur_t,
+                               std::initializer_list<ir_t> &&tkns) noexcept
+    -> bool {
+  // idk why std::bind_front works but not just std::bind?
+  return std::ranges::any_of(
+      tkns, std::bind_front(std::equal_to<ir_t>(), types[cur_t]));
+}
+
+static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
+                                  std::bind_front(std::equal_to<ir_t>(),
+                                                  ir_t::ELSE)),
+              "");
 
 auto Lexer::expr(string_view const buf, size_t i) -> size_t {
   auto constexpr defined_str = string_view{"defined"};
@@ -1192,8 +1246,122 @@ auto Lexer::declaration(size_t &cur_t, size_t &cur_lex)
   }
 }
 
-auto Lexer::handle_if(size_t &, size_t &) -> std::unique_ptr<AstNode> {
-  throw std::runtime_error("Lexer::handle_if not impl");
+auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  ++cur_t;
+
+  auto expr = parse_expr(cur_t, cur_lex);
+  auto then_branch = vector<ptr<AstNode>>();
+  auto elif_branches = vector<ptr<ElifNode>>();
+  auto else_branch = ptr<ElseNode>(nullptr);
+  enum class FoundEnd {
+    none,
+    elif,
+    _else,
+    endif,
+  } cur = FoundEnd::none;
+  while (cur == FoundEnd::none && cur_t < types.size()) {
+    switch (types[cur_t]) {
+    case ir_t::IF:
+      then_branch.push_back(handle_if(cur_t, cur_lex));
+      break;
+    case ir_t::IFDEF:
+      then_branch.push_back(handle_ifdef(cur_t, cur_lex));
+      break;
+    case ir_t::IFNDEF:
+      then_branch.push_back(handle_ifndef(cur_t, cur_lex));
+      break;
+    case ir_t::DEFINE:
+      then_branch.push_back(handle_define(cur_t, cur_lex));
+      break;
+    case ir_t::UNDEF:
+      then_branch.push_back(handle_undef(cur_t, cur_lex));
+      break;
+    case ir_t::INCLUDE:
+      then_branch.push_back(handle_include(cur_t, cur_lex));
+      break;
+    case ir_t::PRAGMA:
+      then_branch.push_back(handle_pragma(cur_t, cur_lex));
+      break;
+    case ir_t::ELIF:
+      cur = FoundEnd::elif;
+      break;
+    case ir_t::ELSE:
+      cur = FoundEnd::_else;
+      break;
+    case ir_t::ENDIF:
+      cur = FoundEnd::endif;
+      break;
+    default:
+      throw Exception(
+          std::format("Unexpected token [{}] found in top level scope.",
+                      to_string(types[cur_t])));
+    }
+  }
+
+  if (cur == FoundEnd::none) {
+    throw Exception(std::format("Unterminated #ifdef directive found"));
+  }
+
+  while (cur != FoundEnd::none) {
+    switch (cur) {
+    case FoundEnd::elif:
+      if (else_branch != nullptr) {
+        throw Exception(std::format("Found #elif directive following #else "
+                                    "directive in #ifdef directive"));
+      }
+      while (cur_t < types.size() &&
+             (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
+        elif_branches.push_back(handle_elif(cur_t, cur_lex));
+      }
+      cur = [this](auto const cur_t) {
+        switch (types[cur_t]) {
+        case ir_t::ELSE:
+          return FoundEnd::_else;
+        case ir_t::ENDIF:
+          return FoundEnd::endif;
+        case ir_t::ELIF:
+          return FoundEnd::elif;
+        default:
+          throw Exception(std::format(
+              "Unexpected token [{}], found after parsing #else directive",
+              to_string(types[cur_t])));
+        }
+      }(cur_t);
+      break;
+    case FoundEnd::_else:
+      if (else_branch != nullptr) {
+        throw Exception("Found multiple #else directives attached to a single "
+                        "#ifdef directive");
+      }
+      else_branch = handle_else(cur_t, cur_lex);
+      cur = [this](auto const cur_t) {
+        switch (types[cur_t]) {
+        case ir_t::ELSE:
+          return FoundEnd::_else;
+        case ir_t::ENDIF:
+          return FoundEnd::endif;
+        case ir_t::ELIF:
+          return FoundEnd::elif;
+        default:
+          throw Exception(std::format(
+              "Unexpected token [{}], found after parsing #else directive",
+              to_string(types[cur_t])));
+        }
+      }(cur_t);
+      break;
+    case FoundEnd::endif:
+      ++cur_t;
+      cur = FoundEnd::none;
+      break;
+    case FoundEnd::none:
+      unreachable();
+    }
+  }
+
+  return std::make_unique<IfNode>(std::move(expr), std::move(then_branch),
+                                  std::move(elif_branches),
+                                  std::move(else_branch));
 }
 auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
@@ -1499,6 +1667,96 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
   return std::make_unique<ElseNode>(std::move(res));
 }
 
+auto Lexer::parse_expr(size_t &cur_t, size_t &cur_lex) -> ExprNode {
+  return equality(cur_t, cur_lex);
+}
+
+auto Lexer::equality(size_t &cur_t, size_t &cur_lex) -> ExprNode {
+  auto lhs = comparison(cur_t, cur_lex);
+  while (matching(cur_t, {ir_t::BANG_EQ, ir_t::EQ_EQ})) {
+    auto const tkn = types[cur_t++];
+    auto rhs = comparison(cur_t, cur_lex);
+
+    lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+
+  return lhs;
+}
+
+auto Lexer::comparison(size_t &cur_t, size_t &cur_lex) -> ExprNode {
+  auto lhs = term(cur_t, cur_lex);
+  while (matching(
+      cur_t, {ir_t::LESS, ir_t::LESS_EQ, ir_t::GREATER, ir_t::GREATER_EQ})) {
+    auto const tkn = types[cur_t++];
+    auto rhs = term(cur_t, cur_lex);
+
+    lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+
+  return lhs;
+}
+
+auto Lexer::term(size_t &cur_t, size_t &cur_lex) -> ExprNode {
+  auto lhs = factor(cur_t, cur_lex);
+  while (matching(cur_t, {ir_t::PLUS, ir_t::MINUS})) {
+    auto const tkn = types[cur_t++];
+    auto rhs = factor(cur_t, cur_lex);
+
+    lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+
+  return lhs;
+}
+
+auto Lexer::factor(size_t &cur_t, size_t &cur_lex) -> ExprNode {
+  auto lhs = unary(cur_t, cur_lex);
+  while (matching(cur_t, {ir_t::STAR, ir_t::SLASH})) {
+    auto const tkn = types[cur_t++];
+    auto rhs = unary(cur_t, cur_lex);
+
+    lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+
+  return lhs;
+}
+
+auto Lexer::unary(size_t &cur_t, size_t &cur_lex) -> ExprNode {
+  if (matching(cur_t, {ir_t::BANG, ir_t::MINUS})) {
+    auto const tkn = types[cur_t++];
+    auto un = unary(cur_t, cur_lex);
+    return ExprNode::make_unary(tkn, std::move(un));
+  }
+  return primary(cur_t, cur_lex);
+}
+
+auto Lexer::primary(size_t &cur_t, size_t &cur_lex) -> ExprNode {
+  switch (types[cur_t]) {
+  case ir_t::MACRO:
+    break;
+  case ir_t::LIT_CHAR:
+    break;
+  case ir_t::LIT_STRING:
+    break;
+  case ir_t::LIT_INT:
+    break;
+  case ir_t::LIT_HEX:
+    break;
+  case ir_t::LIT_OCTAL:
+    break;
+  case ir_t::LIT_BINARY:
+    break;
+  case ir_t::LIT_FLOAT:
+    break;
+  case ir_t::LEXEME:
+    break;
+  default:
+    throw Exception(
+        std::format("Unexpected token [{}] found while parsing an expression",
+                    to_string(types[cur_t])));
+  }
+  throw Exception(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
 auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
   if (types[cur_t] != tkn) {
     throw Exception(std::format("Unexpected token, expected {}, found {}",
@@ -1521,6 +1779,54 @@ auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
   return out;
 }
 #endif
+
+auto ExprNode::make_binary(ir_t tkn, ExprNode &&lhs, ExprNode &&rhs) noexcept
+    -> ExprNode {
+  auto bin_t = [](ir_t tkn) {
+    switch (tkn) {
+    case ir_t::PLUS:
+      return Binary::PLUS;
+    case ir_t::MINUS:
+      return Binary::MINUS;
+    case ir_t::SLASH:
+      return Binary::DIVIDE;
+    case ir_t::STAR:
+      return Binary::TIMES;
+    case ir_t::GREATER:
+      return Binary::GREATER;
+    case ir_t::GREATER_EQ:
+      return Binary::GREATER_EQ;
+    case ir_t::LESS:
+      return Binary::LESS;
+    case ir_t::LESS_EQ:
+      return Binary::LESS_EQ;
+    case ir_t::BANG_EQ:
+      return Binary::NEQ;
+    case ir_t::EQ_EQ:
+      return Binary::EQ;
+    default:
+      unreachable();
+    }
+  }(tkn);
+  auto bin = Binary{std::make_unique<ExprNode>(std::move(lhs)),
+                    std::make_unique<ExprNode>(std::move(rhs)), bin_t};
+  return ExprNode(ExprNode::BINARY, std::move(bin));
+}
+
+auto ExprNode::make_unary(ir_t tkn, ExprNode &&un) noexcept -> ExprNode {
+  auto un_t = [](ir_t tkn) {
+    switch (tkn) {
+    case ir_t::MINUS:
+      return Unary::MINUS;
+    case ir_t::BANG:
+      return Unary::BANG;
+    default:
+      unreachable();
+    }
+  }(tkn);
+  auto _un = Unary{std::make_unique<ExprNode>(std::move(un)), un_t};
+  return ExprNode(ExprNode::UNARY, std::move(_un));
+}
 
 auto ExprNode::eval() const -> int {
   throw std::runtime_error("Expr_Node::eval not impl");
