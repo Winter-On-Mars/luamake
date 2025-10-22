@@ -227,6 +227,9 @@ struct Lexer final {
   auto handle_elif(size_t &, size_t &) -> ptr<ElifNode>;
   auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
 
+  // TODO: fix these so that they return a string, we only do the actual parsing
+  // of expressions when we're evaluating them after fully expanding all
+  // possible macros
   auto parse_expr(size_t &, size_t &) -> ExprNode;
 
   auto equality(size_t &, size_t &) -> ExprNode;
@@ -325,10 +328,11 @@ struct ExprNode {
 
   static auto constexpr readable_type(Expr_t) noexcept -> std::string_view;
   /**
-   * @throws Interpret_Exc
+   * @throws Exception
    * (if a float is found)
    */
-  auto eval() const -> int;
+  auto eval(std::unordered_map<std::string, Macro> const &macros,
+            std::unordered_set<std::string> const &def_macros) const -> int;
 
   friend auto operator<<(std::ostream &, ExprNode const &) noexcept
       -> std::ostream &;
@@ -397,7 +401,7 @@ struct ElifNode final : AstNode {
   ~ElifNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  string condition;
+  ExprNode condition;
   vector<ptr<AstNode>> if_stmts;
 };
 
@@ -543,12 +547,40 @@ struct AstPrinter final : AstVisitor {
   auto visit_undef(UndefNode &) -> void final;
 };
 
-#if 0
 struct AstIncluder final : AstVisitor {
   vector<fs::path> &paths;
-  AstIncluder(vector<fs::path> &paths) noexcept : paths(paths) {}
+  std::unordered_map<std::string, Macro> &macros;
+  std::unordered_set<std::string> &def_macros;
+  AstIncluder(vector<fs::path> &paths,
+              std::unordered_map<std::string, Macro> &macros,
+              std::unordered_set<std::string> &def_macros) noexcept
+      : paths(paths), macros(macros), def_macros(def_macros) {}
+
+  auto get_includes(Ast &ast) -> void {
+    for (auto &&node : ast.nodes) {
+      node->accept(*this);
+    }
+  }
+
+  // TODO: extract this function out so we can use it in the ExprNode::eval
+  // function
+  auto is_defined(string const &str) const noexcept -> bool {
+    return macros.find(str) != macros.end()           ? true
+           : def_macros.find(str) != def_macros.end() ? true
+                                                      : false;
+  }
+
+  auto visit_if(IfNode &) -> void final;
+  auto visit_ifdef(IfDefNode &) -> void final;
+  auto visit_ifndef(IfNDefNode &) -> void final;
+  auto visit_elif(ElifNode &) -> void final;
+  auto visit_else(ElseNode &) -> void final;
+  auto visit_global_include(GlobalIncludeNode &) -> void final;
+  auto visit_local_include(LocalIncludeNode &) -> void final;
+  auto visit_define(DefineNode &) -> void final;
+  auto visit_define_func(DefineFuncNode &) -> void final;
+  auto visit_undef(UndefNode &) -> void final;
 };
-#endif
 
 auto constexpr to_string(ir_t t) -> std::string_view {
   switch (t) {
@@ -1858,8 +1890,71 @@ auto ExprNode::make_defined(string &&str) noexcept -> ExprNode {
   return ExprNode(ExprNode::DEFINED, Defined{std::move(str)});
 }
 
-auto ExprNode::eval() const -> int {
-  throw std::runtime_error("Expr_Node::eval not impl");
+auto ExprNode::eval(std::unordered_map<std::string, Macro> const &macros,
+                    std::unordered_set<std::string> const &def_macros) const
+    -> int {
+  switch (t) {
+  case ExprNode::INT: {
+    return static_cast<int>(std::get<ExprNode::Integer>(val).i);
+  } break;
+  case ExprNode::NUMBER: {
+    throw Exception(
+        std::format("Found float while evaluating a #if expression. Floats are "
+                    "not allowed, must be a c integer expression."));
+  } break;
+  case ExprNode::DEFINED: {
+    auto &macro = std::get<ExprNode::Defined>(val);
+    return macros.find(macro.str) != macros.end()           ? 1
+           : def_macros.find(macro.str) != def_macros.end() ? 1
+                                                            : 0;
+
+  } break;
+  case ExprNode::CHARLIT: {
+    throw Exception(std::format(
+        "Found string while evaluating a #if expression. Floats are "
+        "not allowed, must be a c integer expression."));
+  } break;
+  case ExprNode::BINARY: {
+    auto &bin = std::get<ExprNode::Binary>(val);
+    auto const lhs = bin.lhs->eval(macros, def_macros);
+    auto const rhs = bin.lhs->eval(macros, def_macros);
+    switch (bin.t) {
+    case Binary::PLUS:
+      return lhs + rhs;
+    case Binary::MINUS:
+      return lhs - rhs;
+    case Binary::TIMES:
+      return lhs * rhs;
+    case Binary::DIVIDE:
+      return lhs / rhs;
+    case Binary::GREATER:
+      return lhs > rhs ? 1 : 0;
+    case Binary::GREATER_EQ:
+      return lhs >= rhs ? 1 : 0;
+    case Binary::LESS:
+      return lhs < rhs ? 1 : 0;
+    case Binary::LESS_EQ:
+      return lhs <= rhs ? 1 : 0;
+    case Binary::NEQ:
+      return lhs != rhs ? 1 : 0;
+    case Binary::EQ:
+      return lhs == rhs ? 1 : 0;
+    }
+  } break;
+  case ExprNode::UNARY: {
+    auto &un = std::get<ExprNode::Unary>(val);
+    auto const v = un.un->eval(macros, def_macros);
+    switch (un.t) {
+    case Unary::BANG:
+      return !v;
+    case Unary::MINUS:
+      return -v;
+    }
+  } break;
+  case ExprNode::NONE: {
+    unreachable();
+  } break;
+  }
 }
 
 auto operator<<(std::ostream &out, ExprNode const &en) noexcept
@@ -2015,6 +2110,90 @@ auto AstPrinter::visit_undef(UndefNode &) -> void {
   throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
 }
 
+auto AstIncluder::visit_if(IfNode &i) -> void {
+  if (i.condition.eval(macros, def_macros) != 0) {
+    for (auto &&thens : i.then_branch) {
+      thens->accept(*this);
+    }
+    return;
+  }
+  for (auto &&elif : i.elif_branches) {
+    if (elif->condition.eval(macros, def_macros) != 0) {
+      elif->accept(*this);
+      return;
+    }
+  }
+  if (i.else_branch != nullptr) {
+    i.else_branch->accept(*this);
+  }
+}
+
+auto AstIncluder::visit_ifdef(IfDefNode &i) -> void {
+  if (is_defined(i.macro)) {
+    for (auto &&thens : i.then_branch) {
+      thens->accept(*this);
+    }
+    return;
+  }
+  for (auto &&elif : i.elif_branches) {
+    if (elif->condition.eval(macros, def_macros) != 0) {
+      elif->accept(*this);
+      return;
+    }
+  }
+  if (i.else_branch != nullptr) {
+    i.else_branch->accept(*this);
+  }
+}
+
+auto AstIncluder::visit_ifndef(IfNDefNode &i) -> void {
+  if (!is_defined(i.macro)) {
+    for (auto &&thens : i.then_branch) {
+      thens->accept(*this);
+    }
+    return;
+  }
+  for (auto &&elif : i.elif_branches) {
+    if (elif->condition.eval(macros, def_macros) != 0) {
+      elif->accept(*this);
+      return;
+    }
+  }
+  if (i.else_branch != nullptr) {
+    i.else_branch->accept(*this);
+  }
+}
+
+auto AstIncluder::visit_elif(ElifNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
+auto AstIncluder::visit_else(ElseNode &e) -> void {
+  for (auto &&elses : e.stmts) {
+    elses->accept(*this);
+  }
+}
+
+auto AstIncluder::visit_global_include(GlobalIncludeNode &global) -> void {
+  // TODO: check that global include is in the global include path
+}
+
+auto AstIncluder::visit_local_include(LocalIncludeNode &local) -> void {
+  paths.push_back(local.path);
+}
+
+auto AstIncluder::visit_define(DefineNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
+auto AstIncluder::visit_define_func(DefineFuncNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
+auto AstIncluder::visit_undef(UndefNode &) -> void {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
 auto Exception::what() const noexcept -> string {
   return std::format("[{}]", message);
 }
@@ -2026,10 +2205,8 @@ auto Interpreter::interpret(FixedString const &file) -> vector<fs::path> {
   auto ast_p = AstPrinter(std::cout);
   ast_p.print(ast);
 #endif // DEBUG
-#if 0
-  auto includer = AstIncluder(vec);
-  ast.accept(includer);
-#endif
+  auto includer = AstIncluder(vec, macros, def_macros);
+  includer.get_includes(ast);
   return vec;
 }
 } // namespace pp
