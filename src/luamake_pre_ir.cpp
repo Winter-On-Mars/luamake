@@ -100,6 +100,7 @@ auto constexpr skip_until(size_t i, std::span<T> const buf, T delim) -> size_t {
   return i;
 }
 
+#if 0
 auto constexpr is_any_of(string_view const delims, char const *const buffer,
                          size_t const i) -> bool {
   return delims.find(buffer[i]) != delims.npos;
@@ -124,6 +125,7 @@ auto constexpr delims_list = std::array<string_view, 7>{
 auto constexpr delims_at(delims &&del) -> string_view {
   return delims_list[static_cast<std::underlying_type_t<delims>>(del)];
 }
+#endif
 } // namespace
 
 struct Ast;
@@ -146,6 +148,8 @@ enum class ir_t : u8 {
   INCLUDE,
   UNDEF,
   PRAGMA,
+#if 0
+  TODO: add all of these to their own expr_t, and only use them when lexing and parsing expressions
   // operators
   // TODO: add other operators
   AND,
@@ -167,18 +171,21 @@ enum class ir_t : u8 {
   EQ,
   EQ_EQ,
   BANG,
-  LPAREN,
-  RPAREN,
-  QUOTE,
   // values
-  MACRO, // this is used when lexing, we leave the parsing to later
   LIT_CHAR,
-  LIT_STRING,
   LIT_INT,
   LIT_HEX,
   LIT_OCTAL,
   LIT_BINARY,
   LIT_FLOAT,
+#endif
+  LANGLE,
+  RANGLE,
+  QUOTE,
+  LPAREN,
+  RPAREN,
+  MACRO, // this is used when lexing, we leave the parsing to later
+  LIT_STRING,
   LEXEME,
 };
 
@@ -213,7 +220,9 @@ struct Lexer final {
   constexpr auto matching(size_t, std::initializer_list<ir_t> &&) noexcept
       -> bool;
   auto parse_define_args(string_view const, size_t) -> size_t;
+#if 0
   auto expr(string_view const, size_t) -> size_t;
+#endif
 
   auto declaration(size_t &, size_t &) -> std::unique_ptr<AstNode>;
   auto handle_if(size_t &, size_t &) -> std::unique_ptr<AstNode>;
@@ -227,6 +236,9 @@ struct Lexer final {
   auto handle_elif(size_t &, size_t &) -> ptr<ElifNode>;
   auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
 
+  auto produce_macro(string_view const, size_t) -> size_t;
+
+#if 0
   // TODO: fix these so that they return a string, we only do the actual parsing
   // of expressions when we're evaluating them after fully expanding all
   // possible macros
@@ -238,6 +250,7 @@ struct Lexer final {
   auto factor(size_t &, size_t &) -> ExprNode;
   auto unary(size_t &, size_t &) -> ExprNode;
   auto primary(size_t &, size_t &) -> ExprNode;
+#endif
 
   /**
    * @throws
@@ -331,8 +344,9 @@ struct ExprNode {
    * @throws Exception
    * (if a float is found)
    */
-  auto eval(std::unordered_map<std::string, Macro> const &macros,
-            std::unordered_set<std::string> const &def_macros) const -> int;
+  static auto eval(string_view const,
+                   std::unordered_map<std::string, Macro> const &macros,
+                   std::unordered_set<std::string> const &def_macros) -> int;
 
   friend auto operator<<(std::ostream &, ExprNode const &) noexcept
       -> std::ostream &;
@@ -350,7 +364,7 @@ struct ElifNode;
 struct ElseNode;
 
 struct IfNode final : AstNode {
-  IfNode(ExprNode &&condition, vector<ptr<AstNode>> &&then_branch,
+  IfNode(string &&condition, vector<ptr<AstNode>> &&then_branch,
          vector<ptr<ElifNode>> &&elif_branches,
          ptr<ElseNode> &&else_branch) noexcept
       : condition(std::move(condition)), then_branch(std::move(then_branch)),
@@ -359,7 +373,7 @@ struct IfNode final : AstNode {
   ~IfNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  ExprNode condition;
+  string condition;
   vector<ptr<AstNode>> then_branch;
   vector<ptr<ElifNode>> elif_branches;
   ptr<ElseNode> else_branch;
@@ -398,11 +412,13 @@ struct IfNDefNode final : AstNode {
 };
 
 struct ElifNode final : AstNode {
+  ElifNode(string &&condition, vector<ptr<AstNode>> &&then_branch) noexcept
+      : condition(std::move(condition)), then_branch(std::move(then_branch)) {}
   ~ElifNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  ExprNode condition;
-  vector<ptr<AstNode>> if_stmts;
+  string condition;
+  vector<ptr<AstNode>> then_branch;
 };
 
 struct ElseNode final : AstNode {
@@ -606,68 +622,22 @@ auto constexpr to_string(ir_t t) -> std::string_view {
     return std::string_view("PRAGMA");
   case ir_t::INCLUDE:
     return std::string_view("INCLUDE");
-  case ir_t::AND:
-    return std::string_view("AND");
-  case ir_t::OR:
-    return std::string_view("OR");
-  case ir_t::BIT_AND:
-    return std::string_view("BIT_AND");
-  case ir_t::BIT_OR:
-    return std::string_view("BIT_OR");
-  case ir_t::DEFINED:
-    return std::string_view("DEFINED");
-  case ir_t::LESS:
-    return std::string_view("LESS");
-  case ir_t::LESS_EQ:
-    return std::string_view("LESS_EQ");
-  case ir_t::GREATER:
-    return std::string_view("GREATER");
-  case ir_t::GREATER_EQ:
-    return std::string_view("GREATER_EQ");
-  case ir_t::STRINGIZING:
-    return std::string_view("STRINGIZING");
-  case ir_t::CONCAT:
-    return std::string_view("CONCAT");
-  case ir_t::PLUS:
-    return std::string_view("PLUS");
-  case ir_t::MINUS:
-    return std::string_view("MINUS");
-  case ir_t::STAR:
-    return std::string_view("STAR");
-  case ir_t::SLASH:
-    return std::string_view("SLASH");
-  case ir_t::BANG_EQ:
-    return std::string_view("BANG_EQ");
-  case ir_t::EQ:
-    return std::string_view("EQ");
-  case ir_t::EQ_EQ:
-    return std::string_view("EQ_EQ");
-  case ir_t::BANG:
-    return std::string_view("BANG");
+  case ir_t::LANGLE:
+    return std::string_view("LANGLE");
+  case ir_t::RANGLE:
+    return std::string_view("RANGLE");
+  case ir_t::QUOTE:
+    return std::string_view("QUOTE");
   case ir_t::LPAREN:
     return std::string_view("LPAREN");
   case ir_t::RPAREN:
     return std::string_view("RPAREN");
-  case ir_t::QUOTE:
-    return std::string_view("QUOTE");
   case ir_t::MACRO:
     return std::string_view("MACRO");
-  case ir_t::LIT_CHAR:
-    return std::string_view("LIT_CHAR");
-  case ir_t::LIT_STRING:
-    return std::string_view("LIT_STRING");
-  case ir_t::LIT_INT:
-    return std::string_view("LIT_INT");
-  case ir_t::LIT_HEX:
-    return std::string_view("LIT_HEX");
-  case ir_t::LIT_OCTAL:
-    return std::string_view("LIT_OCTAL");
-  case ir_t::LIT_BINARY:
-    return std::string_view("LIT_BINARY");
-  case ir_t::LIT_FLOAT:
-    return std::string_view("LIT_FLOAT");
   case ir_t::LEXEME:
     return std::string_view("LEXEME");
+  case ir_t::LIT_STRING:
+    return std::string_view("LIT_STRING");
   }
 }
 
@@ -710,7 +680,6 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
     {string_view{"#endif"}, ir_t::ENDIF},
     {string_view{"#define"}, ir_t::DEFINE},
     {string_view{"#include"}, ir_t::INCLUDE},
-    {string_view{"defined"}, ir_t::DEFINED},
     {string_view{"#undef"}, ir_t::UNDEF},
     {string_view{"#pragma"}, ir_t::PRAGMA}
   }};
@@ -750,7 +719,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
         lex.types.push_back(ir_t::INCLUDE);
         switch (fcontent[i]) {
         case '<': {
-          lex.types.push_back(ir_t::LESS);
+          lex.types.push_back(ir_t::LANGLE);
 
           end = skip_until<'>'>(fcontent, i + 1);
 
@@ -761,7 +730,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
           lex.types.push_back(ir_t::LIT_STRING);
           lex.lexemes.push_back(string(start + i + 1, start + end));
           i = end + 1;
-          lex.types.push_back(ir_t::GREATER);
+          lex.types.push_back(ir_t::RANGLE);
         } break;
         case '"': {
           lex.types.push_back(ir_t::QUOTE);
@@ -798,9 +767,9 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
         i = skip_ws(fcontent, i) + 1;
         end = skip_until(" (\t\n\r", fcontent, i + 1);
         lex.push_lexeme(string(start + i, start + end));
-        switch (fcontent[end]) {
+        i = end;
+        switch (fcontent[i]) {
         case '(': {
-          lex.types.push_back(ir_t::SPACE);
           lex.types.push_back(ir_t::LPAREN);
           i = lex.parse_define_args(fcontent, i);
           if (fcontent[i] != ')') {
@@ -811,8 +780,16 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
           throw Exception(std::format("Parsing function macro bodies is not "
                                       "currently implimented"));
         } break;
+          // this is a bandaid solution, we need to do something to determine if
+          // this is just defining a macro, or if we're actually defining a
+          // macro with some token stream as a value
+        case '\t':
+          [[fallthrough]];
+        case ' ': {
+          i = lex.produce_macro(fcontent, i + 1);
+        } break;
         default: {
-          i = lex.expr(fcontent, i);
+          i = lex.produce_macro(fcontent, i);
         } break;
         }
       } break;
@@ -825,7 +802,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
       case ir_t::IF:
         lex.types.push_back(ir_t::IF);
         i = skip_ws(fcontent, i) + 1;
-        i = lex.expr(fcontent, i);
+        i = lex.produce_macro(fcontent, i);
         break;
       default:
         lex.types.push_back(keyword->second);
@@ -894,6 +871,33 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
                                                   ir_t::ELSE)),
               "");
 
+auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
+  auto const start = i;
+  auto looping = true;
+  while (i < buf.size() && looping) {
+    auto const ch = buf[i];
+    switch (ch) {
+    case '\\':
+      ++i;
+      if (i < buf.size() && buf[i] == '\n')
+        ++i;
+      break;
+    case '\n':
+      looping = false;
+      break;
+    default:
+      ++i;
+      break;
+    }
+  }
+  push_macro(buf.data() + start, buf.data() + i);
+  // the only way to break out of the loop is to hit a '\n' char, but we don't
+  // want to include that in the string, we do want to skip over it though so we
+  // add 1 here
+  return i + 1;
+}
+
+#if 0
 auto Lexer::expr(string_view const buf, size_t i) -> size_t {
   auto constexpr defined_str = string_view{"defined"};
   auto looping = true;
@@ -1221,6 +1225,7 @@ auto Lexer::expr(string_view const buf, size_t i) -> size_t {
   }
   return i;
 }
+#endif
 
 auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
   auto end = i + 1;
@@ -1286,7 +1291,9 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
   ++cur_t;
 
-  auto expr = parse_expr(cur_t, cur_lex);
+  expect(cur_t, ir_t::MACRO);
+  ++cur_t;
+  auto expr = lexemes[cur_lex++];
   auto then_branch = vector<ptr<AstNode>>();
   auto elif_branches = vector<ptr<ElifNode>>();
   auto else_branch = ptr<ElseNode>(nullptr);
@@ -1296,6 +1303,20 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
     _else,
     endif,
   } cur = FoundEnd::none;
+  auto const determine_state = [this](auto const cur_t) {
+    switch (types[cur_t]) {
+    case ir_t::ELSE:
+      return FoundEnd::_else;
+    case ir_t::ENDIF:
+      return FoundEnd::endif;
+    case ir_t::ELIF:
+      return FoundEnd::elif;
+    default:
+      throw Exception(std::format(
+          "Unexpected token [{}], found after parsing #else directive",
+          to_string(types[cur_t])));
+    }
+  };
   while (cur == FoundEnd::none && cur_t < types.size()) {
     switch (types[cur_t]) {
     case ir_t::IF:
@@ -1350,20 +1371,7 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
              (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
         elif_branches.push_back(handle_elif(cur_t, cur_lex));
       }
-      cur = [this](auto const cur_t) {
-        switch (types[cur_t]) {
-        case ir_t::ELSE:
-          return FoundEnd::_else;
-        case ir_t::ENDIF:
-          return FoundEnd::endif;
-        case ir_t::ELIF:
-          return FoundEnd::elif;
-        default:
-          throw Exception(std::format(
-              "Unexpected token [{}], found after parsing #else directive",
-              to_string(types[cur_t])));
-        }
-      }(cur_t);
+      cur = determine_state(cur_t);
       break;
     case FoundEnd::_else:
       if (else_branch != nullptr) {
@@ -1371,20 +1379,7 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
                         "#ifdef directive");
       }
       else_branch = handle_else(cur_t, cur_lex);
-      cur = [this](auto const cur_t) {
-        switch (types[cur_t]) {
-        case ir_t::ELSE:
-          return FoundEnd::_else;
-        case ir_t::ENDIF:
-          return FoundEnd::endif;
-        case ir_t::ELIF:
-          return FoundEnd::elif;
-        default:
-          throw Exception(std::format(
-              "Unexpected token [{}], found after parsing #else directive",
-              to_string(types[cur_t])));
-        }
-      }(cur_t);
+      cur = determine_state(cur_t);
       break;
     case FoundEnd::endif:
       ++cur_t;
@@ -1416,6 +1411,20 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
     _else,
     endif,
   } cur = FoundEnd::none;
+  auto const determine_state = [this](auto const cur_t) {
+    switch (types[cur_t]) {
+    case ir_t::ELSE:
+      return FoundEnd::_else;
+    case ir_t::ENDIF:
+      return FoundEnd::endif;
+    case ir_t::ELIF:
+      return FoundEnd::elif;
+    default:
+      throw Exception(std::format(
+          "Unexpected token [{}], found after parsing #else directive",
+          to_string(types[cur_t])));
+    }
+  };
   while (cur == FoundEnd::none && cur_t < types.size()) {
     switch (types[cur_t]) {
     case ir_t::IF:
@@ -1470,20 +1479,7 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
              (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
         elif_branches.push_back(handle_elif(cur_t, cur_lex));
       }
-      cur = [this](auto const cur_t) {
-        switch (types[cur_t]) {
-        case ir_t::ELSE:
-          return FoundEnd::_else;
-        case ir_t::ENDIF:
-          return FoundEnd::endif;
-        case ir_t::ELIF:
-          return FoundEnd::elif;
-        default:
-          throw Exception(std::format(
-              "Unexpected token [{}], found after parsing #else directive",
-              to_string(types[cur_t])));
-        }
-      }(cur_t);
+      cur = determine_state(cur_t);
       break;
     case FoundEnd::_else:
       if (else_branch != nullptr) {
@@ -1491,20 +1487,7 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
                         "#ifdef directive");
       }
       else_branch = handle_else(cur_t, cur_lex);
-      cur = [this](auto const cur_t) {
-        switch (types[cur_t]) {
-        case ir_t::ELSE:
-          return FoundEnd::_else;
-        case ir_t::ENDIF:
-          return FoundEnd::endif;
-        case ir_t::ELIF:
-          return FoundEnd::elif;
-        default:
-          throw Exception(std::format(
-              "Unexpected token [{}], found after parsing #else directive",
-              to_string(types[cur_t])));
-        }
-      }(cur_t);
+      cur = determine_state(cur_t);
       break;
     case FoundEnd::endif:
       ++cur_t;
@@ -1612,11 +1595,32 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
   return std::make_unique<IfNDefNode>(std::move(lex), std::move(then_branch),
                                       std::move(elif_branches),
                                       std::move(else_branch));
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
 }
 
-auto Lexer::handle_define(size_t &, size_t &) -> std::unique_ptr<AstNode> {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  ++cur_t;
+  expect(cur_t, ir_t::LEXEME);
+  auto lex = lexemes[cur_lex++];
+  ++cur_t;
+
+  switch (types[cur_t]) {
+  case ir_t::LPAREN: {
+    throw std::runtime_error(std::format(
+        "Making #define function nodes is not currently implimented"));
+  } break;
+  case ir_t::MACRO: {
+    auto macro = lexemes[cur_lex++];
+    ++cur_t;
+    return std::make_unique<DefineNode>(std::move(lex), std::move(macro));
+  } break;
+  default:
+    throw Exception(std::format("Unexpected token, found [{}], was expecting "
+                                "either a '(' character or a macro definition",
+                                to_string(types[cur_t])));
+  }
+
+  return std::make_unique<DefineNode>(std::move(lex));
 }
 
 auto Lexer::handle_undef(size_t &cur_t, size_t &cur_lex)
@@ -1633,7 +1637,7 @@ auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
   ++cur_t;
   switch (types[cur_t]) {
-  case ir_t::LESS: {
+  case ir_t::LANGLE: {
     cur_t += 3;
     return std::make_unique<GlobalIncludeNode>(lexemes[cur_lex++]);
   } break;
@@ -1703,24 +1707,28 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
   return std::make_unique<ElseNode>(std::move(res));
 }
 
+#if 0
 auto Lexer::parse_expr(size_t &cur_t, size_t &cur_lex) -> ExprNode {
   return equality(cur_t, cur_lex);
 }
 
 auto Lexer::equality(size_t &cur_t, size_t &cur_lex) -> ExprNode {
   auto lhs = comparison(cur_t, cur_lex);
+#if 0
   while (matching(cur_t, {ir_t::BANG_EQ, ir_t::EQ_EQ})) {
     auto const tkn = types[cur_t++];
     auto rhs = comparison(cur_t, cur_lex);
 
     lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
   }
+#endif
 
   return lhs;
 }
 
 auto Lexer::comparison(size_t &cur_t, size_t &cur_lex) -> ExprNode {
   auto lhs = term(cur_t, cur_lex);
+#if 0
   while (matching(
       cur_t, {ir_t::LESS, ir_t::LESS_EQ, ir_t::GREATER, ir_t::GREATER_EQ})) {
     auto const tkn = types[cur_t++];
@@ -1728,6 +1736,7 @@ auto Lexer::comparison(size_t &cur_t, size_t &cur_lex) -> ExprNode {
 
     lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
   }
+#endif
 
   return lhs;
 }
@@ -1813,6 +1822,7 @@ auto Lexer::primary(size_t &cur_t, size_t &cur_lex) -> ExprNode {
   }
   throw Exception(std::format("{} not impl", __PRETTY_FUNCTION__));
 }
+#endif
 
 // TODO: update this function to allow for optional string for extra info
 auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
@@ -1842,6 +1852,7 @@ auto ExprNode::make_binary(ir_t tkn, ExprNode &&lhs, ExprNode &&rhs) noexcept
     -> ExprNode {
   auto bin_t = [](ir_t tkn) {
     switch (tkn) {
+#if 0
     case ir_t::PLUS:
       return Binary::PLUS;
     case ir_t::MINUS:
@@ -1862,9 +1873,11 @@ auto ExprNode::make_binary(ir_t tkn, ExprNode &&lhs, ExprNode &&rhs) noexcept
       return Binary::NEQ;
     case ir_t::EQ_EQ:
       return Binary::EQ;
+#endif
     default:
       unreachable();
     }
+    return Binary::PLUS;
   }(tkn);
   auto bin = Binary{std::make_unique<ExprNode>(std::move(lhs)),
                     std::make_unique<ExprNode>(std::move(rhs)), bin_t};
@@ -1874,13 +1887,16 @@ auto ExprNode::make_binary(ir_t tkn, ExprNode &&lhs, ExprNode &&rhs) noexcept
 auto ExprNode::make_unary(ir_t tkn, ExprNode &&un) noexcept -> ExprNode {
   auto un_t = [](ir_t tkn) {
     switch (tkn) {
+#if 0
     case ir_t::MINUS:
       return Unary::MINUS;
     case ir_t::BANG:
       return Unary::BANG;
+#endif
     default:
       unreachable();
     }
+    return Unary::MINUS;
   }(tkn);
   auto _un = Unary{std::make_unique<ExprNode>(std::move(un)), un_t};
   return ExprNode(ExprNode::UNARY, std::move(_un));
@@ -1890,71 +1906,10 @@ auto ExprNode::make_defined(string &&str) noexcept -> ExprNode {
   return ExprNode(ExprNode::DEFINED, Defined{std::move(str)});
 }
 
-auto ExprNode::eval(std::unordered_map<std::string, Macro> const &macros,
-                    std::unordered_set<std::string> const &def_macros) const
-    -> int {
-  switch (t) {
-  case ExprNode::INT: {
-    return static_cast<int>(std::get<ExprNode::Integer>(val).i);
-  } break;
-  case ExprNode::NUMBER: {
-    throw Exception(
-        std::format("Found float while evaluating a #if expression. Floats are "
-                    "not allowed, must be a c integer expression."));
-  } break;
-  case ExprNode::DEFINED: {
-    auto &macro = std::get<ExprNode::Defined>(val);
-    return macros.find(macro.str) != macros.end()           ? 1
-           : def_macros.find(macro.str) != def_macros.end() ? 1
-                                                            : 0;
-
-  } break;
-  case ExprNode::CHARLIT: {
-    throw Exception(std::format(
-        "Found string while evaluating a #if expression. Floats are "
-        "not allowed, must be a c integer expression."));
-  } break;
-  case ExprNode::BINARY: {
-    auto &bin = std::get<ExprNode::Binary>(val);
-    auto const lhs = bin.lhs->eval(macros, def_macros);
-    auto const rhs = bin.lhs->eval(macros, def_macros);
-    switch (bin.t) {
-    case Binary::PLUS:
-      return lhs + rhs;
-    case Binary::MINUS:
-      return lhs - rhs;
-    case Binary::TIMES:
-      return lhs * rhs;
-    case Binary::DIVIDE:
-      return lhs / rhs;
-    case Binary::GREATER:
-      return lhs > rhs ? 1 : 0;
-    case Binary::GREATER_EQ:
-      return lhs >= rhs ? 1 : 0;
-    case Binary::LESS:
-      return lhs < rhs ? 1 : 0;
-    case Binary::LESS_EQ:
-      return lhs <= rhs ? 1 : 0;
-    case Binary::NEQ:
-      return lhs != rhs ? 1 : 0;
-    case Binary::EQ:
-      return lhs == rhs ? 1 : 0;
-    }
-  } break;
-  case ExprNode::UNARY: {
-    auto &un = std::get<ExprNode::Unary>(val);
-    auto const v = un.un->eval(macros, def_macros);
-    switch (un.t) {
-    case Unary::BANG:
-      return !v;
-    case Unary::MINUS:
-      return -v;
-    }
-  } break;
-  case ExprNode::NONE: {
-    unreachable();
-  } break;
-  }
+auto ExprNode::eval(string_view const expr,
+                    std::unordered_map<std::string, Macro> const &macros,
+                    std::unordered_set<std::string> const &def_macros) -> int {
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
 }
 
 auto operator<<(std::ostream &out, ExprNode const &en) noexcept
@@ -2076,8 +2031,14 @@ auto AstPrinter::visit_ifndef(IfNDefNode &i) -> void {
   out << get_indents() << ")\n";
 }
 
-auto AstPrinter::visit_elif(ElifNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto AstPrinter::visit_elif(ElifNode &e) -> void {
+  out << get_indents() << "(elif (" << e.condition << ")\n";
+  ++depth;
+  for (auto &&thens : e.then_branch) {
+    thens->accept(*this);
+  }
+  --depth;
+  out << get_indents() << ")\n";
 }
 
 auto AstPrinter::visit_else(ElseNode &e) -> void {
@@ -2098,27 +2059,34 @@ auto AstPrinter::visit_local_include(LocalIncludeNode &local) -> void {
   out << get_indents() << "(include local (" << local.path << "))\n";
 }
 
-auto AstPrinter::visit_define(DefineNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto AstPrinter::visit_define(DefineNode &d) -> void {
+  out << get_indents() << "(define (" << d.name;
+  if (d.lexeme) {
+    out << '{';
+    out << d.lexeme.value();
+    out << '}';
+  }
+  out << "))\n";
 }
 
 auto AstPrinter::visit_define_func(DefineFuncNode &) -> void {
   throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
 }
 
-auto AstPrinter::visit_undef(UndefNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto AstPrinter::visit_undef(UndefNode &u) -> void {
+  out << get_indents() << "(define (" << u.name;
+  out << "))\n";
 }
 
 auto AstIncluder::visit_if(IfNode &i) -> void {
-  if (i.condition.eval(macros, def_macros) != 0) {
+  if (ExprNode::eval(i.condition, macros, def_macros) != 0) {
     for (auto &&thens : i.then_branch) {
       thens->accept(*this);
     }
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (elif->condition.eval(macros, def_macros) != 0) {
+    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
       elif->accept(*this);
       return;
     }
@@ -2136,7 +2104,7 @@ auto AstIncluder::visit_ifdef(IfDefNode &i) -> void {
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (elif->condition.eval(macros, def_macros) != 0) {
+    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
       elif->accept(*this);
       return;
     }
@@ -2154,7 +2122,7 @@ auto AstIncluder::visit_ifndef(IfNDefNode &i) -> void {
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (elif->condition.eval(macros, def_macros) != 0) {
+    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
       elif->accept(*this);
       return;
     }
