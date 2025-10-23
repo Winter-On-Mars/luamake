@@ -1624,7 +1624,7 @@ auto Expressions::ExprLexer::equality(size_t &cur_t, size_t &cur_lex) const
     -> ExprNode {
   auto lhs = comparison(cur_t, cur_lex);
 
-  while (matching(tkns[cur_t], {BANG_EQ, EQ_EQ})) {
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {BANG_EQ, EQ_EQ})) {
     auto const tkn = tkns[cur_t++];
     auto rhs = comparison(cur_t, cur_lex);
 
@@ -1638,7 +1638,8 @@ auto Expressions::ExprLexer::comparison(size_t &cur_t, size_t &cur_lex) const
     -> ExprNode {
   auto lhs = term(cur_t, cur_lex);
 
-  while (matching(tkns[cur_t], {LESS, LESS_EQ, GREATER, GREATER_EQ})) {
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {LESS, LESS_EQ, GREATER, GREATER_EQ})) {
     auto const tkn = tkns[cur_t++];
     auto rhs = term(cur_t, cur_lex);
 
@@ -1651,7 +1652,8 @@ auto Expressions::ExprLexer::comparison(size_t &cur_t, size_t &cur_lex) const
 auto Expressions::ExprLexer::term(size_t &cur_t, size_t &cur_lex) const
     -> ExprNode {
   auto lhs = factor(cur_t, cur_lex);
-  while (matching(tkns[cur_t], {PLUS, MINUS})) {
+
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {PLUS, MINUS})) {
     auto const tkn = tkns[cur_t++];
     auto rhs = factor(cur_t, cur_lex);
 
@@ -1664,7 +1666,8 @@ auto Expressions::ExprLexer::term(size_t &cur_t, size_t &cur_lex) const
 auto Expressions::ExprLexer::factor(size_t &cur_t, size_t &cur_lex) const
     -> ExprNode {
   auto lhs = unary(cur_t, cur_lex);
-  while (matching(tkns[cur_t], {STAR, SLASH})) {
+
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {STAR, SLASH})) {
     auto const tkn = tkns[cur_t++];
     auto rhs = unary(cur_t, cur_lex);
 
@@ -1676,7 +1679,7 @@ auto Expressions::ExprLexer::factor(size_t &cur_t, size_t &cur_lex) const
 
 auto Expressions::ExprLexer::unary(size_t &cur_t, size_t &cur_lex) const
     -> ExprNode {
-  if (matching(tkns[cur_t], {BANG, MINUS})) {
+  if (cur_t < tkns.size() && matching(tkns[cur_t], {BANG, MINUS})) {
     auto const tkn = tkns[cur_t++];
     auto un = unary(cur_t, cur_lex);
     return make_unary(tkn, std::move(un));
