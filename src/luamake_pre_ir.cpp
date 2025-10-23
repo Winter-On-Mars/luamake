@@ -1029,6 +1029,8 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
 }
 
 auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
+  // TODO: there's an infinite loop here caused by reading the end ptr, but only
+  // updating the i ptr :)
   auto end = i + 1;
   auto looping = true;
   while (looping) {
