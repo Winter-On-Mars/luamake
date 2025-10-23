@@ -3,7 +3,6 @@
 #include "luamake_strings.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cstddef>
 #include <cstring>
 #include <format>
@@ -16,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unistd.h>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -100,32 +100,74 @@ auto constexpr skip_until(size_t i, std::span<T> const buf, T delim) -> size_t {
   return i;
 }
 
-#if 0
-auto constexpr is_any_of(string_view const delims, char const *const buffer,
-                         size_t const i) -> bool {
-  return delims.find(buffer[i]) != delims.npos;
+auto constexpr is_any_of(string_view const delims, char ch) -> bool {
+  return delims.find(ch) != delims.npos;
 }
 
 enum class delims : size_t {
   LEXEME,
   BINARY_FAIL,
+  ALLOWED_DECIMAL,
   ALLOWED_HEX,
-  ALPHA_SANS_HEX,
   ALLOWED_OCTAL,
-  DECIMAL_DIGITS,
+  ALLOWED_BINARY,
+  ALPHA_SANS_HEX,
   HEX_SANS_DIGITS,
 };
 
-auto constexpr delims_list = std::array<string_view, 7>{
-    {string_view{" \t\n\r(){}[]+-*/<>=#"}, string_view{"23456789abcdefABCDEF"},
-     string_view{"0123456789abcdefABCDEF"},
-     string_view{"ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ"},
-     string_view{"01234567"}, string_view{"0123456789"},
-     string_view{"abcdefABCDEF"}}};
+auto constexpr delims_list = std::array<string_view, 9>{{
+    string_view{" \t\n\r(){}[]+-*/<>=#"},                    // LEXEME
+    string_view{"23456789abcdefABCDEF"},                     // BINARY_FAIL
+    string_view{"0123456789"},                               // ALLOWED_DECIMAL
+    string_view{"0123456789abcdefABCDEF"},                   // ALLOWED_HEX
+    string_view{"01234567"},                                 // ALLOWED_OCTAL
+    string_view{"01"},                                       // ALLOWED_BINARY
+    string_view{"ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ"}, // ALPHA_SANS_HEX
+    string_view{"abcdefABCDEF"}                              // HEX_SANS_DIGITS
+}};
 auto constexpr delims_at(delims &&del) -> string_view {
   return delims_list[static_cast<std::underlying_type_t<delims>>(del)];
 }
-#endif
+
+auto constexpr is_digit(char ch) noexcept -> bool {
+  if (ch - '0' >= 0 && ch - '9' <= 0)
+    return true;
+  else
+    return false;
+}
+
+static_assert(is_digit('9'));
+static_assert(!is_digit('a'));
+static_assert(is_digit('4'));
+static_assert(is_digit('5'));
+static_assert(!is_digit('!'));
+
+auto constexpr is_alpha(char ch) noexcept -> bool {
+  if ((ch - 'a' >= 0 && ch - 'z' <= 0) || (ch - 'A' >= 0 && ch - 'Z' <= 0))
+    return true;
+  else
+    return false;
+}
+
+static_assert(!is_alpha('9'));
+static_assert(is_alpha('a'));
+static_assert(is_alpha('A'));
+static_assert(is_alpha('X'));
+static_assert(!is_alpha('4'));
+static_assert(!is_alpha('5'));
+static_assert(!is_alpha('!'));
+
+// TODO: extract this function out so we can use it in the ExprNode::eval
+// function
+auto is_defined(string const &str,
+                std::unordered_map<std::string, Macro> const &macros,
+                std::unordered_set<std::string> const &def_macros) noexcept
+    -> bool {
+  return macros.find(str) != macros.end()           ? true
+         : def_macros.find(str) != def_macros.end() ? true
+                                                    : false;
+}
+
 } // namespace
 
 struct Ast;
@@ -148,37 +190,6 @@ enum class ir_t : u8 {
   INCLUDE,
   UNDEF,
   PRAGMA,
-#if 0
-  TODO: add all of these to their own expr_t, and only use them when lexing and parsing expressions
-  // operators
-  // TODO: add other operators
-  AND,
-  OR,
-  BIT_AND,
-  BIT_OR,
-  DEFINED,
-  LESS,
-  LESS_EQ,
-  GREATER,
-  GREATER_EQ,
-  STRINGIZING,
-  CONCAT,
-  PLUS,
-  MINUS,
-  STAR,
-  SLASH,
-  BANG_EQ,
-  EQ,
-  EQ_EQ,
-  BANG,
-  // values
-  LIT_CHAR,
-  LIT_INT,
-  LIT_HEX,
-  LIT_OCTAL,
-  LIT_BINARY,
-  LIT_FLOAT,
-#endif
   LANGLE,
   RANGLE,
   QUOTE,
@@ -237,21 +248,6 @@ struct Lexer final {
   auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
 
   auto produce_macro(string_view const, size_t) -> size_t;
-
-#if 0
-  // TODO: fix these so that they return a string, we only do the actual parsing
-  // of expressions when we're evaluating them after fully expanding all
-  // possible macros
-  auto parse_expr(size_t &, size_t &) -> ExprNode;
-
-  auto equality(size_t &, size_t &) -> ExprNode;
-  auto comparison(size_t &, size_t &) -> ExprNode;
-  auto term(size_t &, size_t &) -> ExprNode;
-  auto factor(size_t &, size_t &) -> ExprNode;
-  auto unary(size_t &, size_t &) -> ExprNode;
-  auto primary(size_t &, size_t &) -> ExprNode;
-#endif
-
   /**
    * @throws
    */
@@ -279,7 +275,7 @@ struct Lexer final {
 // TODO: optimize this struct, you can probably combine the Expr_t variable with
 // the binary/unary operator in some bit field being or'd, but for now i'm just
 // trying to get this working
-struct ExprNode {
+struct ExprNode final {
   struct Integer final {
     size_t i;
   };
@@ -293,7 +289,7 @@ struct ExprNode {
     string str;
   };
   struct Binary final {
-    enum Binary_t {
+    enum class Binary_t {
       PLUS,
       MINUS,
       TIMES,
@@ -305,16 +301,18 @@ struct ExprNode {
       NEQ,
       EQ,
     };
+    using enum Binary_t;
     std::unique_ptr<ExprNode> lhs;
     std::unique_ptr<ExprNode> rhs;
     Binary_t t;
   };
   struct Unary final {
-    enum Unary_t { BANG, MINUS };
+    enum class Unary_t { BANG, MINUS };
+    using enum Unary_t;
     std::unique_ptr<ExprNode> un;
     Unary_t t;
   };
-  enum Expr_t {
+  enum class Expr_t {
     INT,
     NUMBER,
     DEFINED,
@@ -323,6 +321,7 @@ struct ExprNode {
     UNARY,
     NONE,
   } t;
+  using enum Expr_t;
   using Value =
       std::variant<Integer, Number, Defined, CharLit, Binary, Unary, void *>;
   Value val;
@@ -332,8 +331,6 @@ struct ExprNode {
   ExprNode(ExprNode &&) = default;
   ExprNode &operator=(ExprNode &&) = default;
 
-  static auto make_binary(ir_t, ExprNode &&, ExprNode &&) noexcept -> ExprNode;
-  static auto make_unary(ir_t, ExprNode &&) noexcept -> ExprNode;
   static auto make_defined(string &&) noexcept -> ExprNode;
 
   ExprNode(ExprNode const &) = delete;
@@ -490,6 +487,145 @@ struct Ast final {
   auto accept(AstVisitor &) const -> void;
 };
 
+struct Expressions final {
+  enum class expr_t {
+    LPAREN,
+    RPAREN,
+    // TODO: add other operators
+    AND,
+    OR,
+    BIT_AND,
+    BIT_OR,
+    DEFINED,
+    LESS,
+    LESS_EQ,
+    GREATER,
+    GREATER_EQ,
+    STRINGIZING,
+    CONCAT,
+    PLUS,
+    MINUS,
+    STAR,
+    SLASH,
+    BANG_EQ,
+    EQ,
+    EQ_EQ,
+    BANG,
+    // values
+    LIT_CHAR,
+    LIT_DEC,
+    LIT_HEX,
+    LIT_OCT,
+    LIT_BIN,
+    LIT_FLOAT,
+    MACRO,
+  };
+  using enum expr_t;
+
+  static auto constexpr to_string(expr_t t) noexcept -> string_view {
+    switch (t) {
+    case LPAREN:
+      return string_view{"LPAREN"};
+    case RPAREN:
+      return string_view{"RPAREN"};
+    case AND:
+      return string_view{"AND"};
+    case OR:
+      return string_view{"OR"};
+    case BIT_AND:
+      return string_view{"BIT_AND"};
+    case BIT_OR:
+      return string_view{"BIT_OR"};
+    case DEFINED:
+      return string_view{"DEFINED"};
+    case LESS:
+      return string_view{"LESS"};
+    case LESS_EQ:
+      return string_view{"LESS_EQ"};
+    case GREATER:
+      return string_view{"GREATER"};
+    case GREATER_EQ:
+      return string_view{"GREATER_EQ"};
+    case STRINGIZING:
+      return string_view{"STRINGIZING"};
+    case CONCAT:
+      return string_view{"CONCAT"};
+    case PLUS:
+      return string_view{"PLUS"};
+    case MINUS:
+      return string_view{"MINUS"};
+    case STAR:
+      return string_view{"STAR"};
+    case SLASH:
+      return string_view{"SLASH"};
+    case BANG_EQ:
+      return string_view{"BANG_EQ"};
+    case EQ:
+      return string_view{"EQ"};
+    case EQ_EQ:
+      return string_view{"EQ_EQ"};
+    case BANG:
+      return string_view{"BANG"};
+    case LIT_CHAR:
+      return string_view{"LIT_CHAR"};
+    case LIT_DEC:
+      return string_view{"LIT_DEC"};
+    case LIT_HEX:
+      return string_view{"LIT_HEX"};
+    case LIT_OCT:
+      return string_view{"LIT_OCT"};
+    case LIT_BIN:
+      return string_view{"LIT_BIN"};
+    case LIT_FLOAT:
+      return string_view{"LIT_FLOAT"};
+    case MACRO:
+      return string_view{"MACRO"};
+    }
+  }
+
+  struct ExprLexer final {
+    vector<expr_t> tkns;
+    vector<string> macros;
+    auto to_ast() const -> ExprNode;
+
+    auto constexpr matching(expr_t tkn, std::initializer_list<expr_t> &&matches)
+        const noexcept -> bool {
+      for (auto &&t : matches) {
+        if (tkn == t) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    auto equality(size_t &, size_t &) const -> ExprNode;
+    auto comparison(size_t &, size_t &) const -> ExprNode;
+    auto term(size_t &, size_t &) const -> ExprNode;
+    auto factor(size_t &, size_t &) const -> ExprNode;
+    auto unary(size_t &, size_t &) const -> ExprNode;
+    auto primary(size_t &, size_t &) const -> ExprNode;
+
+    auto expect(size_t cur_t, expr_t &&tkn) const -> void {
+      if (tkns[cur_t] != tkn) {
+        throw Exception(std::format("Unexpected token, expected {}, found {}",
+                                    to_string(tkn), to_string(tkns[cur_t])));
+      }
+    }
+#ifdef DEBUG
+    auto display(std::ostream &) const noexcept -> std::ostream &;
+#endif // DEBUG
+  };
+
+  static auto lex(string_view const) -> ExprLexer;
+  static auto eval_impl(ExprNode const &,
+                        std::unordered_map<std::string, Macro> const &,
+                        std::unordered_set<std::string> const &) -> int;
+
+  static auto make_binary(expr_t, ExprNode &&, ExprNode &&) noexcept
+      -> ExprNode;
+  static auto make_unary(expr_t, ExprNode &&) noexcept -> ExprNode;
+};
+
 // no need for a virtual dtor bc you shouldn't be dynamically allocating this
 // ABC
 struct AstVisitor {
@@ -543,9 +679,11 @@ struct AstPrinter final : AstVisitor {
   AstPrinter(std::ostream &out) noexcept : out(out), depth(0) {}
 
   auto print(Ast &ast) -> void {
+    out << "AstPrinter:\n";
     for (auto &&node : ast.nodes) {
       node->accept(*this);
     }
+    out << "---\n";
     out.flush();
   }
 
@@ -576,14 +714,6 @@ struct AstIncluder final : AstVisitor {
     for (auto &&node : ast.nodes) {
       node->accept(*this);
     }
-  }
-
-  // TODO: extract this function out so we can use it in the ExprNode::eval
-  // function
-  auto is_defined(string const &str) const noexcept -> bool {
-    return macros.find(str) != macros.end()           ? true
-           : def_macros.find(str) != def_macros.end() ? true
-                                                      : false;
   }
 
   auto visit_if(IfNode &) -> void final;
@@ -871,6 +1001,7 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
                                                   ir_t::ELSE)),
               "");
 
+// TODO: remove any '\\' and '\n' chars from the string
 auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
   auto const start = i;
   auto looping = true;
@@ -896,336 +1027,6 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
   // add 1 here
   return i + 1;
 }
-
-#if 0
-auto Lexer::expr(string_view const buf, size_t i) -> size_t {
-  auto constexpr defined_str = string_view{"defined"};
-  auto looping = true;
-  while (looping && i < buf.size()) {
-    auto const ch = buf[i];
-    switch (ch) {
-    case '\\': {
-      ++i;
-      if (i < buf.size() && buf[i] == '\n') {
-        ++i;
-      }
-    } break;
-    case '\n': {
-      looping = false;
-      ++i;
-    } break;
-    case '(': {
-      types.push_back(ir_t::LPAREN);
-      ++i;
-    } break;
-    case ')': {
-      types.push_back(ir_t::RPAREN);
-      ++i;
-    } break;
-    case '|': {
-      ++i;
-      if (i < buf.size() && buf[i] == '|') {
-        ++i;
-        types.push_back(ir_t::OR);
-      } else {
-        types.push_back(ir_t::BIT_OR);
-      }
-    } break;
-    case '&': {
-      ++i;
-      if (i < buf.size() && buf[i] == '&') {
-        ++i;
-        types.push_back(ir_t::AND);
-      } else {
-        types.push_back(ir_t::BIT_AND);
-      }
-    } break;
-    case '=': {
-      ++i;
-      if (i < buf.size() && buf[i] == '=') {
-        ++i;
-        types.push_back(ir_t::EQ_EQ);
-      } else {
-        types.push_back(ir_t::EQ);
-      }
-    } break;
-    case '!': {
-      ++i;
-      if (i < buf.size() && buf[i] == '=') {
-        ++i;
-        types.push_back(ir_t::BANG_EQ);
-      } else {
-        types.push_back(ir_t::BANG);
-      }
-    } break;
-    case '<': {
-      ++i;
-      if (i < buf.size() && buf[i] == '=') {
-        ++i;
-        types.push_back(ir_t::LESS_EQ);
-      } else {
-        types.push_back(ir_t::LESS);
-      }
-    } break;
-    case '>': {
-      ++i;
-      if (i < buf.size() && buf[i] == '=') {
-        ++i;
-        types.push_back(ir_t::GREATER_EQ);
-      } else {
-        types.push_back(ir_t::GREATER);
-      }
-    } break;
-    case '#': {
-      ++i;
-      if (i < buf.size() && buf[i] == '#') {
-        ++i;
-        types.push_back(ir_t::STRINGIZING);
-      } else {
-        types.push_back(ir_t::CONCAT);
-      }
-    } break;
-    case 'd': {
-      if (i + defined_str.size() < buf.size() &&
-          strncmp(buf.data() + i, defined_str.data(), defined_str.size()) ==
-              0) {
-        i += defined_str.size();
-        types.push_back(ir_t::DEFINED);
-      } else {
-        auto const start = i;
-        i = skip_until(delims_at(delims::LEXEME), buf, i);
-        types.push_back(ir_t::LEXEME);
-        lexemes.push_back(string(buf.data() + start, buf.data() + i));
-      }
-    } break;
-#pragma region octal
-    case '0': {
-      ++i;
-      if (!(i < buf.size())) {
-        types.push_back(ir_t::LIT_INT);
-        lexemes.push_back("0");
-      } else {
-        switch (buf[i]) {
-#pragma region binary
-        case 'b': {
-          // TODO: check if we're on c++14>=, bc otherwise this is supposed to
-          // be an error, the same goes with "'" character
-          ++i;
-          if (!(i < buf.size())) {
-            throw Exception("Found string [0b], this is treated as an octal "
-                            "number by the compiler, and is therefore "
-                            "malformed as only 01234567 are allowed in octal "
-                            "numbers");
-          }
-          auto const start = i - 1;
-          auto allow_quote = false;
-          auto inner_looping = true;
-          while (inner_looping && i < buf.size()) {
-            switch (buf[i]) {
-            case '0':
-              [[fallthrough]];
-            case '1': {
-              allow_quote = true;
-              ++i;
-            } break;
-            case '\'': {
-              if (allow_quote) {
-                ++i;
-                allow_quote = false;
-              } else {
-                throw Exception(
-                    "When parsing a binary number, found two ' characters "
-                    "back to back, these are treated as identifiers for a "
-                    "char literal, and thus a formatting error.");
-              }
-            } break;
-            default: {
-              // these two cases can probably just be combined then b/c they
-              // throw the same thing
-              if (is_any_of(delims_at(delims::BINARY_FAIL), buf.data(), i)) {
-                throw Exception(
-                    std::format("Found [{}], while parsing a binary numbers, "
-                                "only 0 and 1 are allowed in binary numbers "
-                                "(and ' characters for delimiters)",
-                                buf[i]));
-              } else if (std::isalpha(buf[i])) {
-                throw Exception(
-                    std::format("Found [{}], while parsing a binary numbers, "
-                                "only 0 and 1 are allowed in binary numbers "
-                                "(and ' characters for delimiters)",
-                                buf[i]));
-              }
-              inner_looping = false;
-            }
-            }
-          }
-          types.push_back(ir_t::LIT_BINARY);
-          lexemes.push_back(string(buf.data() + start, buf.data() + i));
-        } break;
-#pragma endregion binary
-#pragma region hex
-        case 'x': {
-          ++i;
-          if (!(i < buf.size())) {
-            throw Exception("Found string [0x], this is treated as an octal "
-                            "number by the compiler, and is therefore "
-                            "malformed, as only 01234567 are allowed in octal "
-                            "numbers");
-          }
-          auto const start = i - 1;
-          auto allow_quote = false;
-          auto inner_looping = true;
-          while (inner_looping && i < buf.size()) {
-            if (is_any_of(delims_at(delims::ALLOWED_HEX), buf.data(), i)) {
-              allow_quote = true;
-              ++i;
-            } else if (buf[i] == '\'') {
-              if (allow_quote) {
-                ++i;
-                allow_quote = false;
-              } else {
-                throw Exception(
-                    "When parsing a hex number, found two ' characters "
-                    "back to back, these are treated as identifiers for a "
-                    "char literal, and thus a formatting error.");
-              }
-            } else if (is_any_of(delims_at(delims::ALPHA_SANS_HEX), buf.data(),
-                                 i)) {
-              throw Exception("While parsing a hex number, found a "
-                              "character that's not supported.");
-            } else {
-              inner_looping = false;
-            }
-          }
-          types.push_back(ir_t::LIT_HEX);
-          lexemes.push_back(string(buf.data() + start, buf.data() + i));
-        } break;
-#pragma endregion hex
-        case '\'':
-          [[fallthrough]];
-        case '0':
-          [[fallthrough]];
-        case '1':
-          [[fallthrough]];
-        case '2':
-          [[fallthrough]];
-        case '3':
-          [[fallthrough]];
-        case '4':
-          [[fallthrough]];
-        case '5':
-          [[fallthrough]];
-        case '6':
-          [[fallthrough]];
-        case '7': {
-          auto const start = i;
-
-          auto allow_quote = true;
-          while (i < buf.size()) {
-            if (is_any_of(delims_at(delims::ALLOWED_OCTAL), buf.data(), i)) {
-              allow_quote = true;
-              ++i;
-            } else if (buf[i] == '\'') {
-              if (allow_quote) {
-                allow_quote = false;
-                ++i;
-              } else {
-                throw Exception(
-                    "While parsing an octal number encounter a double ' "
-                    "character, these are treated as introducing a char "
-                    "literal, causing an error.");
-              }
-            } else {
-              if (is_any_of(delims_at(delims::LEXEME), buf.data(), i)) {
-                break;
-              } else {
-                throw Exception(std::format(
-                    "While parsing an octal number, encounter [{}], a non "
-                    "supposed character in octal numbers",
-                    buf[i]));
-              }
-            }
-          }
-          types.push_back(ir_t::LIT_OCTAL);
-          lexemes.push_back(string(buf.data() + start, buf.data() + i));
-        } break;
-        case '8':
-          [[fallthrough]];
-        case '9': {
-          throw Exception("While parsing an octal number came across an 8 or "
-                          "9. Note that when you start a number with 0 it will "
-                          "be treated as an octal number by the compiler :).");
-        } break;
-        }
-      }
-    } break;
-#pragma endregion octal
-#pragma region decimal
-    case '1':
-      [[fallthrough]];
-    case '2':
-      [[fallthrough]];
-    case '3':
-      [[fallthrough]];
-    case '4':
-      [[fallthrough]];
-    case '5':
-      [[fallthrough]];
-    case '6':
-      [[fallthrough]];
-    case '7':
-      [[fallthrough]];
-    case '8':
-      [[fallthrough]];
-    case '9': {
-      auto const start = i;
-      auto allow_quote = true;
-      while (i < buf.size()) {
-        if (is_any_of(delims_at(delims::DECIMAL_DIGITS), buf.data(), i)) {
-          allow_quote = true;
-          ++i;
-        } else if (buf[i] == '\'') {
-          if (allow_quote) {
-            allow_quote = false;
-            ++i;
-          } else {
-            throw Exception("While parsing a decimal number, found a double '. "
-                            "These are treated as introducing a char literal, "
-                            "causing an error.");
-          }
-          // These two cases should probably be rolled into one
-        } else if (is_any_of(delims_at(delims::HEX_SANS_DIGITS), buf.data(),
-                             i)) {
-          throw Exception(
-              std::format("While parsing a decimal number, encountered the "
-                          "following unsupported character [{}]",
-                          buf[i]));
-        } else {
-          if (is_any_of(delims_at(delims::LEXEME), buf.data(), i)) {
-            break;
-          } else {
-            throw Exception(
-                std::format("While parsing a decimal number, encountered the "
-                            "following unsupported character [{}]",
-                            buf[i]));
-          }
-        }
-      }
-      types.push_back(ir_t::LIT_INT);
-      lexemes.push_back(string(buf.data() + start, buf.data() + i));
-    } break;
-#pragma endregion decimal
-    default: {
-      auto const start = i;
-      i = skip_until(delims_at(delims::LEXEME), buf, i);
-      types.push_back(ir_t::LEXEME);
-      lexemes.push_back(string(buf.data() + start, buf.data() + i));
-    } break;
-    }
-  }
-  return i;
-}
-#endif
 
 auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
   auto end = i + 1;
@@ -1707,123 +1508,6 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
   return std::make_unique<ElseNode>(std::move(res));
 }
 
-#if 0
-auto Lexer::parse_expr(size_t &cur_t, size_t &cur_lex) -> ExprNode {
-  return equality(cur_t, cur_lex);
-}
-
-auto Lexer::equality(size_t &cur_t, size_t &cur_lex) -> ExprNode {
-  auto lhs = comparison(cur_t, cur_lex);
-#if 0
-  while (matching(cur_t, {ir_t::BANG_EQ, ir_t::EQ_EQ})) {
-    auto const tkn = types[cur_t++];
-    auto rhs = comparison(cur_t, cur_lex);
-
-    lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
-  }
-#endif
-
-  return lhs;
-}
-
-auto Lexer::comparison(size_t &cur_t, size_t &cur_lex) -> ExprNode {
-  auto lhs = term(cur_t, cur_lex);
-#if 0
-  while (matching(
-      cur_t, {ir_t::LESS, ir_t::LESS_EQ, ir_t::GREATER, ir_t::GREATER_EQ})) {
-    auto const tkn = types[cur_t++];
-    auto rhs = term(cur_t, cur_lex);
-
-    lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
-  }
-#endif
-
-  return lhs;
-}
-
-auto Lexer::term(size_t &cur_t, size_t &cur_lex) -> ExprNode {
-  auto lhs = factor(cur_t, cur_lex);
-  while (matching(cur_t, {ir_t::PLUS, ir_t::MINUS})) {
-    auto const tkn = types[cur_t++];
-    auto rhs = factor(cur_t, cur_lex);
-
-    lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
-  }
-
-  return lhs;
-}
-
-auto Lexer::factor(size_t &cur_t, size_t &cur_lex) -> ExprNode {
-  auto lhs = unary(cur_t, cur_lex);
-  while (matching(cur_t, {ir_t::STAR, ir_t::SLASH})) {
-    auto const tkn = types[cur_t++];
-    auto rhs = unary(cur_t, cur_lex);
-
-    lhs = ExprNode::make_binary(tkn, std::move(lhs), std::move(rhs));
-  }
-
-  return lhs;
-}
-
-auto Lexer::unary(size_t &cur_t, size_t &cur_lex) -> ExprNode {
-  if (matching(cur_t, {ir_t::BANG, ir_t::MINUS})) {
-    auto const tkn = types[cur_t++];
-    auto un = unary(cur_t, cur_lex);
-    return ExprNode::make_unary(tkn, std::move(un));
-  }
-  return primary(cur_t, cur_lex);
-}
-
-auto Lexer::primary(size_t &cur_t, size_t &cur_lex) -> ExprNode {
-  switch (types[cur_t]) {
-  case ir_t::MACRO:
-    break;
-  case ir_t::LIT_CHAR:
-    break;
-  case ir_t::LIT_STRING:
-    break;
-  case ir_t::LIT_INT:
-    break;
-  case ir_t::LIT_HEX:
-    break;
-  case ir_t::LIT_OCTAL:
-    break;
-  case ir_t::LIT_BINARY:
-    break;
-  case ir_t::LIT_FLOAT:
-    break;
-  case ir_t::LEXEME:
-    break;
-  case ir_t::LPAREN: {
-    expect(cur_t, ir_t::RPAREN);
-  } break;
-  case ir_t::DEFINED: {
-    ++cur_t;
-    auto lex = string();
-    if (types[cur_t] == ir_t::LPAREN) {
-      ++cur_t;
-      expect(cur_t, ir_t::LEXEME);
-      ++cur_t;
-      lex = lexemes[cur_lex++];
-      expect(cur_t, ir_t::RPAREN);
-      ++cur_t;
-    } else {
-      expect(cur_t, ir_t::LEXEME);
-      ++cur_t;
-      lex = lexemes[cur_lex++];
-    }
-    return ExprNode::make_defined(std::move(lex));
-  } break;
-
-  default:
-    throw Exception(
-        std::format("Unexpected token [{}] found while parsing an expression",
-                    to_string(types[cur_t])));
-  }
-  throw Exception(std::format("{} not impl", __PRETTY_FUNCTION__));
-}
-#endif
-
 // TODO: update this function to allow for optional string for extra info
 auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
   if (types[cur_t] != tkn) {
@@ -1848,60 +1532,6 @@ auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
 }
 #endif
 
-auto ExprNode::make_binary(ir_t tkn, ExprNode &&lhs, ExprNode &&rhs) noexcept
-    -> ExprNode {
-  auto bin_t = [](ir_t tkn) {
-    switch (tkn) {
-#if 0
-    case ir_t::PLUS:
-      return Binary::PLUS;
-    case ir_t::MINUS:
-      return Binary::MINUS;
-    case ir_t::SLASH:
-      return Binary::DIVIDE;
-    case ir_t::STAR:
-      return Binary::TIMES;
-    case ir_t::GREATER:
-      return Binary::GREATER;
-    case ir_t::GREATER_EQ:
-      return Binary::GREATER_EQ;
-    case ir_t::LESS:
-      return Binary::LESS;
-    case ir_t::LESS_EQ:
-      return Binary::LESS_EQ;
-    case ir_t::BANG_EQ:
-      return Binary::NEQ;
-    case ir_t::EQ_EQ:
-      return Binary::EQ;
-#endif
-    default:
-      unreachable();
-    }
-    return Binary::PLUS;
-  }(tkn);
-  auto bin = Binary{std::make_unique<ExprNode>(std::move(lhs)),
-                    std::make_unique<ExprNode>(std::move(rhs)), bin_t};
-  return ExprNode(ExprNode::BINARY, std::move(bin));
-}
-
-auto ExprNode::make_unary(ir_t tkn, ExprNode &&un) noexcept -> ExprNode {
-  auto un_t = [](ir_t tkn) {
-    switch (tkn) {
-#if 0
-    case ir_t::MINUS:
-      return Unary::MINUS;
-    case ir_t::BANG:
-      return Unary::BANG;
-#endif
-    default:
-      unreachable();
-    }
-    return Unary::MINUS;
-  }(tkn);
-  auto _un = Unary{std::make_unique<ExprNode>(std::move(un)), un_t};
-  return ExprNode(ExprNode::UNARY, std::move(_un));
-}
-
 auto ExprNode::make_defined(string &&str) noexcept -> ExprNode {
   return ExprNode(ExprNode::DEFINED, Defined{std::move(str)});
 }
@@ -1909,7 +1539,8 @@ auto ExprNode::make_defined(string &&str) noexcept -> ExprNode {
 auto ExprNode::eval(string_view const expr,
                     std::unordered_map<std::string, Macro> const &macros,
                     std::unordered_set<std::string> const &def_macros) -> int {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+  auto const expr_ast = Expressions::lex(expr);
+  return Expressions::eval_impl(expr_ast.to_ast(), macros, def_macros);
 }
 
 auto operator<<(std::ostream &out, ExprNode const &en) noexcept
@@ -1982,6 +1613,458 @@ auto operator<<(std::ostream &out, ExprNode const &en) noexcept
 }
 
 Ast::Ast() { nodes.reserve(20); }
+
+auto Expressions::ExprLexer::to_ast() const -> ExprNode {
+  auto cur_t = size_t{};
+  auto cur_lex = size_t{};
+  return equality(cur_t, cur_lex);
+}
+
+auto Expressions::ExprLexer::equality(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  auto lhs = comparison(cur_t, cur_lex);
+
+  while (matching(tkns[cur_t], {BANG_EQ, EQ_EQ})) {
+    auto const tkn = tkns[cur_t++];
+    auto rhs = comparison(cur_t, cur_lex);
+
+    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+
+  return lhs;
+}
+
+auto Expressions::ExprLexer::comparison(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  auto lhs = term(cur_t, cur_lex);
+
+  while (matching(tkns[cur_t], {LESS, LESS_EQ, GREATER, GREATER_EQ})) {
+    auto const tkn = tkns[cur_t++];
+    auto rhs = term(cur_t, cur_lex);
+
+    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+
+  return lhs;
+}
+
+auto Expressions::ExprLexer::term(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  auto lhs = factor(cur_t, cur_lex);
+  while (matching(tkns[cur_t], {PLUS, MINUS})) {
+    auto const tkn = tkns[cur_t++];
+    auto rhs = factor(cur_t, cur_lex);
+
+    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+
+  return lhs;
+}
+
+auto Expressions::ExprLexer::factor(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  auto lhs = unary(cur_t, cur_lex);
+  while (matching(tkns[cur_t], {STAR, SLASH})) {
+    auto const tkn = tkns[cur_t++];
+    auto rhs = unary(cur_t, cur_lex);
+
+    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+
+  return lhs;
+}
+
+auto Expressions::ExprLexer::unary(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  if (matching(tkns[cur_t], {BANG, MINUS})) {
+    auto const tkn = tkns[cur_t++];
+    auto un = unary(cur_t, cur_lex);
+    return make_unary(tkn, std::move(un));
+  }
+  return primary(cur_t, cur_lex);
+}
+
+auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  switch (tkns[cur_t]) {
+  case MACRO:
+    break;
+  case LIT_CHAR:
+    break;
+  case LIT_DEC:
+    break;
+  case LIT_HEX:
+    break;
+  case LIT_OCT:
+    break;
+  case LIT_BIN:
+    break;
+  case LIT_FLOAT:
+    break;
+  case LPAREN: {
+    ++cur_t;
+    if (tkns[cur_t] != RPAREN) {
+      throw Exception(std::format("While parsing a grouping expression, "
+                                  "expected a ')' to wrap the expression"));
+    }
+  } break;
+  case DEFINED: {
+    ++cur_t;
+    auto lex = string();
+    if (tkns[cur_t] == LPAREN) {
+      ++cur_t;
+      expect(cur_t, MACRO);
+      ++cur_t;
+      lex = macros[cur_lex++];
+      expect(cur_t, RPAREN);
+      ++cur_t;
+    } else {
+      expect(cur_t, MACRO);
+      ++cur_t;
+      lex = macros[cur_lex++];
+    }
+    return ExprNode::make_defined(std::move(lex));
+  } break;
+
+  default:
+    throw Exception(
+        std::format("Unexpected token [{}] found while parsing an expression",
+                    to_string(tkns[cur_t])));
+  }
+  throw Exception(std::format("{} not impl", __PRETTY_FUNCTION__));
+}
+
+#ifdef DEBUG
+auto Expressions::ExprLexer::display(std::ostream &out) const noexcept
+    -> std::ostream & {
+  out << "Tokens:\n\t";
+  for (auto const &type : tkns) {
+    out << '[' << to_string(type) << ']';
+  }
+  out << '\n';
+  out << "Macros:\n\t";
+  for (auto const &macro : macros) {
+    out << '[' << macro << ']';
+  }
+  out << '\n';
+  return out;
+}
+#endif // DEBUG
+
+auto Expressions::lex(string_view const str) -> ExprLexer {
+  auto constexpr defined_str = string_view{"defined"};
+  auto tkns = vector<expr_t>();
+  auto macros = vector<string>();
+  for (auto i = size_t{}; i < str.size();) {
+    switch (auto ch = str[i]) {
+    case '(':
+      tkns.push_back(LPAREN);
+      ++i;
+      break;
+    case ')':
+      tkns.push_back(RPAREN);
+      ++i;
+      break;
+    case '|': {
+      ++i;
+      if (i < str.size() && str[i] == '|') {
+        ++i;
+        tkns.push_back(OR);
+      } else {
+        tkns.push_back(BIT_OR);
+      }
+    } break;
+    case '&': {
+      ++i;
+      if (i < str.size() && str[i] == '&') {
+        ++i;
+        tkns.push_back(AND);
+      } else {
+        tkns.push_back(BIT_AND);
+      }
+    } break;
+    case '=': {
+      ++i;
+      if (i < str.size() && str[i] == '=') {
+        ++i;
+        tkns.push_back(EQ_EQ);
+      } else {
+        tkns.push_back(EQ);
+      }
+    } break;
+    case '!': {
+      ++i;
+      if (i < str.size() && str[i] == '=') {
+        ++i;
+        tkns.push_back(BANG_EQ);
+      } else {
+        tkns.push_back(BANG);
+      }
+    } break;
+    case '<': {
+      ++i;
+      if (i < str.size() && str[i] == '=') {
+        ++i;
+        tkns.push_back(LESS_EQ);
+      } else {
+        tkns.push_back(LESS);
+      }
+    } break;
+    case '>': {
+      ++i;
+      if (i < str.size() && str[i] == '=') {
+        ++i;
+        tkns.push_back(GREATER_EQ);
+      } else {
+        tkns.push_back(GREATER);
+      }
+    } break;
+    case '#': {
+      ++i;
+      if (i < str.size() && str[i] == '#') {
+        ++i;
+        tkns.push_back(STRINGIZING);
+      } else {
+        tkns.push_back(CONCAT);
+      }
+    } break;
+    case '.':
+      throw Exception(std::format("found '.' while parsing expression [{}] in "
+                                  "a #if or #elif condition.",
+                                  str));
+    case 'd': {
+      if (i + defined_str.size() < str.size() &&
+          strncmp(str.data() + i, defined_str.data(), defined_str.size()) ==
+              0) {
+        i += defined_str.size();
+        tkns.push_back(DEFINED);
+      } else {
+        auto const start = i;
+        i = skip_until(delims_at(delims::LEXEME), str, i);
+        tkns.push_back(MACRO);
+        macros.push_back(string(str.data() + start, str.data() + i));
+      }
+    } break;
+    default: {
+      if (is_digit(ch)) {
+        if (ch == '0') {
+          ++i;
+          if (!(i < str.size())) {
+            tkns.push_back(LIT_DEC);
+            macros.push_back(string(1, '0'));
+            break; // break switch
+          }
+
+          // TODO: check if we're on c++14>=, bc otherwise this is supposed to
+          // be an error, the same goes with "'" character
+          // TODO: this is really poorly written i should really just extract
+          // this out into it's own function
+          enum class int_type {
+            DECIMAL,
+            BINARY,
+            HEX,
+            OCTAL
+          } int_t = [&]() {
+            switch (ch = str[i]) {
+            case 'x':
+              return int_type::HEX;
+            case 'b':
+              return int_type::BINARY;
+            case 'o':
+              return int_type::OCTAL;
+            default:
+              if (!is_digit(ch)) {
+                throw Exception(std::format(
+                    "Found char [{}], while attempting to parse an integer",
+                    ch));
+              } else {
+                return int_type::DECIMAL;
+              }
+            }
+          }();
+          auto constexpr to_string = [](int_type int_t) -> string_view {
+            switch (int_t) {
+            case int_type::DECIMAL:
+              return string_view{"DECIMAL"};
+            case int_type::BINARY:
+              return string_view{"BINARY"};
+            case int_type::HEX:
+              return string_view{"HEX"};
+            case int_type::OCTAL:
+              return string_view{"OCTAL"};
+            }
+          };
+
+          auto constexpr is_allowed_char = [](int_type int_t, char ch) -> bool {
+            switch (int_t) {
+            case int_type::DECIMAL:
+              return is_any_of(delims_at(delims::ALLOWED_DECIMAL), ch);
+            case int_type::BINARY:
+              return is_any_of(delims_at(delims::ALLOWED_BINARY), ch);
+            case int_type::HEX:
+              return is_any_of(delims_at(delims::ALLOWED_HEX), ch);
+            case int_type::OCTAL:
+              return is_any_of(delims_at(delims::ALLOWED_OCTAL), ch);
+            }
+          };
+          auto allow_quote = true;
+          while (i < str.size()) {
+            if (str[i] == '\'') {
+              if (!allow_quote) {
+                throw Exception(std::format(
+                    "When parsing a {} number, found two ' characters "
+                    "back to back, these are treated as identifiers for a "
+                    "char literal, and thus a formatting error.",
+                    to_string(int_t)));
+              } else {
+                allow_quote = false;
+                ++i;
+              }
+            }
+            if (!is_allowed_char(int_t, str[i])) {
+              throw Exception(std::format("While parsing a [{}] integer, found "
+                                          "[{}], a not supported character",
+                                          to_string(int_t), str[i]));
+            }
+            ++i;
+            allow_quote = true;
+          }
+        } else {
+          auto const start = i;
+          i = skip_until(delims_at(delims::ALLOWED_DECIMAL), str, i);
+          tkns.push_back(LIT_DEC);
+          macros.push_back(string(str.data() + start, str.data() + i));
+        }
+      } else if (is_alpha(ch)) {
+        auto const start = i;
+        i = skip_until(delims_at(delims::LEXEME), str, i);
+        tkns.push_back(MACRO);
+        macros.push_back(string(str.data() + start, str.data() + i));
+      } else {
+        throw Exception(std::format(
+            "Unknown char [{}], found while lexing expression.", ch));
+      }
+    }
+    }
+  }
+#ifdef DEBUG
+  auto const lexer = ExprLexer(tkns, macros);
+  lexer.display(std::cout).flush();
+  return lexer;
+#else
+  return ExprLexer(tkns, macros);
+#endif // DEBUG
+}
+
+auto Expressions::eval_impl(
+    ExprNode const &e, std::unordered_map<std::string, Macro> const &macros,
+    std::unordered_set<std::string> const &def_macros) -> int {
+  switch (e.t) {
+  case ExprNode::INT:
+    return static_cast<int>(std::get<ExprNode::Integer>(e.val).i);
+    break;
+  case ExprNode::DEFINED:
+    return is_defined(std::get<ExprNode::Defined>(e.val).str, macros,
+                      def_macros)
+               ? 1
+               : 0;
+  case ExprNode::NUMBER:
+    [[fallthrough]];
+  case ExprNode::CHARLIT:
+    throw Exception(
+        std::format("While evaluating if expression found a not integer."));
+  case ExprNode::BINARY: {
+    auto &bin = std::get<ExprNode::Binary>(e.val);
+    auto const lhs = eval_impl(*bin.lhs, macros, def_macros);
+    auto const rhs = eval_impl(*bin.rhs, macros, def_macros);
+    switch (bin.t) {
+    case ExprNode::Binary::PLUS:
+      return lhs + rhs;
+    case ExprNode::Binary::MINUS:
+      return lhs - rhs;
+    case ExprNode::Binary::TIMES:
+      return lhs * rhs;
+    case ExprNode::Binary::DIVIDE:
+      return lhs / rhs;
+    case ExprNode::Binary::GREATER:
+      return lhs > rhs ? 1 : 0;
+    case ExprNode::Binary::GREATER_EQ:
+      return lhs >= rhs ? 1 : 0;
+    case ExprNode::Binary::LESS:
+      return lhs < rhs ? 1 : 0;
+    case ExprNode::Binary::LESS_EQ:
+      return lhs <= rhs ? 1 : 0;
+    case ExprNode::Binary::NEQ:
+      return lhs != rhs ? 1 : 0;
+    case ExprNode::Binary::EQ:
+      return lhs == rhs ? 1 : 0;
+    }
+  }
+  case ExprNode::UNARY: {
+    auto &un = std::get<ExprNode::Unary>(e.val);
+    auto const res = eval_impl(*un.un, macros, def_macros);
+    switch (un.t) {
+    case ExprNode::Unary::MINUS:
+      return -res;
+    case ExprNode::Unary::BANG:
+      return !res;
+    }
+  }
+  case ExprNode::NONE:
+    throw Exception(
+        std::format("Attempting to evaluate an uninitialized expression."));
+  }
+}
+
+auto Expressions::make_binary(Expressions::expr_t tkn, ExprNode &&lhs,
+                              ExprNode &&rhs) noexcept -> ExprNode {
+  auto bin_t = [](expr_t tkn) {
+    switch (tkn) {
+    case PLUS:
+      return ExprNode::Binary::PLUS;
+    case MINUS:
+      return ExprNode::Binary::MINUS;
+    case SLASH:
+      return ExprNode::Binary::DIVIDE;
+    case STAR:
+      return ExprNode::Binary::TIMES;
+    case GREATER:
+      return ExprNode::Binary::GREATER;
+    case GREATER_EQ:
+      return ExprNode::Binary::GREATER_EQ;
+    case LESS:
+      return ExprNode::Binary::LESS;
+    case LESS_EQ:
+      return ExprNode::Binary::LESS_EQ;
+    case BANG_EQ:
+      return ExprNode::Binary::NEQ;
+    case EQ_EQ:
+      return ExprNode::Binary::EQ;
+    default:
+      unreachable();
+    }
+  }(tkn);
+  auto bin =
+      ExprNode::Binary{std::make_unique<ExprNode>(std::move(lhs)),
+                       std::make_unique<ExprNode>(std::move(rhs)), bin_t};
+  return ExprNode(ExprNode::BINARY, std::move(bin));
+}
+
+auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
+    -> ExprNode {
+  auto un_t = [](expr_t tkn) {
+    switch (tkn) {
+    case MINUS:
+      return ExprNode::Unary::MINUS;
+    case BANG:
+      return ExprNode::Unary::BANG;
+    default:
+      unreachable();
+    }
+  }(tkn);
+  auto _un = ExprNode::Unary{std::make_unique<ExprNode>(std::move(un)), un_t};
+  return ExprNode(ExprNode::UNARY, std::move(_un));
+}
 
 auto AstPrinter::visit_if(IfNode &i) -> void {
   out << get_indents() << "(if (" << i.condition << ")\n";
@@ -2097,7 +2180,7 @@ auto AstIncluder::visit_if(IfNode &i) -> void {
 }
 
 auto AstIncluder::visit_ifdef(IfDefNode &i) -> void {
-  if (is_defined(i.macro)) {
+  if (is_defined(i.macro, macros, def_macros)) {
     for (auto &&thens : i.then_branch) {
       thens->accept(*this);
     }
@@ -2115,7 +2198,7 @@ auto AstIncluder::visit_ifdef(IfDefNode &i) -> void {
 }
 
 auto AstIncluder::visit_ifndef(IfNDefNode &i) -> void {
-  if (!is_defined(i.macro)) {
+  if (!is_defined(i.macro, macros, def_macros)) {
     for (auto &&thens : i.then_branch) {
       thens->accept(*this);
     }
