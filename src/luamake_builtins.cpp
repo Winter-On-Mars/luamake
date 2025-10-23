@@ -1445,9 +1445,7 @@ auto install_exe(lua_State *state) noexcept -> int {
     ec.clear();
 
     main_mod.gen_dep_tree();
-    return 0;
 
-#if 0
     auto const actually_compiled_files = Compiler::compile(main_mod);
 
     // because of the format of `actually_compiled_files` for the best
@@ -1466,7 +1464,6 @@ auto install_exe(lua_State *state) noexcept -> int {
     } else {
       return 0;
     }
-#endif
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
