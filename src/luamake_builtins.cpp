@@ -44,7 +44,7 @@ extern "C" {
   }
 
 #define LUA_ASSERT_FORMAT(L, name, A, B, fmt, ...)                             \
-  if (auto const name = A; (name) != (B)) {                                    \
+  if (auto const name = (A); (name) != (B)) {                                  \
     lua_pushfstring((L), fmt, __VA_ARGS__);                                    \
     return lua_error((L));                                                     \
   }
@@ -1426,7 +1426,7 @@ auto install_exe(lua_State *state) noexcept -> int {
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
                     "Expected type of argument to `install_exe` to be of type "
                     "table, found [%s]",
-                    lua_typename(state, ret_t));
+                    lua_typename(ret_t));
 
   try {
     auto main_mod = Module(Module::EXE, state);
@@ -1492,7 +1492,7 @@ auto install_static(lua_State *state) noexcept -> int {
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
                     "Expected type of argument to `install_static` "
                     "to be of type table, found [%s]",
-                    lua_typename(state, ret_t));
+                    lua_typename(ret_t));
 
   try {
     auto static_mod = Module(Module::STATIC, state);
@@ -1567,7 +1567,7 @@ auto run(lua_State *L) noexcept -> int {
         L,
         "Expected type of exe.args to either be `nil` "
         "(undefined) or a table (array), found [%s] [in function Run]",
-        lua_typename(L, t));
+        lua_typename(t));
     return lua_error(L);
   }
 
@@ -1589,7 +1589,7 @@ auto link_static(lua_State *state) noexcept -> int {
   for (int i = -1; i >= -3; --i) {
     LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, i), LUA_TTABLE,
                       "Expected type of argument to be table, found [%s]",
-                      lua_typename(state, arg_t));
+                      lua_typename(arg_t));
   }
 
   // going to ignore the args parameter for now, idk what would even go in it
@@ -1610,7 +1610,7 @@ auto link_static(lua_State *state) noexcept -> int {
     lua_pushstring(state,
                    std::format("Found include field in [exe] table, but was "
                                "of incorrect type. Expected [table] found {}",
-                               lua_typename(state, include_table_t))
+                               lua_typename(include_table_t))
                        .c_str());
     return lua_error(state);
   }
@@ -1630,7 +1630,7 @@ auto link_static(lua_State *state) noexcept -> int {
         state,
         std::format("In `link_static` function, expected type of field [static "
                     "labrary].roots to be of type [table] found [{}]",
-                    lua_typename(state, roots_t))
+                    lua_typename(roots_t))
             .c_str());
     return lua_error(state);
   }
@@ -1642,7 +1642,7 @@ auto link_static(lua_State *state) noexcept -> int {
     LUA_ASSERT_FORMAT(
         state, value_t, lua_type(state, -1), LUA_TSTRING,
         "Expected value type in roots table to be a [string], found %s",
-        lua_typename(state, value_t));
+        lua_typename(value_t));
     auto const path = fs::path(lua_tolstring(state, -1, nullptr));
     lua_pushstring(state, path.parent_path().c_str());
     lua_seti(state, include_tbl,
@@ -1666,7 +1666,7 @@ auto link_static(lua_State *state) noexcept -> int {
     lua_pushstring(state,
                    std::format("Found linking field in [exe], but was "
                                "of incorrect type. Expected [table] found [{}]",
-                               lua_typename(state, linking_tbl_t))
+                               lua_typename(linking_tbl_t))
                        .c_str());
     return lua_error(state);
   }
@@ -1674,12 +1674,12 @@ auto link_static(lua_State *state) noexcept -> int {
   LUA_ASSERT_FORMAT(
       state, name_t, lua_getfield(state, slib_idx, "name"), LUA_TSTRING,
       "Expected type of [static library].name to be [string] found [%s]",
-      lua_typename(state, name_t));
+      lua_typename(name_t));
   LUA_ASSERT_FORMAT(
       state, install_dir_t, lua_getfield(state, slib_idx, "install_dir"),
       LUA_TSTRING,
       "Expected type of [static library].root to be [string] found [%s]",
-      lua_typename(state, install_dir_t));
+      lua_typename(install_dir_t));
   auto const link_format =
       std::format("{}/lib{}.a", lua_tolstring(state, -1, nullptr),
                   lua_tolstring(state, -2, nullptr));
@@ -1721,7 +1721,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
         std::cout << '[' << lua_tolstring(state, -2, nullptr) << ']';
         break;
       default:
-        std::cout << lua_typename(state, key_t);
+        std::cout << lua_typename(key_t);
         break;
       }
 
@@ -1733,7 +1733,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << indents << '}';
   } break;
   default:
-    std::cout << "Unable to display type of " << lua_typename(state, type);
+    std::cout << "Unable to display type of " << lua_typename(type);
     break;
   }
   std::cout << '\n';
