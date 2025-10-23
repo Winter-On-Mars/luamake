@@ -2236,16 +2236,28 @@ auto AstIncluder::visit_local_include(LocalIncludeNode &local) -> void {
   paths.push_back(local.path);
 }
 
-auto AstIncluder::visit_define(DefineNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto AstIncluder::visit_define(DefineNode &d) -> void {
+  if (d.lexeme) {
+    macros[d.name] = d.lexeme.value();
+  } else {
+    def_macros.insert(d.name);
+  }
 }
 
 auto AstIncluder::visit_define_func(DefineFuncNode &) -> void {
   throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
 }
 
-auto AstIncluder::visit_undef(UndefNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto AstIncluder::visit_undef(UndefNode &u) -> void {
+  if (macros.contains(u.name)) {
+    macros.erase(u.name);
+  } else if (def_macros.contains(u.name)) {
+    def_macros.erase(u.name);
+  } else {
+    //  apparently it's perfectly fine to #undef a non-existant macro, at least
+    //  according to clang i should check what the docs have to say about this
+    //  case
+  }
 }
 
 auto Exception::what() const noexcept -> string {
