@@ -3,6 +3,8 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <memory>
+#include <utility>
 
 #ifdef DEBUG
 #include <iostream>
@@ -141,6 +143,30 @@ struct File final {
   auto write_num(int c) noexcept -> int { return fputc(c, file); }
 
   auto flush() noexcept -> void { fflush(file); }
+
+  // TODO: add better error handling
+  // doesn't reset the file, consumes the entire content
+  auto dump_content() noexcept
+      -> std::pair<size_t, std::unique_ptr<unsigned char[]>> {
+    auto fsize = size_t{};
+    if (fseek(file, 0, SEEK_END) == -1) {
+      return {0, nullptr};
+    }
+    if (auto const size = ftell(file); size >= 0) {
+      fsize = static_cast<size_t>(size);
+    } else {
+      // idk i think an error occured
+      return {0, nullptr};
+    }
+    auto fcontent = std::make_unique<unsigned char[]>(fsize + 1);
+    if (auto const amount_read =
+            fread(fcontent.get(), sizeof(char), fsize, file);
+        amount_read != fsize) {
+      return {0, nullptr};
+    }
+    fcontent[fsize] = 0;
+    return {fsize, std::move(fcontent)};
+  }
 
 private:
   FILE *file;
