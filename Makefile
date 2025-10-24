@@ -6,7 +6,7 @@ includes:=lua
 
 .PHONY: all, dbg, ncolor, release, clean_submod
 
-files:=build/common.o build/luamake_builtins.o build/dependency_graph.o build/main.o build/luamake_error.o build/luamake_strings.o build/luamake_pre_ir.o
+files:=build/common.o build/luamake_builtins.o build/main.o build/luamake_strings.o build/luamake_pre_ir.o
 lua_a:=lua/liblua.a
 
 all: $(files) $(lua_a)
@@ -20,7 +20,7 @@ ncolor: cc_flags+=-DNO_TERM_COLOR
 ncolor: $(files)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
-release: cc_flags+=-O3 -ffast-math -flto
+release: cc_flags+=-O3 -ffast-math -flto -march=native
 release: $(files)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
