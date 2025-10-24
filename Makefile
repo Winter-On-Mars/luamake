@@ -4,7 +4,7 @@ bin_name:=build/luamake_c# TODO: change this when the c rewrite is done
 linker:=lld # if someone has clang they should have lld, so this is better, even if mold is a better linker
 includes:=lua
 
-.PHONY: all, ncolor, dbg, clean_submod
+.PHONY: all, dbg, ncolor, release, clean_submod
 
 files:=build/common.o build/luamake_builtins.o build/dependency_graph.o build/main.o build/luamake_error.o build/luamake_strings.o build/luamake_pre_ir.o
 lua_a:=lua/liblua.a
@@ -18,6 +18,10 @@ dbg: $(files) $(lua_a)
 
 ncolor: cc_flags+=-DNO_TERM_COLOR
 ncolor: $(files)
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+
+release: cc_flags+=-O3 -ffast-math -flto
+release: $(files)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
 build/%.o: src/%.cpp
