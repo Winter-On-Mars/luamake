@@ -7,6 +7,7 @@
 #include <utility>
 
 #ifdef DEBUG
+#include <cstring>
 #include <iostream>
 #endif
 
@@ -150,20 +151,31 @@ struct File final {
       -> std::pair<size_t, std::unique_ptr<unsigned char[]>> {
     auto fsize = size_t{};
     if (fseek(file, 0, SEEK_END) == -1) {
+#ifdef DEBUG
+      fprintf(stderr, "[%s]\n", strerror(errno));
+#endif // DEBUG
       return {0, nullptr};
     }
     if (auto const size = ftell(file); size >= 0) {
       fsize = static_cast<size_t>(size);
     } else {
-      // idk i think an error occured
+#ifdef DEBUG
+      fprintf(stderr, "[%s]\n", strerror(errno));
+#endif // DEBUG
       return {0, nullptr};
     }
+    rewind(file);
+
     auto fcontent = std::make_unique<unsigned char[]>(fsize + 1);
     if (auto const amount_read =
-            fread(fcontent.get(), sizeof(char), fsize, file);
+            fread(fcontent.get(), sizeof(unsigned char), fsize, file);
         amount_read != fsize) {
+#ifdef DEBUG
+      fprintf(stderr, "[%s]\n", strerror(errno));
+#endif // DEBUG
       return {0, nullptr};
     }
+
     fcontent[fsize] = 0;
     return {fsize, std::move(fcontent)};
   }
