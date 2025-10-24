@@ -442,6 +442,9 @@ struct LocalIncludeNode final : AstNode {
   fs::path path;
 };
 
+// TODO: there is a bug where an extraneous MACRO tkn is being pushed back,
+// causing this #define node to be treated like it has a value, as opposed to
+// just being a #define MACRO
 struct DefineNode final : AstNode {
   DefineNode(string const &str, string &&lexeme) noexcept
       : name(str), lexeme(lexeme) {}
