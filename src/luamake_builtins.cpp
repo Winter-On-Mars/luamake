@@ -402,6 +402,8 @@ struct Module final {
   Module(Module const &) = delete;
   Module &operator=(Module const &) = delete;
 
+  auto operator==(Module const &) const noexcept -> bool;
+
   // this is kinda stupid i'm not gonna lie, but this is the only
   // way i can think to have DepTree be able to reference Module and vice versa
   // without having to worry about pointer indirection
@@ -457,8 +459,8 @@ struct Module final {
     std::unique_ptr<SourceFile_t[]> types;
     std::unique_ptr<StringViews[]> files;
     std::unique_ptr<vector<unsigned int>[]> deps;
-
     std::unique_ptr<size_t[]> hashes;
+
     [[nodiscard]]
     auto append_path(fs::path const &) -> std::pair<bool, StringViews>;
     [[nodiscard]]
@@ -817,7 +819,7 @@ inline auto Deserializer::deserialize<std::string>() noexcept -> std::string {
   auto const str_len = deserialize<size_t>();
   auto str = std::string();
   str.resize(str_len);
-  // this is technically dangerous, but bc we string.reserve it *should* be fine
+  // this is technically dangerous, but bc we string.resize it *should* be fine
   std::memcpy((void *)str.c_str(), buf.get() + cur, str_len);
   cur += str_len;
   return str;
@@ -828,8 +830,8 @@ inline auto Deserializer::deserialize<OwnedString>() noexcept -> OwnedString {
   auto const str_len = deserialize<size_t>();
   auto str = OwnedString();
   str.buffer = (char *)malloc(str_len);
-  // this is technically dangerous, but bc we string.reserve it *should* be fine
   std::memcpy(str.buffer, buf.get() + cur, str_len);
+  str.size = str.capacity = str_len;
   cur += str_len;
   return str;
 };
@@ -1190,6 +1192,59 @@ auto Module::deserialize(fs::path const &path)
 
   auto deserializer = Deserializer(file);
   return deserializer.deserialize<Module>();
+}
+
+auto Module::operator==(Module const &that) const noexcept -> bool {
+  if (type != that.type)
+    return false;
+
+  // tree
+  if (tree.all_paths.view() != that.tree.all_paths.view())
+    return false;
+
+  if (tree.num_files != that.tree.num_files)
+    return false;
+
+  for (auto i = size_t{}; i < tree.num_files; ++i) {
+    if (tree.types[i] != that.tree.types[i])
+      return false;
+  }
+  for (auto i = size_t{}; i < tree.num_files; ++i) {
+    if (tree.files[i].start != that.tree.files[i].start &&
+        tree.files[i].end != that.tree.files[i].end)
+      return false;
+  }
+  for (auto i = size_t{}; i < tree.num_files; ++i) {
+    if (tree.deps[i].size() != that.tree.deps[i].size())
+      return false;
+
+    for (auto j = size_t{}; j < tree.deps[i].size(); ++j) {
+      if (tree.deps[i][j] != that.tree.deps[i][j])
+        return false;
+    }
+  }
+  for (auto i = size_t{}; i < tree.num_files; ++i) {
+    if (tree.hashes[i] != that.tree.hashes[i])
+      return false;
+  }
+
+  // rest of the class
+  if (macros != that.macros)
+    return false;
+
+  if (def_macros != that.def_macros)
+    return false;
+
+  if (compiler != that.compiler)
+    return false;
+
+  if (strcmp(name, that.name) != 0)
+    return false;
+
+  if (strcmp(install_dir, that.install_dir) != 0)
+    return false;
+
+  return true;
 }
 
 // this function could probably have better error handling, but this is fine for
@@ -1927,7 +1982,6 @@ auto install_exe(lua_State *state) noexcept -> int {
     }
     ec.clear();
 
-    // TODO: add this to be removed by luamake_c c
     if (fs::create_directories(
             fs::path(std::format("{}/__luamake_cache", main_mod.install_dir)),
             ec);
@@ -1940,7 +1994,8 @@ auto install_exe(lua_State *state) noexcept -> int {
     auto const path = fs::path(std::format(
         "{}/__luamake_cache/{}.cache", main_mod.install_dir, main_mod.name));
 
-    auto maybe_cached_mod = Module::deserialize(path);
+    auto maybe_cached_mod_fut = std::async(
+        std::launch::async, [&path]() { return Module::deserialize(path); });
 
     main_mod.gen_dep_tree();
 
@@ -1950,15 +2005,20 @@ auto install_exe(lua_State *state) noexcept -> int {
     std::cout << "---\n";
 #endif // DEBUG
 
+    auto maybe_cached_mod = maybe_cached_mod_fut.get();
     /* compare the current mod with the cached mod */
     switch (maybe_cached_mod.index()) {
     case 0: {
-#ifdef DEBUG
       auto const &cached_mod = std::get<Module>(maybe_cached_mod);
+#ifdef DEBUG
       std::cout << "cached mod\n";
+      cached_mod.tree.display(std::cout);
       cached_mod.display(std::cout);
       std::cout << "---\n";
 #endif // DEBUG
+      if (main_mod == cached_mod) {
+        return 0;
+      }
     } break;
     case 1: {
       auto const &error_message = std::get<std::string>(maybe_cached_mod);
@@ -1968,21 +2028,6 @@ auto install_exe(lua_State *state) noexcept -> int {
       unreachable();
     }
 
-    // TODO: probably remove this? bc it's being done in the async func
-    if (fs::create_directories(
-            fs::path(std::format("{}/__luamake_cache", main_mod.install_dir)),
-            ec);
-        ec) {
-      std::cerr << ec.message() << '\n';
-      lua_pushstring(state, "Unable to create cache directory");
-      return lua_error(state);
-    }
-    ec.clear();
-
-    main_mod.serialize(path);
-
-    return 0;
-#if 0
     auto const actually_compiled_files = Compiler::compile(main_mod);
 
     // because of the format of `actually_compiled_files` for the best
@@ -1999,9 +2044,13 @@ auto install_exe(lua_State *state) noexcept -> int {
       lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
       return lua_error(state);
     } else {
+      // only serialize if everything went right, need to figure out a better
+      // way to do this, so that we only serialize what was actually
+      // successfully compiled for incrimental builds and stuff
+      main_mod.serialize(path);
+
       return 0;
     }
-#endif
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
