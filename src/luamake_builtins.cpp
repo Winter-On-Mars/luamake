@@ -2325,23 +2325,6 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
   }
   std::cout << '\n';
 }
-} // namespace
-
-namespace builtins {
-auto dump(lua_State *state) noexcept -> int {
-  auto const num_args = lua_gettop(state);
-  if (num_args != 2) {
-    lua_pushstring(state, std::format("Expected 2 arguments to dump function, "
-                                      "[display string][value], found [{}]",
-                                      num_args)
-                              .c_str());
-    return lua_error(state);
-  }
-  // don't really care about type checking the args
-  std::cout << '[' << lua_tolstring(state, -2, nullptr) << "] = ";
-  dump_impl(state, 1);
-  return 0;
-}
 
 auto clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
@@ -2476,10 +2459,30 @@ auto clang(lua_State *state) noexcept -> int {
 
   return 1;
 }
+} // namespace
+
+namespace builtins {
+auto dump(lua_State *state) noexcept -> int {
+  auto const num_args = lua_gettop(state);
+  if (num_args != 2) {
+    lua_pushstring(state, std::format("Expected 2 arguments to dump function, "
+                                      "[display string][value], found [{}]",
+                                      num_args)
+                              .c_str());
+    return lua_error(state);
+  }
+  // don't really care about type checking the args
+  std::cout << '[' << lua_tolstring(state, -2, nullptr) << "] = ";
+  dump_impl(state, 1);
+  return 0;
+}
 
 auto make_builder_obj(lua_State *state,
                       std::string_view const builder_obj) noexcept -> void {
-  lua_createtable(state, 0, 2);
+  lua_createtable(state, 0, 4);
+
+  lua_pushcfunction(state, clang);
+  lua_setfield(state, -2, "clang");
 
   lua_pushcfunction(state, install_exe);
   lua_setfield(state, -2, "install_exe");

@@ -257,9 +257,6 @@ auto Type::run() const noexcept -> exit_t {
 static auto build(user_func_config const *const c) noexcept -> exit_t {
   using enum exit_t;
 
-  lua_pushcfunction(c->state, luamake::builtins::clang);
-  lua_setglobal(c->state, "Clang");
-
   auto build_lua_fn = lua_getglobal(c->state, "Build");
   // function undefined in `luamake.lua`
   if (build_lua_fn == LUA_TNIL) {
@@ -333,33 +330,33 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
 
   auto constexpr lua_f_content = std::array<string_view, 3>{
       // clang-format off
-      string_view{"function Build(builder)" NL
+      string_view{"function Build(b)" NL
                   "    local exe = {" NL
                   "        name = \"a\"," NL
                   "        root = \"src/main.cpp\"," NL
-                  "        compiler = Clang({})," NL
+                  "        compiler = b.clang({})," NL
                   "        version = \"0.0.1\"," NL
                   "        install_dir = \"build\"," NL
                   "    }" NL
                   NL
-                  "    builder.install_exe(exe)" NL
+                  "    b.install_exe(exe)" NL
                   "end" NL
                   NL
-                  "function Run(runner)" NL
+                  "function Run(r)" NL
                   "    local exe = {" NL
                   "        name = \"a\"," NL
                   "        path = \"build/a\"," NL
                   "        args = {}," NL
                   "    }" NL
                   NL
-                  "    runner.run(exe)" NL
+                  "    r.run(exe)" NL
                   "end" NL
                   NL
                   "Tests = {" NL
                   "    {" NL
-                  "        fun = function(tester)" NL
-                  "            tester.exe = \"build/a\"" NL
-                  "            tester.args = {\"This does nothing\"}" NL
+                  "        fun = function(t)" NL
+                  "            t.exe = \"build/a\"" NL
+                  "            t.args = {\"This does nothing\"}" NL
                   "        end," NL
                   "        output = {" NL
                   "            expected = \"Hello World!\\n\"," NL
@@ -367,26 +364,26 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
                   "        }," NL
                   "    }" NL
                   "}" NL},
-      string_view{"function Build(builder)" NL
+      string_view{"function Build(b)" NL
                   "    local dlib = {" NL
                   "        roots = { \"src/dyn.cpp\" }," NL
-                  "        compiler = Clang({})," NL
+                  "        compiler = b.clang({})," NL
                   "        name = \"a\"," NL
                   "        version = \"0.0.1\"," NL
                   "        install_dir = \"build\"," NL
                   "    }" NL
-                  "    builder.install_dynamic(dlib)" NL
+                  "    b.install_dynamic(dlib)" NL
                   "end" NL
                   },
-      string_view{"function Build(builder)" NL
+      string_view{"function Build(b)" NL
                   "    local slib = {" NL
                   "        roots = { \"src/static.cpp\" }," NL
-                  "        compiler = Clang({})," NL
+                  "        compiler = b.clang({})," NL
                   "        name = \"a\"," NL
                   "        version = \"0.0.1\"," NL
                   "        install_dir = \"build\"," NL
                   "    }" NL
-                  "    builder.install_static(slib)" NL
+                  "    b.install_static(slib)" NL
                   "end" NL
                   },
       // clang-format on
@@ -477,10 +474,10 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
           }),
   };
 
-  auto const [header_f_name, impl_f_name] =
+  auto &&[header_f_name, impl_f_name] =
       file_paths[static_cast<std::underlying_type_t<proj_t>>(type)];
 
-  auto const [header_string, impl_string] =
+  auto &&[header_string, impl_string] =
       hpp_cpp_f_content[static_cast<std::underlying_type_t<proj_t>>(type)];
 
   auto *header = (!header_f_name.empty())
@@ -528,6 +525,7 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
   return exit_t::ok;
 }
 
+// TODO: update this function so that the template strings are actually correct
 static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
   auto *luamake_file = fopen("./luamake.lua", "w");
   if (luamake_file == nullptr) {
@@ -537,6 +535,7 @@ static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
     return exit_t::internal_error;
   }
 
+  // TODO: update this to use std::format
   auto luamake_content = string();
   luamake_content.reserve(256);
 
@@ -622,6 +621,7 @@ static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
   return exit_t::ok;
 }
 
+// TODO: update this to clean the install_dir param of the users config
 static auto clean() noexcept -> exit_t {
   // remove everything from ./build
   // where `.` is the dir that luamake is being called from

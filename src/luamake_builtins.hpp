@@ -13,8 +13,6 @@ namespace luamake {
 namespace builtins {
 auto dump(lua_State *state) noexcept -> int;
 
-auto clang(lua_State *state) noexcept -> int;
-
 auto make_builder_obj(lua_State *state,
                       std::string_view const builder_obj) noexcept -> void;
 
