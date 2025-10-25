@@ -189,6 +189,9 @@ auto Type::run() const noexcept -> exit_t {
     return exit_t::lua_vm_error; // internal service error
   }
 
+  builtins::make_lake_obj(state);
+  lua_setglobal(state, "Lake");
+
   luaL_openlibs(state);
 
   // TODO: change this to just use the fs::exists function
@@ -279,7 +282,7 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   switch (builder) {
   case LUA_TNIL:
     lua_pop(c->state, 1);
-    luamake::builtins::make_builder_obj(c->state, BUILDER_OBJ);
+    builtins::make_builder_obj(c->state);
     break;
   case LUA_TTABLE:
     break;
@@ -666,7 +669,7 @@ static auto clean() noexcept -> exit_t {
 }
 
 static auto test(user_func_config const *const c) noexcept -> exit_t {
-  luamake::builtins::make_builder_obj(c->state, BUILDER_OBJ);
+  builtins::make_builder_obj(c->state);
   lua_pushboolean(c->state, true);
   lua_setfield(c->state, -2, TESTING_MACRO);
 
@@ -699,7 +702,7 @@ static auto run(user_func_config const *const c) noexcept -> exit_t {
   switch (runner_t) {
   case LUA_TNIL:
     lua_pop(c->state, 1);
-    luamake::builtins::make_runner_obj(c->state, RUNNER_OBJ);
+    builtins::make_runner_obj(c->state);
     break;
   case LUA_TTABLE:
     break;

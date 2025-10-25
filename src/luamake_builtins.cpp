@@ -1954,6 +1954,16 @@ struct Compiler final {
   }
 };
 
+auto new_exe(lua_State *state) noexcept -> int {
+  (void)lua_pushstring(state, "new_exe not impl");
+  return lua_error(state);
+}
+
+auto new_static(lua_State *state) noexcept -> int {
+  (void)lua_pushstring(state, "new_static not impl");
+  return lua_error(state);
+}
+
 auto install_exe(lua_State *state) noexcept -> int {
   auto num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -2088,8 +2098,8 @@ auto install_static(lua_State *state) noexcept -> int {
     if (fs::create_directories(fs::path(
             std::format("{}/{}.o", static_mod.install_dir, static_mod.name)));
         ec) {
-      std::cerr << ec.message() << '\n';
-      lua_pushstring(state, "Unable to create directory");
+      lua_pushfstring(state, "Unable to create directory\n\t[%s]",
+                      ec.message().c_str());
       return lua_error(state);
     }
     ec.clear();
@@ -2459,6 +2469,16 @@ auto clang(lua_State *state) noexcept -> int {
 
   return 1;
 }
+
+auto require(lua_State *state) noexcept -> int {
+  auto const num_args = lua_gettop(state);
+  if (num_args != 1) {
+    lua_pushstring(state, "Expected one argument to the clang function");
+    return lua_error(state);
+  }
+  (void)lua_pushstring(state, "require not impl");
+  return lua_error(state);
+}
 } // namespace
 
 namespace builtins {
@@ -2477,12 +2497,17 @@ auto dump(lua_State *state) noexcept -> int {
   return 0;
 }
 
-auto make_builder_obj(lua_State *state,
-                      std::string_view const builder_obj) noexcept -> void {
-  lua_createtable(state, 0, 4);
+auto make_builder_obj(lua_State *state) noexcept -> void {
+  lua_createtable(state, 0, 6);
 
   lua_pushcfunction(state, clang);
   lua_setfield(state, -2, "clang");
+
+  lua_pushcfunction(state, new_exe);
+  lua_setfield(state, -2, "new_exe");
+
+  lua_pushcfunction(state, new_static);
+  lua_setfield(state, -2, "new_static");
 
   lua_pushcfunction(state, install_exe);
   lua_setfield(state, -2, "install_exe");
@@ -2496,12 +2521,18 @@ auto make_builder_obj(lua_State *state,
   // TODO: add the functions install_dynamic
 }
 
-auto make_runner_obj(lua_State *state,
-                     std::string_view const runner_obj) noexcept -> void {
+auto make_runner_obj(lua_State *state) noexcept -> void {
   lua_createtable(state, 0, 1);
 
   lua_pushcfunction(state, run);
   lua_setfield(state, -2, "run");
+}
+
+auto make_lake_obj(lua_State *state) noexcept -> void {
+  lua_createtable(state, 0, 1);
+
+  lua_pushcfunction(state, require);
+  lua_setfield(state, -2, "require");
 }
 } // namespace builtins
 } // namespace luamake
