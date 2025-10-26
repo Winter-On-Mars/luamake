@@ -4,8 +4,6 @@
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
 
-// #define DEBUG
-
 extern "C" {
 #include "lua.h"
 }
@@ -552,6 +550,8 @@ struct Module final {
   friend Serializer;
   friend Deserializer;
 };
+
+inline static auto modules = vector<Module>();
 
 template <>
 inline auto Serializer::serialize<unsigned int>(unsigned int i) noexcept
