@@ -5,6 +5,7 @@
 #include "luamake_strings.hpp"
 
 extern "C" {
+#include "lauxlib.h"
 #include "lua.h"
 }
 
@@ -2473,11 +2474,48 @@ auto clang(lua_State *state) noexcept -> int {
 auto require(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
-    lua_pushstring(state, "Expected one argument to the clang function");
+    lua_pushstring(state, "Expected one argument to the require function");
     return lua_error(state);
   }
-  (void)lua_pushstring(state, "require not impl");
-  return lua_error(state);
+  if (auto const arg_t = lua_type(state, -1); arg_t != LUA_TSTRING) {
+    lua_pop(state, 1);
+    (void)lua_pushfstring(state,
+                          "Expected string to require function, found [%s]",
+                          lua_typename(arg_t));
+    return lua_error(state);
+  }
+  // TODO: check if this pops from the stack or not
+  auto fname = string(lua_tolstring(state, -1, nullptr));
+  fname += ".lua";
+
+  auto ec = std::error_code{};
+  if ((void)fs::exists(fname, ec); ec) {
+    // TODO: better error handling :)
+    // basically just copy what we do with the main.cpp run function
+    lua_pushstring(state, ec.message().c_str());
+    return lua_error(state);
+  }
+  ec.clear();
+
+  if (luaL_dofile(state, fname.c_str()) != LUA_OK) {
+    lua_pushfstring(
+        state,
+        "Unable to run the `luamake.lua` file required, in directory [%s]",
+        fname.substr(0, fname.rfind('/')).c_str());
+    return lua_error(state);
+  }
+
+  if (auto ret_t = lua_type(state, -1); ret_t != LUA_TTABLE) {
+    (void)lua_pushfstring(state, "Expecetd return type `table` found [%s]",
+                          lua_typename(ret_t));
+    return lua_error(state);
+  } else {
+#ifdef DEBUG
+    builtins::dump(state);
+#endif
+  }
+
+  return 1; // ?
 }
 } // namespace
 
