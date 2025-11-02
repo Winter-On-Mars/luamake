@@ -406,7 +406,6 @@ struct Module final {
     friend Compiler;
     friend CompilationPool;
     friend Module;
-    friend Serializer;
     friend Deserializer;
   };
 
@@ -460,7 +459,6 @@ struct Module final {
 
   friend CompilationPool;
   friend Compiler;
-  friend Serializer;
   friend Deserializer;
 };
 
