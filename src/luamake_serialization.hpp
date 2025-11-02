@@ -14,6 +14,9 @@
 #include <type_traits>
 
 namespace luamake {
+
+// NOTE: a lot of libfmt templates off the char type, idk if that's something we
+// should do as well?
 struct SerializeContext;
 namespace {
 enum class type {
@@ -145,16 +148,23 @@ template <class Context> struct BasicSerializeArg {
   Value<Context> val;
   type t;
 };
+
+template <class Context, size_t num_args>
+using arg_t =
+    std::conditional_t<true, BasicSerializeArg<Context>, Value<Context>>;
 } // namespace
 
 // all of this code architecture is stolen from fmt::format
 // [[https://github.com/fmtlib/fmt]]
 struct SerializeContext;
 
+// probably rewrite this, we don't really need a ByteSlice class, bc we don't
+// really need a no owning view, as far as i know, plus then we'd have to deal
+// with pointer invalidation
 class ByteSlice {
 public:
-  auto constexpr size() -> size_t { return m_size; }
-  auto constexpr data() -> u8 * { return m_buffer; }
+  auto constexpr size() const noexcept -> size_t { return m_size; }
+  auto constexpr data() const noexcept -> u8 * { return m_buffer; }
 
 protected:
   ByteSlice(size_t size, u8 *ptr) noexcept : m_size(size), m_buffer(ptr) {}
@@ -165,8 +175,18 @@ private:
 };
 
 template <class Allocator>
-struct BasicByteBuffer final : public ByteSlice, Allocator {
-  BasicByteBuffer() noexcept : ByteSlice(1 << 12, nullptr), cur(0) {}
+struct AbstractByteBuffer final : public ByteSlice, private Allocator {
+  using Alloc = Allocator;
+
+  AbstractByteBuffer(Allocator &&alloc_args) noexcept
+      : ByteSlice(1 << 12, nullptr), Allocator(alloc_args), cur(0) {
+    data() = allocate(size());
+
+    if (data() == nullptr)
+      throw;
+  }
+
+  constexpr ~AbstractByteBuffer() { this->deallocate(data(), size()); }
 
 private:
   // TODO: either add a func overload or another function to resize_atleast,
@@ -186,14 +206,20 @@ private:
   friend SerializeContext;
 };
 
-using ByteBuffer = BasicByteBuffer<std::allocator<u8>>;
+using ByteBuffer = AbstractByteBuffer<std::allocator<u8>>;
 
 struct SerializeContext final {
-  auto out() -> ...;
+  using char_t = char;
+
+  std::string_view fmt;
+  size_t next_arg = 0;
+
+  // TODO
+  auto out() -> char_t const *;
 };
 
-template <class T, typename Enable = void> struct _Serializer {
-  _Serializer() = delete;
+template <class T, typename Enable = void> struct Serializer {
+  Serializer() = delete;
 };
 
 template <class T>
@@ -208,27 +234,90 @@ struct NativeSerializer {
 };
 
 template <class T>
-struct _Serializer<
+struct Serializer<
     T, std::enable_if_t<type_constant<T>::value != type::custom_type, void>>
     : NativeSerializer<T> {};
 
 template <class T>
   requires Container<T>
-struct _Serializer<T, void> {
+struct Serializer<T, void> {
   auto specifier(SerializeContext &ctx) -> decltype(ctx.out()) {}
 
   auto serialize(T const &container, SerializeContext &) {}
 };
 
+// TODO: optimize this struct
 template <class Context> struct BasicSerializeArgs final {
-  size_t num_args;
+  using char_t = char;
 
-  union {
-    Value<Context> const *values;
-    BasicSerializeArg<Context> const *args;
-  };
+  size_t num_args;
+  Value<Context> const *values;
 };
 
+using SerializeArgs = BasicSerializeArg<SerializeContext>;
+
+namespace {
+struct BufferedContext final {
+  ByteBuffer &buffer;
+  SerializeArgs args;
+};
+
+template <class Context, size_t num_args> struct SerializeArgStore {
+  arg_t<Context, num_args> args[num_args];
+};
+
+template <class... T>
+using sargs = SerializeArgStore<SerializeContext, sizeof...(T)>;
+
+template <class Context> struct SerializeHandler {
+  SerializeContext serial_ctx;
+  Context ctx;
+
+  auto copy_bytes(char const *from, char const *to) noexcept -> void {
+    // TODO:
+    ctx.data();
+  }
+};
+
+template <class Context>
+auto parse_serialize_string(std::string_view const str,
+                            SerializeHandler<Context> &&handler) -> void {
+  // TODO: this is where we actually like loop over the string and do shit
+  // we'll allow the user to put in arbitrary text, we just have to make sure
+  // that it's only hex values or something like that
+  auto begin = str.begin();
+  auto end = str.end();
+  for (auto cur = begin; cur != end;) {
+    auto const ch = *cur;
+    switch (ch) {
+    case '{': {
+      handler.copy_bytes(begin, cur - 1);
+      begin = ++cur;
+    } break;
+    case '}': {
+      // TODO: we now have to pass these args to the Context, so that we can
+      // determine the serialization formatting
+    } break;
+    default:
+      ++cur;
+    }
+  }
+}
+
+template <class... T>
+auto serialize_impl(std::string_view const fmt, SerializeArgs args)
+    -> ByteBuffer {
+  auto byte_buffer = ByteBuffer(ByteBuffer::Alloc{});
+  parse_serialize_string(
+      fmt, SerializeHandler<BufferedContext>{
+               SerializeContext{fmt}, BufferedContext{byte_buffer, args}});
+  return byte_buffer;
+}
+} // namespace
+
+// TODO: change the string input from a std::string_view to a custom type that
+// does compile time checking to make sure we only have either hex input or `{}`
+// chars with values in them, then let it cast to a std::string_view or whatever
 /**
  * auto x = serialize("{}{}{}", foo.x, foo.y, foo.z);
  * with `i` as an int and `f` as a float
@@ -238,9 +327,8 @@ template <class Context> struct BasicSerializeArgs final {
  */
 template <class... T>
 auto serialize(std::string_view const fmt, T &&...args) noexcept -> ByteBuffer {
-  auto byte_buffer = ByteBuffer();
-  format_to(byte_buffer, fmt, SerializeHandler<>{});
-  return byte_buffer;
+  // try using std::forward
+  return serialize_impl(fmt, sargs<T...>{{args...}});
 }
 
 template <class SourceIter, class T> auto deserialize() -> T;
