@@ -10,7 +10,6 @@
 #include <vector>
 
 namespace luamake {
-struct Serializer;
 namespace pp {
 struct Exception {
   explicit Exception(std::string &&message) noexcept : message(message) {}
@@ -44,7 +43,6 @@ struct Interpreter final {
 private:
   std::unordered_map<std::string, Macro> macros;
   std::unordered_set<std::string> def_macros;
-  friend Serializer;
 };
 } // namespace pp
 } // namespace luamake

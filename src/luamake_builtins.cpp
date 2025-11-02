@@ -528,101 +528,6 @@ inline static auto modules = LakeModules();
 } // namespace
 
 template <>
-inline auto Serializer::serialize<vector<unsigned int>>(
-    vector<unsigned int> const &vec) noexcept -> Serializer & {
-  auto const vec_size = vec.size();
-  serialize(vec_size);
-  for (auto &&ent : vec) {
-    serialize(ent);
-  }
-  return *this;
-}
-
-template <>
-inline auto
-Serializer::serialize<vector<fs::path>>(vector<fs::path> const &vec) noexcept
-    -> Serializer & {
-  auto const vec_size = vec.size();
-  serialize(vec_size);
-  for (auto &&ent : vec) {
-    serialize<string_view>(ent.string());
-  }
-  return *this;
-}
-
-template <>
-inline auto Serializer::serialize<std::unordered_set<string>>(
-    std::unordered_set<string> const &set) noexcept -> Serializer & {
-  auto const set_size = set.size();
-  serialize(set_size);
-
-  for (auto &&ent : set) {
-    serialize<string_view>(ent);
-  }
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<std::unordered_map<string, pp::Macro>>(
-    std::unordered_map<string, pp::Macro> const &map) noexcept -> Serializer & {
-  auto const map_size = map.size();
-  serialize(map_size);
-
-  for (auto &&[key, val] : map) {
-    serialize<string_view>(key);
-    serialize<string_view>(val);
-  }
-
-  return *this;
-};
-
-template <>
-inline auto
-Serializer::serialize<Module::DepTree>(Module::DepTree const &tree) noexcept
-    -> Serializer & {
-  serialize(tree.all_paths);
-  serialize(tree.num_files);
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    serialize(
-        std::underlying_type_t<Module::DepTree::SourceFile_t>(tree.types[i]));
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    serialize(tree.files[i]);
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    serialize(tree.deps[i]);
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    serialize(tree.hashes[i]);
-  }
-  return *this;
-};
-
-// TODO
-template <>
-inline auto
-Serializer::serialize<pp::Interpreter>(pp::Interpreter const &inter) noexcept
-    -> Serializer & {
-  serialize(inter.macros);
-  serialize(inter.def_macros);
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<Module>(Module const &mod) noexcept
-    -> Serializer & {
-  return serialize(std::underlying_type_t<decltype(mod.type)>(mod.type))
-      .serialize(mod.tree)
-      .serialize(mod.roots)
-      .serialize(mod.includes)
-      .serialize(mod.linking)
-      .serialize(mod.interpreter)
-      .serialize<std::string_view>(mod.compiler)
-      .serialize(mod.name)
-      .serialize(mod.install_dir);
-}
-
-template <>
 inline auto Deserializer::deserialize<unsigned int>() noexcept -> unsigned int {
   unsigned int i = 0;
   std::memcpy(&i, buf.get() + cur, sizeof(decltype(i)));
@@ -1033,14 +938,10 @@ auto Module::serialize(fs::path const &path) const -> void {
   if (outfile == nullptr) {
     return;
   }
-  auto serializer = Serializer();
+  auto bytes = ::luamake::serialize("{}", *this);
   throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
-#if 0
-  auto &&[size, buffer] = serializer.serialize(*this).buffer();
-
-  outfile.write(buffer.get(), size, 1);
+  outfile.write(bytes.data(), bytes.size(), 1);
   outfile.flush();
-#endif
 }
 
 auto Module::deserialize(fs::path const &path)
@@ -2418,12 +2319,6 @@ auto require(lua_State *state) noexcept -> int {
   return 1; // ?
 }
 } // namespace
-
-template <>
-inline auto Serializer::serialize<std::string>(std::string const &str) noexcept
-    -> Serializer & {
-  return serialize<std::string_view>(str);
-}
 
 namespace builtins {
 auto dump(lua_State *state) noexcept -> int {
