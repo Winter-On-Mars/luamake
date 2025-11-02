@@ -1,7 +1,9 @@
 #include "luamake_builtins.hpp"
 
 #include "common.hpp"
+#include "luamake_file.hpp"
 #include "luamake_pre_ir.hpp"
+#include "luamake_serialization.hpp"
 #include "luamake_strings.hpp"
 
 extern "C" {
@@ -29,7 +31,6 @@ extern "C" {
 #include <string_view>
 #include <system_error>
 #include <thread>
-#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -61,98 +62,6 @@ namespace luamake {
 namespace {
 using std::pair, std::array, std::string, std::string_view, std::vector,
     std::unordered_map, std::unordered_set;
-
-// TODO: support vectorization, it should really speed things up when
-// serializing the DepTree
-struct Serializer final {
-  Serializer() noexcept;
-  ~Serializer() noexcept = default;
-
-  // there should be a better way of doing this, that allows for partial
-  // specialization if we use structs with an overloaded operator(), but idk how
-  // to really do that
-  template <class T>
-    requires(std::is_trivial_v<std::remove_cv_t<T>>)
-  inline auto serialize(T) noexcept -> Serializer & = delete;
-
-  // used for string_view, and other view types that are not technically
-  // trivial, but are trivially copyable
-  template <class T>
-    requires(std::is_trivially_copyable_v<std::remove_cv_t<T>> &&
-             !std::is_trivial_v<std::remove_cv_t<T>>)
-  inline auto serialize(T const) noexcept -> Serializer & = delete;
-
-  template <class T>
-    requires(!std::is_trivial_v<std::remove_cv_t<T>> &&
-             !std::is_trivially_copyable_v<std::remove_cv_t<T>>)
-  inline auto serialize(T const &) noexcept -> Serializer & = delete;
-
-  auto buffer() noexcept -> std::pair<size_t, std::unique_ptr<u8[]>> {
-    // this probably doesn't do what i want it to do :)
-    return std::make_pair(size, std::move(buf));
-  }
-
-  // this might not be right
-  Serializer(Serializer &&) = default;
-  Serializer &operator=(Serializer &&) = default;
-
-  Serializer(Serializer const &) = delete;
-  Serializer &operator=(Serializer const &) = delete;
-
-private:
-  // TODO: either add a func overload or another function to resize_atleast,
-  // that takes in a number of bytes that we need to resize the value to at
-  // least
-  auto resize() noexcept -> void;
-  size_t cap;
-  size_t size;
-  std::unique_ptr<u8[]> buf;
-};
-
-struct Deserializer final {
-  Deserializer(File &);
-  ~Deserializer() noexcept = default;
-
-  template <class T> inline auto deserialize() noexcept -> T = delete;
-
-  // this might not be right
-  Deserializer(Deserializer &&) = default;
-  Deserializer &operator=(Deserializer &&) = default;
-
-  Deserializer() noexcept = delete;
-  Deserializer(Serializer const &) = delete;
-  Deserializer &operator=(Serializer const &) = delete;
-
-private:
-  size_t size;
-  size_t cur;
-  std::unique_ptr<u8[]> buf;
-};
-
-// should be page size, this should be enough to never have to resize, but we
-// still need the resize funcs for completeness, might also be a good idea to
-// change this to be platform dependant, just on my system page size is 4kb
-Serializer::Serializer() noexcept
-    : cap(1 << 12), size(0), buf(std::make_unique<u8[]>(cap)) {}
-
-auto Serializer::resize() noexcept -> void {
-  auto const new_cap = 3 * cap / 2;
-  auto new_buf = std::make_unique<u8[]>(new_cap);
-
-  std::memcpy(new_buf.get(), buf.get(), cap);
-
-  buf = std::move(new_buf);
-  cap = new_cap;
-}
-
-Deserializer::Deserializer(File &file) : size(0), cur(0), buf(nullptr) {
-  auto &&[tmp_size, tmp_buf] = file.dump_content();
-  if (tmp_buf == nullptr) {
-    throw std::runtime_error("Unable to read file content");
-  }
-  size = tmp_size;
-  buf = std::move(tmp_buf);
-}
 
 auto constexpr lua_typename(int const type) -> char const * {
   if (type <= 0 || LUA_NUMTYPES <= type) {
@@ -235,6 +144,7 @@ auto display_string_view(string_view const str) noexcept -> void {
 struct Compiler;
 struct CompilationPool;
 
+// TODO: collapse all of these to just inherit from std::exception
 struct ModuleErr {
   constexpr ModuleErr(string &&message) noexcept : message(message) {}
   virtual ~ModuleErr() = default;
@@ -395,7 +305,10 @@ struct Module final {
   static auto deserialize(fs::path const &path)
       -> std::variant<Module, std::string>;
 
-  Module(Module &&) = default;
+  Module(Module &&) noexcept = default;
+
+  Module &operator=(Module &&that) noexcept = default;
+
   ~Module() noexcept = default;
 
   Module(Module const &) = delete;
@@ -505,9 +418,6 @@ struct Module final {
   vector<fs::path> roots;
   vector<fs::path> includes;
   vector<fs::path> linking;
-  std::unordered_map<string, pp::Macro>
-      macros; // these are all macros with values
-  std::unordered_set<string> def_macros;
   pp::Interpreter interpreter;
   // TODO: switch these over to either all be std::string, or have them be
   // factored out into a OwnedString + StringViews structure
@@ -516,13 +426,12 @@ struct Module final {
   // deserialized, they cannot be interned, so we're going to leak this memory
   // :)
   std::string compiler;
-  char const *name;
-  char const *install_dir;
+  std::string_view name;
+  std::string_view install_dir;
 
   Module() noexcept
-      : type(), tree(), roots(), includes(), linking(), macros(), def_macros(),
-        interpreter(macros, def_macros), compiler(), name(nullptr),
-        install_dir(nullptr) {}
+      : type(), tree(), roots(), includes(), linking(), interpreter({}, {}),
+        compiler(), name(), install_dir() {}
 
 #ifdef DEBUG
   auto display(std::ostream &) const noexcept -> void;
@@ -535,7 +444,10 @@ struct Module final {
   /**
    * @throws CAPI
    */
-  auto append_predefined_macros(string_view const) -> void;
+  [[nodiscard]]
+  auto append_predefined_macros(string_view const)
+      -> std::pair<std::unordered_map<std::string, pp::Macro>,
+                   std::unordered_set<std::string>>;
   /**
    * @throws DepTreeErr
    */
@@ -552,129 +464,79 @@ struct Module final {
   friend Deserializer;
 };
 
-inline static auto modules = vector<Module>();
+struct LakeModules final {
+  LakeModules() noexcept
+      : cap(8), size(0), is_compileds(std::make_unique<bool[]>(cap)),
+        compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
+        luamake_paths(std::make_unique<std::string[]>(cap)),
+        mods(std::make_unique<Module[]>(cap)) {}
 
-template <>
-inline auto Serializer::serialize<unsigned int>(unsigned int i) noexcept
-    -> Serializer & {
-  if (size >= cap) {
-    resize();
-  }
-  std::memcpy(buf.get() + size, &i, sizeof(decltype(i)));
-  size += sizeof(decltype(i));
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<Module::Module_t>(Module::Module_t t) noexcept
-    -> Serializer & {
-  if (size >= cap) {
-    resize();
-  }
-  std::memcpy(buf.get() + size, &t, sizeof(decltype(t)));
-  size += sizeof(decltype(t));
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<Module::DepTree::SourceFile_t>(
-    Module::DepTree::SourceFile_t t) noexcept -> Serializer & {
-  if (size >= cap) {
-    resize();
-  }
-  std::memcpy(buf.get() + size, &t, sizeof(decltype(t)));
-  size += sizeof(decltype(t));
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<StringViews>(StringViews str) noexcept
-    -> Serializer & {
-  if (size >= cap) {
-    resize();
-  }
-  std::memcpy(buf.get() + size, &str, sizeof(decltype(str)));
-  size += sizeof(decltype(str));
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<size_t>(size_t x) noexcept -> Serializer & {
-  if (size + sizeof(decltype(x)) >= cap) {
-    resize();
-  }
-  std::memcpy(buf.get() + size, &x, sizeof(decltype(x)));
-  size += sizeof(decltype(x));
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<char const *>(char const *c_str) noexcept
-    -> Serializer & {
-  auto const str_len = strlen(c_str);
-  serialize(str_len);
-
-  if (size + str_len >= cap) {
-    resize();
+  template <class... Args> auto emplace_back(Args... args) -> lua_Integer {
+    if (size == cap) {
+      resize();
+    }
+    auto mod = Module(std::forward<Args>(args)...);
+    auto const ret = static_cast<lua_Integer>(size);
+    mods[size] = std::move(mod);
+    ++size;
+    return ret;
   }
 
-  std::memcpy(buf.get() + size, c_str, str_len);
-  size += str_len;
-  return *this;
+private:
+  auto resize() -> void;
+#if 0
+  struct M final {
+    bool is_compiled;
+    vector<string> compiled_files;
+    string luamake_path;
+    Module mod;
+  };
+  // c++26 reflections will help so much
+  ::multi_array_list<^^M>();
+#endif
+
+  size_t cap;
+  size_t size;
+  std::unique_ptr<bool[]> is_compileds;
+  std::unique_ptr<std::vector<std::string>[]> compiled_files;
+  std::unique_ptr<std::string[]> luamake_paths;
+  std::unique_ptr<Module[]> mods;
 };
 
-template <>
-inline auto Serializer::serialize<std::string>(std::string const &str) noexcept
-    -> Serializer & {
-  auto const str_size = str.size();
-  serialize(str_size);
+auto LakeModules::resize() -> void {
+  auto const n_cap = 3 * cap / 2;
+  auto n_is_compileds = std::make_unique<bool[]>(n_cap);
+  auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
+  auto n_luamake_paths = std::make_unique<std::string[]>(n_cap);
+  auto n_mods = std::make_unique<Module[]>(n_cap);
 
-  if (size + str_size >= cap) {
-    resize();
+  std::memcpy(n_is_compileds.get(), is_compileds.get(), sizeof(bool) * cap);
+
+  for (auto i = size_t{}; i < cap; ++i)
+    n_compiled_files[i] = std::move(compiled_files[i]);
+  for (auto i = size_t{}; i < cap; ++i)
+    n_luamake_paths[i] = std::move(luamake_paths[i]);
+  for (auto i = size_t{}; i < cap; ++i)
+    n_mods[i] = std::move(mods[i]);
+
+  is_compileds = std::move(n_is_compileds);
+  compiled_files = std::move(n_compiled_files);
+  luamake_paths = std::move(n_luamake_paths);
+  mods = std::move(n_mods);
+}
+inline static auto modules = LakeModules();
+} // namespace
+
+template <>
+inline auto Serializer::serialize<vector<unsigned int>>(
+    vector<unsigned int> const &vec) noexcept -> Serializer & {
+  auto const vec_size = vec.size();
+  serialize(vec_size);
+  for (auto &&ent : vec) {
+    serialize(ent);
   }
-  std::memcpy(buf.get() + size, str.c_str(), str_size);
-  size += str_size;
-
   return *this;
-};
-
-template <>
-inline auto Serializer::serialize<OwnedString>(OwnedString const &str) noexcept
-    -> Serializer & {
-  auto const str_size = str.size;
-  serialize(str_size);
-
-  if (size + str_size >= cap) {
-    resize();
-  }
-  std::memcpy(buf.get() + size, str.buffer, str_size);
-  size += str_size;
-
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<string_view>(string_view const str) noexcept
-    -> Serializer & {
-  auto const str_size = str.size();
-  serialize(str_size);
-
-  if (size + str_size >= cap) {
-    resize();
-  }
-
-  std::memcpy(buf.get() + size, str.data(), str_size);
-  size += str_size;
-
-  return *this;
-};
-
-template <>
-inline auto Serializer::serialize<fs::path>(fs::path const &path) noexcept
-    -> Serializer & {
-  auto const str = path.string();
-  return serialize(str);
-};
+}
 
 template <>
 inline auto
@@ -682,26 +544,11 @@ Serializer::serialize<vector<fs::path>>(vector<fs::path> const &vec) noexcept
     -> Serializer & {
   auto const vec_size = vec.size();
   serialize(vec_size);
-
   for (auto &&ent : vec) {
-    serialize(ent);
+    serialize<string_view>(ent.string());
   }
-
   return *this;
-};
-
-template <>
-inline auto Serializer::serialize<vector<unsigned int>>(
-    vector<unsigned int> const &vec) noexcept -> Serializer & {
-  auto const vec_size = vec.size();
-  serialize(vec_size);
-
-  for (auto &&ent : vec) {
-    serialize(ent);
-  }
-
-  return *this;
-};
+}
 
 template <>
 inline auto Serializer::serialize<std::unordered_set<string>>(
@@ -710,7 +557,7 @@ inline auto Serializer::serialize<std::unordered_set<string>>(
   serialize(set_size);
 
   for (auto &&ent : set) {
-    serialize(ent);
+    serialize<string_view>(ent);
   }
   return *this;
 };
@@ -722,8 +569,8 @@ inline auto Serializer::serialize<std::unordered_map<string, pp::Macro>>(
   serialize(map_size);
 
   for (auto &&[key, val] : map) {
-    serialize(key);
-    serialize(val);
+    serialize<string_view>(key);
+    serialize<string_view>(val);
   }
 
   return *this;
@@ -736,7 +583,8 @@ Serializer::serialize<Module::DepTree>(Module::DepTree const &tree) noexcept
   serialize(tree.all_paths);
   serialize(tree.num_files);
   for (auto i = size_t{}; i < tree.num_files; ++i) {
-    serialize(tree.types[i]);
+    serialize(
+        std::underlying_type_t<Module::DepTree::SourceFile_t>(tree.types[i]));
   }
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     serialize(tree.files[i]);
@@ -750,17 +598,26 @@ Serializer::serialize<Module::DepTree>(Module::DepTree const &tree) noexcept
   return *this;
 };
 
+// TODO
+template <>
+inline auto
+Serializer::serialize<pp::Interpreter>(pp::Interpreter const &inter) noexcept
+    -> Serializer & {
+  serialize(inter.macros);
+  serialize(inter.def_macros);
+  return *this;
+};
+
 template <>
 inline auto Serializer::serialize<Module>(Module const &mod) noexcept
     -> Serializer & {
-  return serialize(mod.type)
+  return serialize(std::underlying_type_t<decltype(mod.type)>(mod.type))
       .serialize(mod.tree)
       .serialize(mod.roots)
       .serialize(mod.includes)
       .serialize(mod.linking)
-      .serialize(mod.macros)
-      .serialize(mod.def_macros)
-      .serialize(mod.compiler)
+      .serialize(mod.interpreter)
+      .serialize<std::string_view>(mod.compiler)
       .serialize(mod.name)
       .serialize(mod.install_dir);
 }
@@ -933,14 +790,13 @@ template <> inline auto Deserializer::deserialize<Module>() noexcept -> Module {
   mod.roots = deserialize<decltype(Module::roots)>();
   mod.includes = deserialize<decltype(Module::includes)>();
   mod.linking = deserialize<decltype(Module::linking)>();
-  mod.macros = deserialize<decltype(Module::macros)>();
-  mod.def_macros = deserialize<decltype(Module::def_macros)>();
   mod.compiler = deserialize<decltype(Module::compiler)>();
   mod.name = deserialize<decltype(Module::name)>();
   mod.install_dir = deserialize<decltype(Module::install_dir)>();
   return mod;
 }
 
+namespace {
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
   files = std::make_unique<StringViews[]>(num_files);
@@ -1178,10 +1034,13 @@ auto Module::serialize(fs::path const &path) const -> void {
     return;
   }
   auto serializer = Serializer();
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+#if 0
   auto &&[size, buffer] = serializer.serialize(*this).buffer();
 
   outfile.write(buffer.get(), size, 1);
   outfile.flush();
+#endif
 }
 
 auto Module::deserialize(fs::path const &path)
@@ -1192,7 +1051,8 @@ auto Module::deserialize(fs::path const &path)
   }
 
   auto deserializer = Deserializer(file);
-  return deserializer.deserialize<Module>();
+  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+  // return deserializer.deserialize<Module>();
 }
 
 auto Module::operator==(Module const &that) const noexcept -> bool {
@@ -1230,19 +1090,13 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
   }
 
   // rest of the class
-  if (macros != that.macros)
-    return false;
-
-  if (def_macros != that.def_macros)
-    return false;
-
   if (compiler != that.compiler)
     return false;
 
-  if (strcmp(name, that.name) != 0)
+  if (name != that.name)
     return false;
 
-  if (strcmp(install_dir, that.install_dir) != 0)
+  if (install_dir != that.install_dir)
     return false;
 
   return true;
@@ -1306,6 +1160,7 @@ auto Module::display(std::ostream &out) const noexcept -> void {
   std::for_each(linking.begin(), linking.end(), _display);
   out << "]\n";
 
+#if 0
   out << "macros = {\n";
   for (auto &&[name, value] : macros) {
     out << name << "=" << value << ",\n";
@@ -1318,6 +1173,7 @@ auto Module::display(std::ostream &out) const noexcept -> void {
     out << name << ",\n";
   }
   out << "}\n";
+#endif
 
   out << "compiler = " << compiler << '\n';
   out << "name = " << name << '\n';
@@ -1421,7 +1277,9 @@ auto Module::append_include_paths(string_view const compiler) -> void {
   }
 }
 
-auto Module::append_predefined_macros(string_view const compiler) -> void {
+auto Module::append_predefined_macros(string_view const compiler)
+    -> std::pair<std::unordered_map<std::string, pp::Macro>,
+                 std::unordered_set<std::string>> {
   auto _pipes = array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
     throw CAPI(strerror(errno));
@@ -1452,6 +1310,9 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
     }
   } break;
   default: { // in parent proc
+    auto macros = std::unordered_map<std::string, pp::Macro>();
+    auto def_macros = std::unordered_set<std::string>();
+
     close(write_pipe);
     auto *read_me =
         fdopen(dup(read_pipe), "r"); // idk saw something on stackoverflow
@@ -1530,15 +1391,15 @@ auto Module::append_predefined_macros(string_view const compiler) -> void {
     close(read_pipe);
 
     // reached EOF
-
+    return std::make_pair(macros, def_macros);
   } break;
   }
+  unreachable();
 }
 
 Module::Module(Module_t &&type, lua_State *state)
-    : type(type), tree(), roots(), includes(), linking(), macros(),
-      def_macros(), interpreter(macros, def_macros), compiler(), name(nullptr),
-      install_dir(nullptr) {
+    : type(), tree(), roots(), includes(), linking(), interpreter({}, {}),
+      compiler(), name(), install_dir() {
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING:
     name = lua_tolstring(state, -1, nullptr);
@@ -1644,7 +1505,7 @@ Module::Module(Module_t &&type, lua_State *state)
     throw UnexpectedType("include", LUA_TTABLE, include_t);
   }
   append_include_paths(compiler);
-  append_predefined_macros(compiler);
+  auto &&[macros, def_macros] = append_predefined_macros(compiler);
   switch (auto const linking_t = lua_getfield(state, -6, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
@@ -1701,6 +1562,7 @@ Module::Module(Module_t &&type, lua_State *state)
   // std::cout << "---displaying---\n";
   // display(std::cout);
 #endif
+  interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
 }
 
 auto Module::gen_dep_tree() -> void {
@@ -1961,8 +1823,36 @@ auto new_exe(lua_State *state) noexcept -> int {
 }
 
 auto new_static(lua_State *state) noexcept -> int {
-  (void)lua_pushstring(state, "new_static not impl");
-  return lua_error(state);
+  auto const num_args = lua_gettop(state);
+  if (num_args != 1) {
+    (void)lua_pushstring(state,
+                         "Expected one argument to the `new_static` function.");
+    return lua_error(state);
+  }
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `new_static` to be of type "
+                    "table, found [%s]",
+                    lua_typename(ret_t));
+  try {
+    // TODO: put the call to gen_dep_tree in the module constructor
+    lua_pushinteger(state, modules.emplace_back(Module::STATIC, state));
+    return 1;
+  } catch (ModuleErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (DepTreeErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (pp::Exception const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
 }
 
 auto install_exe(lua_State *state) noexcept -> int {
@@ -2055,10 +1945,19 @@ auto install_exe(lua_State *state) noexcept -> int {
       lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
       return lua_error(state);
     } else {
+#if 0
       // only serialize if everything went right, need to figure out a better
       // way to do this, so that we only serialize what was actually
       // successfully compiled for incrimental builds and stuff
-      main_mod.serialize(path);
+      auto serializer = Serializer();
+      serializer.serialize(main_mod);
+
+      auto &&[size, buf] = main_mod.serialize(path).buffer();
+
+      auto cache = File(path);
+
+      cache.write(buf.get(), size);
+#endif
 
       return 0;
     }
@@ -2449,7 +2348,8 @@ auto clang(lua_State *state) noexcept -> int {
       lua_pushstring(
           state,
           "While *yes* key's into a table can have any type, please refrain "
-          "from using anything other than a number (i.e. passing an array), or "
+          "from using anything other than a number (i.e. passing an array), "
+          "or "
           "a string for a key+value pair item, or a combination of the two");
       return lua_error(state);
     }
@@ -2518,6 +2418,12 @@ auto require(lua_State *state) noexcept -> int {
   return 1; // ?
 }
 } // namespace
+
+template <>
+inline auto Serializer::serialize<std::string>(std::string const &str) noexcept
+    -> Serializer & {
+  return serialize<std::string_view>(str);
+}
 
 namespace builtins {
 auto dump(lua_State *state) noexcept -> int {

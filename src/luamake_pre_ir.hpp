@@ -10,6 +10,7 @@
 #include <vector>
 
 namespace luamake {
+struct Serializer;
 namespace pp {
 struct Exception {
   explicit Exception(std::string &&message) noexcept : message(message) {}
@@ -23,10 +24,17 @@ struct Exception {
 using Macro = std::string;
 
 struct Interpreter final {
-  constexpr Interpreter(std::unordered_map<std::string, Macro> &macros,
-                        std::unordered_set<std::string> &def_macros)
+  Interpreter(std::unordered_map<std::string, Macro> &&macros,
+              std::unordered_set<std::string> &&def_macros) noexcept
       : macros(macros), def_macros(def_macros) {}
 
+  Interpreter() noexcept = default;
+  Interpreter(Interpreter &&) noexcept = default;
+  Interpreter &operator=(Interpreter &&) noexcept = default;
+  ~Interpreter() noexcept = default;
+
+  Interpreter(Interpreter const &) noexcept = delete;
+  Interpreter &operator=(Interpreter const &) noexcept = delete;
   /**
    * @throws Exception
    */
@@ -34,8 +42,9 @@ struct Interpreter final {
   auto interpret(FixedString const &) -> std::vector<std::filesystem::path>;
 
 private:
-  std::unordered_map<std::string, Macro> &macros;
-  std::unordered_set<std::string> &def_macros;
+  std::unordered_map<std::string, Macro> macros;
+  std::unordered_set<std::string> def_macros;
+  friend Serializer;
 };
 } // namespace pp
 } // namespace luamake
