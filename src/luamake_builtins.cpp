@@ -3,7 +3,6 @@
 #include "common.hpp"
 #include "luamake_file.hpp"
 #include "luamake_pre_ir.hpp"
-#include "luamake_serialization.hpp"
 #include "luamake_strings.hpp"
 
 extern "C" {
@@ -406,7 +405,6 @@ struct Module final {
     friend Compiler;
     friend CompilationPool;
     friend Module;
-    friend Deserializer;
   };
 
   Module_t type;
@@ -459,7 +457,6 @@ struct Module final {
 
   friend CompilationPool;
   friend Compiler;
-  friend Deserializer;
 };
 
 struct LakeModules final {
@@ -524,180 +521,6 @@ auto LakeModules::resize() -> void {
 }
 inline static auto modules = LakeModules();
 } // namespace
-
-template <>
-inline auto Deserializer::deserialize<unsigned int>() noexcept -> unsigned int {
-  unsigned int i = 0;
-  std::memcpy(&i, buf.get() + cur, sizeof(decltype(i)));
-  cur += sizeof(decltype(i));
-  return i;
-};
-
-template <>
-inline auto Deserializer::deserialize<Module::Module_t>() noexcept
-    -> Module::Module_t {
-  auto mod = Module::Module_t{};
-  std::memcpy(&mod, buf.get() + cur, sizeof(decltype(mod)));
-  cur += sizeof(decltype(mod));
-  return mod;
-};
-
-template <>
-inline auto Deserializer::deserialize<Module::DepTree::SourceFile_t>() noexcept
-    -> Module::DepTree::SourceFile_t {
-  auto sf_t = Module::DepTree::SourceFile_t{};
-  std::memcpy(&sf_t, buf.get() + cur, sizeof(decltype(sf_t)));
-  cur += sizeof(decltype(sf_t));
-  return sf_t;
-};
-
-template <>
-inline auto Deserializer::deserialize<StringViews>() noexcept -> StringViews {
-  auto sv = StringViews{};
-  std::memcpy(&sv, buf.get() + cur, sizeof(decltype(sv)));
-  cur += sizeof(decltype(sv));
-  return sv;
-};
-
-template <> inline auto Deserializer::deserialize<size_t>() noexcept -> size_t {
-  auto x = size_t{};
-  std::memcpy(&x, buf.get() + cur, sizeof(decltype(x)));
-  cur += sizeof(decltype(x));
-  return x;
-};
-
-template <>
-inline auto Deserializer::deserialize<char const *>() noexcept -> char const * {
-  auto const str_len = deserialize<size_t>();
-  auto *str = (char const *)malloc(str_len);
-  std::memcpy((void *)str, buf.get() + cur, str_len);
-  cur += str_len;
-  return str;
-};
-
-template <>
-inline auto Deserializer::deserialize<std::string>() noexcept -> std::string {
-  auto const str_len = deserialize<size_t>();
-  auto str = std::string();
-  str.resize(str_len);
-  // this is technically dangerous, but bc we string.resize it *should* be fine
-  std::memcpy((void *)str.c_str(), buf.get() + cur, str_len);
-  cur += str_len;
-  return str;
-};
-
-template <>
-inline auto Deserializer::deserialize<OwnedString>() noexcept -> OwnedString {
-  auto const str_len = deserialize<size_t>();
-  auto str = OwnedString();
-  str.buffer = (char *)malloc(str_len);
-  std::memcpy(str.buffer, buf.get() + cur, str_len);
-  str.size = str.capacity = str_len;
-  cur += str_len;
-  return str;
-};
-
-// TODO: this function will also leak memory like the char const * one :)
-template <>
-inline auto Deserializer::deserialize<string_view>() noexcept -> string_view {
-  // LEAK
-  auto *tmp_str = deserialize<char const *>();
-  auto str = string_view(tmp_str);
-
-  return str;
-};
-
-template <>
-inline auto Deserializer::deserialize<fs::path>() noexcept -> fs::path {
-  auto str = deserialize<std::string>();
-  return fs::path(str);
-};
-
-template <>
-inline auto Deserializer::deserialize<vector<fs::path>>() noexcept
-    -> vector<fs::path> {
-  auto const vec_size = deserialize<size_t>();
-  auto res = vector<fs::path>(vec_size);
-  for (auto i = size_t{}; i < vec_size; ++i) {
-    res[i] = deserialize<fs::path>();
-  }
-  return res;
-};
-
-template <>
-inline auto Deserializer::deserialize<vector<unsigned int>>() noexcept
-    -> vector<unsigned int> {
-  auto const vec_size = deserialize<size_t>();
-  auto res = vector<unsigned int>(vec_size);
-  for (auto i = size_t{}; i < vec_size; ++i) {
-    res[i] = deserialize<unsigned int>();
-  }
-  return res;
-};
-
-template <>
-inline auto Deserializer::deserialize<std::unordered_set<string>>() noexcept
-    -> std::unordered_set<string> {
-  auto const set_size = deserialize<size_t>();
-  auto set = std::unordered_set<string>();
-  set.reserve(set_size);
-  for (auto i = size_t{}; i < set_size; ++i) {
-    set.insert(deserialize<string>());
-  }
-  return set;
-};
-
-template <>
-inline auto
-Deserializer::deserialize<std::unordered_map<string, pp::Macro>>() noexcept
-    -> std::unordered_map<string, pp::Macro> {
-  auto const map_size = deserialize<size_t>();
-  auto map = std::unordered_map<string, pp::Macro>();
-
-  for (auto i = size_t{}; i < map_size; ++i) {
-    auto key = deserialize<string>();
-    auto val = deserialize<string>();
-    map[key] = val;
-  }
-  return map;
-};
-
-template <>
-inline auto Deserializer::deserialize<Module::DepTree>() noexcept
-    -> Module::DepTree {
-  auto tree = Module::DepTree();
-  tree.all_paths = deserialize<OwnedString>();
-  tree.num_files = deserialize<size_t>();
-
-  tree.reserve(tree.num_files);
-
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    tree.types[i] = deserialize<Module::DepTree::SourceFile_t>();
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    tree.files[i] = deserialize<StringViews>();
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    tree.deps[i] = deserialize<vector<unsigned int>>();
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    tree.hashes[i] = deserialize<size_t>();
-  }
-  return tree;
-};
-
-template <> inline auto Deserializer::deserialize<Module>() noexcept -> Module {
-  auto mod = Module();
-  mod.type = deserialize<decltype(Module::type)>();
-  mod.tree = deserialize<decltype(Module::tree)>();
-  mod.roots = deserialize<decltype(Module::roots)>();
-  mod.includes = deserialize<decltype(Module::includes)>();
-  mod.linking = deserialize<decltype(Module::linking)>();
-  mod.compiler = deserialize<decltype(Module::compiler)>();
-  mod.name = deserialize<decltype(Module::name)>();
-  mod.install_dir = deserialize<decltype(Module::install_dir)>();
-  return mod;
-}
 
 namespace {
 Module::DepTree::DepTree(size_t const num_files) {
@@ -936,10 +759,7 @@ auto Module::serialize(fs::path const &path) const -> void {
   if (outfile == nullptr) {
     return;
   }
-  auto bytes = ::luamake::serialize("{}", *this);
   throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
-  outfile.write(bytes.data(), bytes.size(), 1);
-  outfile.flush();
 }
 
 auto Module::deserialize(fs::path const &path)
@@ -948,10 +768,7 @@ auto Module::deserialize(fs::path const &path)
   if (file == nullptr) {
     return std::format("unable to open serialization file [{}]", path.c_str());
   }
-
-  auto deserializer = Deserializer(file);
   throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
-  // return deserializer.deserialize<Module>();
 }
 
 auto Module::operator==(Module const &that) const noexcept -> bool {
