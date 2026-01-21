@@ -42,15 +42,30 @@ extern "C" {
 #include <unistd.h>
 
 #define LUA_ASSERT(L, A, B, ERROR)                                             \
-  if ((A) != (B)) {                                                            \
-    lua_pushstring((L), (ERROR));                                              \
-    return lua_error((L));                                                     \
+  {                                                                            \
+    if ((A) != (B)) {                                                          \
+      lua_pushstring((L), (ERROR));                                            \
+      return lua_error((L));                                                   \
+    }                                                                          \
   }
 
 #define LUA_ASSERT_FORMAT(L, name, A, B, fmt, ...)                             \
-  if (auto const name = (A); (name) != (B)) {                                  \
-    lua_pushfstring((L), fmt, __VA_ARGS__);                                    \
-    return lua_error((L));                                                     \
+  {                                                                            \
+    if (auto const name = (A); (name) != (B)) {                                \
+      lua_pushfstring((L), fmt, __VA_ARGS__);                                  \
+      return lua_error((L));                                                   \
+    }                                                                          \
+  }
+
+#define LUA_EXPECTED_ARGUMENTS(L, expected_args, fn_name)                      \
+  {                                                                            \
+    auto const num_args = lua_gettop(L);                                       \
+    if (num_args != expected_args) {                                           \
+      lua_pushfstring(                                                         \
+          L, "Expected " #expected_args " arguments to " #fn_name ", got %d.", \
+          num_args);                                                           \
+      return lua_error(L);                                                     \
+    }                                                                          \
   }
 
 namespace fs = std::filesystem;
@@ -460,12 +475,12 @@ struct Module final {
 };
 
 struct LakeModules final {
-  LakeModules() noexcept
-      : cap(8), size(0), is_compileds(std::make_unique<bool[]>(cap)),
-        compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
-        luamake_paths(std::make_unique<std::string[]>(cap)),
-        mods(std::make_unique<Module[]>(cap)) {}
+  LakeModules() noexcept;
 
+  auto new_module(fs::path &&) noexcept -> lua_Integer;
+  auto get_module(lua_Integer) const noexcept -> fs::path;
+
+  // TODO: rename this function, also rewrite it :)
   template <class... Args> auto emplace_back(Args... args) -> lua_Integer {
     if (size == cap) {
       resize();
@@ -473,36 +488,61 @@ struct LakeModules final {
     auto mod = Module(std::forward<Args>(args)...);
     auto const ret = static_cast<lua_Integer>(size);
     mods[size] = std::move(mod);
+    mods[size].gen_dep_tree();
     ++size;
     return ret;
   }
 
+  // returns -1 on failure
+  auto contains(std::string_view const module_name) const noexcept -> int;
+
 private:
   auto resize() -> void;
-#if 0
-  struct M final {
-    bool is_compiled;
-    vector<string> compiled_files;
-    string luamake_path;
-    Module mod;
-  };
-  // c++26 reflections will help so much
-  ::multi_array_list<^^M>();
-#endif
 
+  // maybe switch to these being ints, it's not "correct" to do, but it would
+  // make things faster
   size_t cap;
   size_t size;
   std::unique_ptr<bool[]> is_compileds;
-  std::unique_ptr<std::vector<std::string>[]> compiled_files;
-  std::unique_ptr<std::string[]> luamake_paths;
+  std::unique_ptr<std::vector<std::string>[]> compiled_files; // ?
+  std::unique_ptr<fs::path[]> luamake_paths;
   std::unique_ptr<Module[]> mods;
 };
+
+LakeModules::LakeModules() noexcept
+    : cap(4), size(0), is_compileds(std::make_unique<bool[]>(cap)),
+      compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
+      luamake_paths(std::make_unique<fs::path[]>(cap)),
+      mods(std::make_unique<Module[]>(cap)) {}
+
+auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
+  if (size == cap)
+    resize();
+  luamake_paths[size] = std::move(path);
+  auto const ret_idx = static_cast<lua_Integer>(size);
+  ++size;
+  return ret_idx;
+}
+
+auto LakeModules::get_module(lua_Integer idx) const noexcept -> fs::path {
+  return luamake_paths[static_cast<size_t>(idx)];
+}
+
+auto LakeModules::contains(std::string_view const module_name) const noexcept
+    -> int {
+  for (auto i = size_t{0}; i < size; ++i) {
+    if (luamake_paths[i] == module_name) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
 
 auto LakeModules::resize() -> void {
   auto const n_cap = 3 * cap / 2;
   auto n_is_compileds = std::make_unique<bool[]>(n_cap);
   auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
-  auto n_luamake_paths = std::make_unique<std::string[]>(n_cap);
+  auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
   auto n_mods = std::make_unique<Module[]>(n_cap);
 
   std::memcpy(n_is_compileds.get(), is_compileds.get(), sizeof(bool) * cap);
@@ -519,6 +559,7 @@ auto LakeModules::resize() -> void {
   luamake_paths = std::move(n_luamake_paths);
   mods = std::move(n_mods);
 }
+
 inline static auto modules = LakeModules();
 } // namespace
 
@@ -1113,6 +1154,10 @@ auto Module::append_predefined_macros(string_view const compiler)
   unreachable();
 }
 
+// TODO: add a field for the path to the luamake.lua file so that everything in
+// the luamake.lua file can be relative to that, while the luamake.lua file is
+// an absolute path. this also means we'll have to redo how we store the files
+// in the dep tree :)
 Module::Module(Module_t &&type, lua_State *state)
     : type(), tree(), roots(), includes(), linking(), interpreter({}, {}),
       compiler(), name(), install_dir() {
@@ -1550,7 +1595,6 @@ auto new_static(lua_State *state) noexcept -> int {
                     "table, found [%s]",
                     lua_typename(ret_t));
   try {
-    // TODO: put the call to gen_dep_tree in the module constructor
     lua_pushinteger(state, modules.emplace_back(Module::STATIC, state));
     return 1;
   } catch (ModuleErr const &e) {
@@ -1572,7 +1616,7 @@ auto new_static(lua_State *state) noexcept -> int {
 }
 
 auto install_exe(lua_State *state) noexcept -> int {
-  auto num_args = lua_gettop(state);
+  auto const num_args = lua_gettop(state);
   if (num_args != 1) {
     lua_pushstring(state, "Too many arguments.");
     return lua_error(state);
@@ -1906,6 +1950,80 @@ auto link_static(lua_State *state) noexcept -> int {
   return 0;
 }
 
+auto build_dep(lua_State *state) noexcept -> int {
+  auto const num_args = lua_gettop(state);
+  if (num_args != 2) {
+    lua_pushstring(
+        state, "Incorrect number of arguments passed to build_dep function.");
+    return lua_error(state);
+  }
+
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected type of argument to function "
+                    "`build_dep` to be number, found [%s]",
+                    lua_typename(ret_t));
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected type of argument to function "
+                    "`build_dep` to be table, found [%s]",
+                    lua_typename(ret_t));
+
+  try {
+    auto const luamake_path = modules.get_module(lua_tointeger(state, -1));
+    std::cout << "luamake_path = [" << luamake_path.c_str() << "]\n";
+    std::cout.flush();
+
+    if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
+      (void)lua_pushfstring(
+          state,
+          "Unable to run the `luamake.lua` file required, in directory [%s]",
+          luamake_path.parent_path().c_str());
+      return lua_error(state);
+    }
+
+    switch (auto t = lua_type(state, -1)) {
+    case LUA_TTABLE: {
+      if (auto const build_t = lua_getfield(state, -1, "Build");
+          build_t != LUA_TFUNCTION) {
+        (void)lua_pushstring(state, "Expected `Build` to have type function "
+                                    "when returned from script file in table");
+        return lua_error(state);
+      }
+
+      // this seems wasteful, but idk how to get the b that is calling this
+      // function on top of the stack
+      builtins::make_builder_obj(state);
+
+      lua_pushstring(state, luamake_path.parent_path().c_str());
+      lua_seti(state, -2, lua_Integer{1});
+
+      if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
+        return lua_error(state);
+      }
+
+    } break;
+    case LUA_TFUNCTION: {
+      // TODO: assume that the function is the Build function
+    } break;
+    default:
+      (void)lua_pushfstring(state,
+                            "Unexpected return type from function, found %s, "
+                            "expected either table or function",
+                            lua_typename(t));
+      return lua_error(state);
+    }
+
+  } catch (std::exception const &e) {
+    lua_pushfstring(state, "%s", e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error has occured");
+    return lua_error(state);
+  }
+
+  lua_pushstring(state, "build_dep not impl");
+  return lua_error(state);
+}
+
 auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
   auto const indents = string(depth, '\t');
   switch (auto const type = lua_type(state, -1)) {
@@ -1946,12 +2064,13 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << indents << '}';
   } break;
   default:
-    std::cout << "Unable to display type of " << lua_typename(type);
+    std::cout << lua_typename(type);
     break;
   }
   std::cout << '\n';
 }
 
+// TODO: switch this to use userdata, which should make things faster to process
 auto clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -2088,50 +2207,45 @@ auto clang(lua_State *state) noexcept -> int {
 }
 
 auto require(lua_State *state) noexcept -> int {
-  auto const num_args = lua_gettop(state);
-  if (num_args != 1) {
-    lua_pushstring(state, "Expected one argument to the require function");
-    return lua_error(state);
-  }
-  if (auto const arg_t = lua_type(state, -1); arg_t != LUA_TSTRING) {
-    lua_pop(state, 1);
-    (void)lua_pushfstring(state,
-                          "Expected string to require function, found [%s]",
-                          lua_typename(arg_t));
-    return lua_error(state);
-  }
-  // TODO: check if this pops from the stack or not
-  auto fname = string(lua_tolstring(state, -1, nullptr));
-  fname += ".lua";
+  // because this is a function on an api boundary, we have to make sure that no
+  // exceptions leak from it
+  try {
+    LUA_EXPECTED_ARGUMENTS(state, 1, require)
+    if (auto const arg_t = lua_type(state, -1); arg_t != LUA_TSTRING) {
+      lua_pop(state, 1);
+      (void)lua_pushfstring(state,
+                            "Expected string to require function, found [%s]",
+                            lua_typename(arg_t));
+      return lua_error(state);
+    }
 
-  auto ec = std::error_code{};
-  if ((void)fs::exists(fname, ec); ec) {
-    // TODO: better error handling :)
-    // basically just copy what we do with the main.cpp run function
-    lua_pushstring(state, ec.message().c_str());
+    auto fpath = [](lua_State *state) -> fs::path {
+      auto fname = string(lua_tolstring(state, -1, nullptr));
+      fname += ".lua";
+      return fs::canonical(fname);
+    }(state);
+
+    auto ec = std::error_code{};
+    if ((void)fs::exists(fpath, ec); ec) {
+      // TODO: better error handling :)
+      // basically just copy what we do with the main.cpp run function
+      lua_pushstring(state, ec.message().c_str());
+      return lua_error(state);
+    }
+    ec.clear();
+
+    (void)lua_pushinteger(state, modules.new_module(std::move(fpath)));
+    return 1;
+  } catch (std::exception const &e) {
+    (void)lua_pushfstring(
+        state, "An exception was encountered in the requires function, [%s]",
+        e.what());
+    return lua_error(state);
+  } catch (...) {
+    (void)lua_pushstring(
+        state, "An unknown exception was encountered in the requires function");
     return lua_error(state);
   }
-  ec.clear();
-
-  if (luaL_dofile(state, fname.c_str()) != LUA_OK) {
-    lua_pushfstring(
-        state,
-        "Unable to run the `luamake.lua` file required, in directory [%s]",
-        fname.substr(0, fname.rfind('/')).c_str());
-    return lua_error(state);
-  }
-
-  if (auto ret_t = lua_type(state, -1); ret_t != LUA_TTABLE) {
-    (void)lua_pushfstring(state, "Expecetd return type `table` found [%s]",
-                          lua_typename(ret_t));
-    return lua_error(state);
-  } else {
-#ifdef DEBUG
-    builtins::dump(state);
-#endif
-  }
-
-  return 1; // ?
 }
 } // namespace
 
@@ -2172,6 +2286,9 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, link_static);
   lua_setfield(state, -2, "link_static");
 
+  lua_pushcfunction(state, build_dep);
+  lua_setfield(state, -2, "build_dep");
+
   // TODO: add the functions install_dynamic
 }
 
@@ -2183,10 +2300,15 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 }
 
 auto make_lake_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 0, 1);
+  lua_createtable(state, 1, 1);
 
   lua_pushcfunction(state, require);
   lua_setfield(state, -2, "require");
+
+  // this will set Lake[1] = $CWD, which could cause issues, but you should be
+  // calling luamake in the same directory with the luamake.lua file in it
+  lua_pushstring(state, fs::current_path().c_str());
+  lua_seti(state, -2, 1);
 }
 } // namespace builtins
 } // namespace luamake
