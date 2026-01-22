@@ -306,7 +306,7 @@ struct Module final {
   /**
    * @throws ModuleErr
    */
-  Module(Module_t &&type, lua_State *state) noexcept(false);
+  Module(Module_t &&type, lua_State *state, fs::path const &) noexcept(false);
 
   /**
    * @throws
@@ -474,27 +474,25 @@ struct Module final {
   friend Compiler;
 };
 
+// TODO: we're not initing the root luamake module when the program is first
+// getting run
 struct LakeModules final {
   LakeModules() noexcept;
 
   auto new_module(fs::path &&) noexcept -> lua_Integer;
-  auto get_module(lua_Integer) const noexcept -> fs::path;
+  auto get_module_path(lua_Integer) const noexcept -> fs::path;
 
-  // TODO: rename this function, also rewrite it :)
-  template <class... Args> auto emplace_back(Args... args) -> lua_Integer {
-    if (size == cap) {
-      resize();
-    }
-    auto mod = Module(std::forward<Args>(args)...);
-    auto const ret = static_cast<lua_Integer>(size);
-    mods[size] = std::move(mod);
-    mods[size].gen_dep_tree();
-    ++size;
-    return ret;
-  }
+  auto emplace_at(lua_Integer, Module &&) -> void;
+
+  auto construct_module_at(lua_Integer, Module::Module_t, lua_State *,
+                           fs::path const &) -> void;
 
   // returns -1 on failure
-  auto contains(std::string_view const module_name) const noexcept -> int;
+  auto contains(fs::path const &) const noexcept -> int;
+
+#ifdef DEBUG
+  auto dump_paths() const noexcept -> void;
+#endif // DEBUG
 
 private:
   auto resize() -> void;
@@ -519,19 +517,25 @@ auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
   if (size == cap)
     resize();
   luamake_paths[size] = std::move(path);
+  is_compileds[size] = false;
+
   auto const ret_idx = static_cast<lua_Integer>(size);
   ++size;
   return ret_idx;
 }
 
-auto LakeModules::get_module(lua_Integer idx) const noexcept -> fs::path {
+auto LakeModules::get_module_path(lua_Integer idx) const noexcept -> fs::path {
   return luamake_paths[static_cast<size_t>(idx)];
 }
 
-auto LakeModules::contains(std::string_view const module_name) const noexcept
-    -> int {
+auto LakeModules::emplace_at(lua_Integer idx, Module &&mod) -> void {
+  auto const i = static_cast<size_t>(idx);
+  mods[i] = std::move(mod);
+}
+
+auto LakeModules::contains(fs::path const &module_name) const noexcept -> int {
   for (auto i = size_t{0}; i < size; ++i) {
-    if (luamake_paths[i] == module_name) {
+    if (luamake_paths[i] == module_name / "luamake.lua") {
       return static_cast<int>(i);
     }
   }
@@ -559,6 +563,17 @@ auto LakeModules::resize() -> void {
   luamake_paths = std::move(n_luamake_paths);
   mods = std::move(n_mods);
 }
+
+#ifdef DEBUG
+auto LakeModules::dump_paths() const noexcept -> void {
+  std::cout << "modules.paths = {\n";
+  for (auto i = size_t{0}; i < size; ++i) {
+    std::cout << "\t[" << i << "][" << luamake_paths[i].string() << "]\n";
+  }
+  std::cout << "}\n";
+  std::cout.flush();
+}
+#endif // DEBUG
 
 inline static auto modules = LakeModules();
 } // namespace
@@ -1158,7 +1173,7 @@ auto Module::append_predefined_macros(string_view const compiler)
 // the luamake.lua file can be relative to that, while the luamake.lua file is
 // an absolute path. this also means we'll have to redo how we store the files
 // in the dep tree :)
-Module::Module(Module_t &&type, lua_State *state)
+Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     : type(), tree(), roots(), includes(), linking(), interpreter({}, {}),
       compiler(), name(), install_dir() {
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
@@ -1177,7 +1192,7 @@ Module::Module(Module_t &&type, lua_State *state)
     switch (auto const root_t = lua_getfield(state, -2, "root")) {
     case LUA_TSTRING:
       roots.push_back(
-          fs::canonical(fs::path(lua_tolstring(state, -1, nullptr))));
+          fs::canonical(root / fs::path(lua_tolstring(state, -1, nullptr))));
       break;
     case LUA_TNIL:
       throw MissingField("root");
@@ -1196,7 +1211,7 @@ Module::Module(Module_t &&type, lua_State *state)
           throw UnexpectedType("roots[i]", LUA_TSTRING, value_t);
         }
         roots.push_back(
-            fs::canonical(fs::path(lua_tolstring(state, -1, nullptr))));
+            fs::canonical(root / fs::path(lua_tolstring(state, -1, nullptr))));
         lua_pop(state, 1);
       }
     } break;
@@ -1584,18 +1599,48 @@ auto new_exe(lua_State *state) noexcept -> int {
 }
 
 auto new_static(lua_State *state) noexcept -> int {
-  auto const num_args = lua_gettop(state);
-  if (num_args != 1) {
-    (void)lua_pushstring(state,
-                         "Expected one argument to the `new_static` function.");
-    return lua_error(state);
-  }
+  LUA_EXPECTED_ARGUMENTS(state, 2, new_static);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
                     "Expected type of argument to `new_static` to be of type "
                     "table, found [%s]",
                     lua_typename(ret_t));
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected type of argument to `new_static` to be of type "
+                    "table, found [%s]",
+                    lua_typename(ret_t));
+
   try {
-    lua_pushinteger(state, modules.emplace_back(Module::STATIC, state));
+    auto const root_t = lua_geti(state, -2, 1);
+    if (root_t != LUA_TSTRING) {
+      throw std::runtime_error(
+          "idk what happened, but an internal error occured, where the type of "
+          "a value was modified when it shouldn't have.");
+    }
+    auto const root = fs::path(lua_tolstring(state, -1, nullptr));
+    lua_pop(state, 1); // need to pop the value off the stack now that we've
+                       // taken over it, and so that the config obj is at the
+                       // top of the stack for the Module function
+
+    auto index_fut = std::async(std::launch::async, [&root]() -> lua_Integer {
+      return static_cast<lua_Integer>(modules.contains(root));
+    });
+
+    // TODO: pass the root info into this as well so we can use it for the
+    // relative paths
+    auto static_mod = Module(Module::STATIC, state, root);
+    static_mod.gen_dep_tree();
+
+    auto const idx = index_fut.get();
+    if (idx == lua_Integer{-1}) {
+      std::cerr << "Module " << root.string()
+                << " does not exist in the lake modules currently known.";
+      std::terminate();
+    }
+
+    modules.emplace_at(idx, std::move(static_mod));
+
+    lua_pushinteger(state, idx);
+
     return 1;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
@@ -1618,6 +1663,7 @@ auto new_static(lua_State *state) noexcept -> int {
 auto install_exe(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
+    lua_pop(state, 1);
     lua_pushstring(state, "Too many arguments.");
     return lua_error(state);
   }
@@ -1627,8 +1673,12 @@ auto install_exe(lua_State *state) noexcept -> int {
                     "table, found [%s]",
                     lua_typename(ret_t));
 
+  lua_pop(state, 1);
+  lua_pushstring(state, "install_exe is not currently implimented");
+  return lua_error(state);
+
   try {
-    auto main_mod = Module(Module::EXE, state);
+    auto main_mod = Module(Module::EXE, state, fs::current_path());
 
     // TODO: update these functions to throw exceptions
     auto ec = std::error_code{};
@@ -1742,6 +1792,7 @@ auto install_exe(lua_State *state) noexcept -> int {
 auto install_static(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
+    lua_pop(state, 1);
     lua_pushstring(state, "Too many arguments");
     return lua_error(state);
   }
@@ -1751,8 +1802,12 @@ auto install_static(lua_State *state) noexcept -> int {
                     "to be of type table, found [%s]",
                     lua_typename(ret_t));
 
+  lua_pop(state, 1);
+  lua_pushstring(state, "install_static is not currently implimented");
+  return lua_error(state);
+
   try {
-    auto static_mod = Module(Module::STATIC, state);
+    auto static_mod = Module(Module::STATIC, state, fs::current_path());
 
     auto ec = std::error_code{};
     if (fs::create_directories(fs::path(
@@ -1951,13 +2006,7 @@ auto link_static(lua_State *state) noexcept -> int {
 }
 
 auto build_dep(lua_State *state) noexcept -> int {
-  auto const num_args = lua_gettop(state);
-  if (num_args != 2) {
-    lua_pushstring(
-        state, "Incorrect number of arguments passed to build_dep function.");
-    return lua_error(state);
-  }
-
+  LUA_EXPECTED_ARGUMENTS(state, 2, build_dep);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to function "
                     "`build_dep` to be number, found [%s]",
@@ -1968,7 +2017,7 @@ auto build_dep(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const luamake_path = modules.get_module(lua_tointeger(state, -1));
+    auto const luamake_path = modules.get_module_path(lua_tointeger(state, -1));
     std::cout << "luamake_path = [" << luamake_path.c_str() << "]\n";
     std::cout.flush();
 
@@ -1980,7 +2029,7 @@ auto build_dep(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
 
-    switch (auto t = lua_type(state, -1)) {
+    switch (auto const t = lua_type(state, -1)) {
     case LUA_TTABLE: {
       if (auto const build_t = lua_getfield(state, -1, "Build");
           build_t != LUA_TFUNCTION) {
@@ -2209,21 +2258,18 @@ auto clang(lua_State *state) noexcept -> int {
 auto require(lua_State *state) noexcept -> int {
   // because this is a function on an api boundary, we have to make sure that no
   // exceptions leak from it
+  LUA_EXPECTED_ARGUMENTS(state, 1, require)
+  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TSTRING,
+                    "Expected string to require function, found [%s]",
+                    lua_typename(arg_t));
   try {
-    LUA_EXPECTED_ARGUMENTS(state, 1, require)
-    if (auto const arg_t = lua_type(state, -1); arg_t != LUA_TSTRING) {
-      lua_pop(state, 1);
-      (void)lua_pushfstring(state,
-                            "Expected string to require function, found [%s]",
-                            lua_typename(arg_t));
-      return lua_error(state);
-    }
-
     auto fpath = [](lua_State *state) -> fs::path {
       auto fname = string(lua_tolstring(state, -1, nullptr));
       fname += ".lua";
       return fs::canonical(fname);
     }(state);
+    lua_pop(state, 1); // remove the argument from the top of the stack to make
+                       // the stack better(?)
 
     auto ec = std::error_code{};
     if ((void)fs::exists(fpath, ec); ec) {
@@ -2260,13 +2306,23 @@ auto dump(lua_State *state) noexcept -> int {
     return lua_error(state);
   }
   // don't really care about type checking the args
-  std::cout << '[' << lua_tolstring(state, -2, nullptr) << "] = ";
+  switch (lua_type(state, -2)) {
+  case LUA_TSTRING:
+    std::cout << '[' << lua_tolstring(state, -2, nullptr) << "] = ";
+    break;
+  case LUA_TTABLE:
+    std::cout << "[table@" << lua_topointer(state, -2) << "] = ";
+    break;
+  default:
+    std::cout << "[Unknown type@" << lua_topointer(state, -2) << "] = ";
+    break;
+  }
   dump_impl(state, 1);
   return 0;
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 0, 6);
+  lua_createtable(state, 1, 8);
 
   lua_pushcfunction(state, clang);
   lua_setfield(state, -2, "clang");
@@ -2289,6 +2345,14 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, build_dep);
   lua_setfield(state, -2, "build_dep");
 
+  lua_pushcfunction(state, require);
+  lua_setfield(state, -2, "requires");
+
+  // this will set Lake[1] = $CWD, which could cause issues, but you should be
+  // calling luamake in the same directory with the luamake.lua file in it
+  lua_pushstring(state, fs::current_path().c_str());
+  lua_seti(state, -2, 1);
+
   // TODO: add the functions install_dynamic
 }
 
@@ -2299,6 +2363,7 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
   lua_setfield(state, -2, "run");
 }
 
+// TODO: probably remove this and the Lake object
 auto make_lake_obj(lua_State *state) noexcept -> void {
   lua_createtable(state, 1, 1);
 
