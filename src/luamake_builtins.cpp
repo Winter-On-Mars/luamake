@@ -486,12 +486,14 @@ struct LakeModules final {
 
   auto construct_module_at(lua_Integer, Module::Module_t, lua_State *,
                            fs::path const &) -> void;
+  auto module_at(lua_Integer const) noexcept -> Module &;
 
   // returns -1 on failure
   auto contains(fs::path const &) const noexcept -> int;
 
 #ifdef DEBUG
   auto dump_paths() const noexcept -> void;
+  auto dump_modules() const noexcept -> void;
 #endif // DEBUG
 
 private:
@@ -533,6 +535,10 @@ auto LakeModules::emplace_at(lua_Integer idx, Module &&mod) -> void {
   mods[i] = std::move(mod);
 }
 
+auto LakeModules::module_at(lua_Integer const idx) noexcept -> Module & {
+  return mods[static_cast<size_t>(idx)];
+}
+
 auto LakeModules::contains(fs::path const &module_name) const noexcept -> int {
   for (auto i = size_t{0}; i < size; ++i) {
     if (luamake_paths[i] == module_name / "luamake.lua") {
@@ -569,6 +575,15 @@ auto LakeModules::dump_paths() const noexcept -> void {
   std::cout << "modules.paths = {\n";
   for (auto i = size_t{0}; i < size; ++i) {
     std::cout << "\t[" << i << "][" << luamake_paths[i].string() << "]\n";
+  }
+  std::cout << "}\n";
+  std::cout.flush();
+}
+
+auto LakeModules::dump_modules() const noexcept -> void {
+  std::cout << "modules.mods = {\n";
+  for (auto i = size_t{}; i < size; ++i) {
+    mods[i].display(std::cout);
   }
   std::cout << "}\n";
   std::cout.flush();
@@ -1174,7 +1189,7 @@ auto Module::append_predefined_macros(string_view const compiler)
 // an absolute path. this also means we'll have to redo how we store the files
 // in the dep tree :)
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
-    : type(), tree(), roots(), includes(), linking(), interpreter({}, {}),
+    : type(type), tree(), roots(), includes(), linking(), interpreter({}, {}),
       compiler(), name(), install_dir() {
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING:
@@ -1333,11 +1348,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
 
   lua_pop(state, 6);
-
-#ifdef DEBUG
-  // std::cout << "---displaying---\n";
-  // display(std::cout);
-#endif
   interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
 }
 
@@ -1625,10 +1635,12 @@ auto new_static(lua_State *state) noexcept -> int {
       return static_cast<lua_Integer>(modules.contains(root));
     });
 
-    // TODO: pass the root info into this as well so we can use it for the
-    // relative paths
     auto static_mod = Module(Module::STATIC, state, root);
     static_mod.gen_dep_tree();
+
+#ifdef DEBUG
+    static_mod.display(std::cout);
+#endif // DEBUG
 
     auto const idx = index_fut.get();
     if (idx == lua_Integer{-1}) {
@@ -1640,6 +1652,10 @@ auto new_static(lua_State *state) noexcept -> int {
     modules.emplace_at(idx, std::move(static_mod));
 
     lua_pushinteger(state, idx);
+#ifdef DEBUG
+    modules.dump_paths();
+    modules.dump_modules();
+#endif // DEBUG
 
     return 1;
   } catch (ModuleErr const &e) {
@@ -1790,24 +1806,29 @@ auto install_exe(lua_State *state) noexcept -> int {
 }
 
 auto install_static(lua_State *state) noexcept -> int {
-  auto const num_args = lua_gettop(state);
-  if (num_args != 1) {
-    lua_pop(state, 1);
-    lua_pushstring(state, "Too many arguments");
-    return lua_error(state);
-  }
-
-  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_static);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to `install_static` "
-                    "to be of type table, found [%s]",
+                    "to be of type integer, found [%s]",
                     lua_typename(ret_t));
 
-  lua_pop(state, 1);
-  lua_pushstring(state, "install_static is not currently implimented");
-  return lua_error(state);
-
   try {
-    auto static_mod = Module(Module::STATIC, state, fs::current_path());
+    auto const mod_idx = lua_tointeger(state, -1);
+    expr_dbg(mod_idx);
+
+#ifdef DEBUG
+    modules.dump_paths();
+    modules.dump_modules();
+#endif // DEBUG
+
+    auto const &static_mod = modules.module_at(mod_idx);
+    // TODO: better error handling with this
+    if (static_mod.type != Module::STATIC) {
+      throw std::runtime_error(
+          std ::format("module type is not static, found [{}]",
+                       static_cast<std::underlying_type_t<Module::Module_t>>(
+                           static_mod.type)));
+    }
 
     auto ec = std::error_code{};
     if (fs::create_directories(fs::path(
@@ -1818,8 +1839,6 @@ auto install_static(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
     ec.clear();
-
-    static_mod.gen_dep_tree();
 
     auto const compiled_files = Compiler::compile(static_mod);
     auto const invoked_command =
@@ -2048,10 +2067,18 @@ auto build_dep(lua_State *state) noexcept -> int {
       if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
         return lua_error(state);
       }
-
+      return 0;
     } break;
     case LUA_TFUNCTION: {
-      // TODO: assume that the function is the Build function
+      builtins::make_builder_obj(state);
+
+      lua_pushstring(state, luamake_path.parent_path().c_str());
+      lua_seti(state, -2, lua_Integer{1});
+
+      if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
+        return lua_error(state);
+      }
+      return 0;
     } break;
     default:
       (void)lua_pushfstring(state,
@@ -2069,7 +2096,12 @@ auto build_dep(lua_State *state) noexcept -> int {
     return lua_error(state);
   }
 
-  lua_pushstring(state, "build_dep not impl");
+  lua_pushstring(
+      state,
+      std::format(
+          "Unreachable point reached :), please report this. Function [{}]",
+          __FUNCTION__)
+          .c_str());
   return lua_error(state);
 }
 
