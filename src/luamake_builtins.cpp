@@ -474,8 +474,8 @@ struct Module final {
   friend Compiler;
 };
 
-// TODO: we're not initing the root luamake module when the program is first
-// getting run
+// TODO: add an explicit init and deinit function to this so that we can have
+// better control over the lifetime of this object
 struct LakeModules final {
   LakeModules() noexcept;
 
@@ -513,7 +513,10 @@ LakeModules::LakeModules() noexcept
     : cap(4), size(0), is_compileds(std::make_unique<bool[]>(cap)),
       compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
       luamake_paths(std::make_unique<fs::path[]>(cap)),
-      mods(std::make_unique<Module[]>(cap)) {}
+      mods(std::make_unique<Module[]>(cap)) {
+  luamake_paths[0] = fs::current_path();
+  ++size;
+}
 
 auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
   if (size == cap)
