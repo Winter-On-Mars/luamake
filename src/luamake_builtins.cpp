@@ -514,7 +514,7 @@ LakeModules::LakeModules() noexcept
       compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
       luamake_paths(std::make_unique<fs::path[]>(cap)),
       mods(std::make_unique<Module[]>(cap)) {
-  luamake_paths[0] = fs::current_path();
+  luamake_paths[0] = fs::current_path() / "luamake.lua";
   ++size;
 }
 
@@ -2293,18 +2293,37 @@ auto clang(lua_State *state) noexcept -> int {
 auto require(lua_State *state) noexcept -> int {
   // because this is a function on an api boundary, we have to make sure that no
   // exceptions leak from it
-  LUA_EXPECTED_ARGUMENTS(state, 1, require)
+  LUA_EXPECTED_ARGUMENTS(state, 2, require)
+  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected table to require function, found [%s]",
+                    lua_typename(arg_t));
   LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TSTRING,
                     "Expected string to require function, found [%s]",
                     lua_typename(arg_t));
   try {
     auto fpath = [](lua_State *state) -> fs::path {
-      auto fname = string(lua_tolstring(state, -1, nullptr));
-      fname += ".lua";
+      auto const parent_path_t = lua_geti(state, -2, lua_Integer{1});
+      switch (parent_path_t) {
+      case LUA_TSTRING: {
+      } break;
+      case LUA_TNIL: {
+        throw std::runtime_error(std::format(
+            "Got nil for b[1], forgot to set the parent path variable"));
+      } break;
+      default:
+        throw std::runtime_error(
+            std::format("expected type of b[1] to be string, got [{}]",
+                        lua_typename(parent_path_t)));
+        break;
+      }
+      auto const parent_path = fs::path(lua_tolstring(state, -1, nullptr));
+      auto const fname =
+          parent_path /
+          fs::path(string(lua_tolstring(state, -2, nullptr)) + ".lua");
       return fs::canonical(fname);
     }(state);
-    lua_pop(state, 1); // remove the argument from the top of the stack to make
-                       // the stack better(?)
+    // pop all arguments from the stack, and the b[1] that was pushed earlier
+    lua_pop(state, 3);
 
     auto ec = std::error_code{};
     if ((void)fs::exists(fpath, ec); ec) {
