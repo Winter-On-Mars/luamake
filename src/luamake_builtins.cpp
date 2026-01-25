@@ -1733,32 +1733,30 @@ auto new_static(lua_State *state) noexcept -> int {
 }
 
 auto install_exe(lua_State *state) noexcept -> int {
-  auto const num_args = lua_gettop(state);
-  if (num_args != 1) {
-    lua_pop(state, 1);
-    lua_pushstring(state, "Too many arguments.");
-    return lua_error(state);
-  }
-
-  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_exe)
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to `install_exe` to be of type "
-                    "table, found [%s]",
+                    "integer, found [%s]",
                     lua_typename(ret_t));
 
-  lua_pop(state, 1);
-  lua_pushstring(state, "install_exe is not currently implimented");
-  return lua_error(state);
-
   try {
-    auto main_mod = Module(Module::EXE, state, fs::current_path());
+    auto const mod_idx = lua_tointeger(state, -1);
+    lua_pop(state, 1);
+    auto const &parent_path = modules.get_module_path(mod_idx).parent_path();
+
+    auto const &exe_mod = modules.module_at(mod_idx);
+    if (exe_mod.type != Module::EXE) {
+      throw std::runtime_error(std ::format(
+          "module type is not exe, found [{}]",
+          static_cast<std::underlying_type_t<Module::Module_t>>(exe_mod.type)));
+    }
 
     // TODO: update these functions to throw exceptions
+    auto const install_dir =
+        parent_path /
+        fs::path(std::format("{}/{}.o", exe_mod.install_dir, exe_mod.name));
     auto ec = std::error_code{};
-    if (fs::create_directories(
-            fs::path(
-                std::format("{}/{}.o", main_mod.install_dir, main_mod.name)),
-            ec);
-        ec) {
+    if (fs::create_directories(install_dir, ec); ec) {
       std::cerr << ec.message() << '\n';
       lua_pushstring(state, "Unable to create directory");
       return lua_error(state);
@@ -1766,7 +1764,7 @@ auto install_exe(lua_State *state) noexcept -> int {
     ec.clear();
 
     if (fs::create_directories(
-            fs::path(std::format("{}/__luamake_cache", main_mod.install_dir)),
+            fs::path(std::format("{}/__luamake_cache", exe_mod.install_dir)),
             ec);
         ec) {
       std::cerr << ec.message() << '\n';
@@ -1774,17 +1772,15 @@ auto install_exe(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
     ec.clear();
-    auto const path = fs::path(std::format(
-        "{}/__luamake_cache/{}.cache", main_mod.install_dir, main_mod.name));
+    auto const path = fs::path(std::format("{}/__luamake_cache/{}.cache",
+                                           exe_mod.install_dir, exe_mod.name));
 
     auto maybe_cached_mod_fut = std::async(
         std::launch::async, [&path]() { return Module::deserialize(path); });
 
-    main_mod.gen_dep_tree();
-
 #ifdef DEBUG
     std::cout << "uncached mod\n";
-    main_mod.display(std::cout);
+    exe_mod.display(std::cout);
     std::cout << "---\n";
 #endif // DEBUG
 
@@ -1799,7 +1795,7 @@ auto install_exe(lua_State *state) noexcept -> int {
       cached_mod.display(std::cout);
       std::cout << "---\n";
 #endif // DEBUG
-      if (main_mod == cached_mod) {
+      if (exe_mod == cached_mod) {
         return 0;
       }
     } break;
@@ -1811,14 +1807,14 @@ auto install_exe(lua_State *state) noexcept -> int {
       unreachable();
     }
 
-    auto const actually_compiled_files = Compiler::compile(main_mod);
+    auto const actually_compiled_files = Compiler::compile(exe_mod);
 
     // because of the format of `actually_compiled_files` for the best
     // formatting of the command there shouldn't be a space between it and the
     // -o
     auto const invoked_command = std::format(
-        "{} -o {}/{} {} {}", main_mod.compiler, main_mod.install_dir,
-        main_mod.name, actually_compiled_files, main_mod.format_links());
+        "{} -o {}/{} {} {}", exe_mod.compiler, exe_mod.install_dir,
+        exe_mod.name, actually_compiled_files, exe_mod.format_links());
 
     std::cout << "[" << invoked_command << "]\n";
     std::cout.flush();
@@ -1897,7 +1893,7 @@ auto install_static(lua_State *state) noexcept -> int {
               << '\n';
     std::cout.flush();
     auto ec = std::error_code{};
-    if (fs::create_directories(install_dir); ec) {
+    if (fs::create_directories(install_dir, ec); ec) {
       lua_pushfstring(state, "Unable to create directory\n\t[%s]",
                       ec.message().c_str());
       return lua_error(state);
