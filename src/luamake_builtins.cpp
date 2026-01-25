@@ -431,15 +431,10 @@ struct Module final {
   vector<fs::path> includes;
   vector<fs::path> linking;
   pp::Interpreter interpreter;
-  // TODO: switch these over to either all be std::string, or have them be
-  // factored out into a OwnedString + StringViews structure
-  // for de/serialization, these just being char const * makes thins a bit of a
-  // pain, bc we rely on them being interned in the lua gc, but when they are
-  // deserialized, they cannot be interned, so we're going to leak this memory
-  // :)
+  // TODO: optimize this :)
   std::string compiler;
-  std::string_view name;
-  std::string_view install_dir;
+  std::string name;
+  std::string install_dir;
 
   Module() noexcept
       : type(), tree(), roots(), includes(), linking(), interpreter({}, {}),
@@ -514,8 +509,8 @@ LakeModules::LakeModules() noexcept
       compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
       luamake_paths(std::make_unique<fs::path[]>(cap)),
       mods(std::make_unique<Module[]>(cap)) {
-  luamake_paths[0] = fs::current_path() / "luamake.lua";
-  ++size;
+  // luamake_paths[0] = fs::current_path() / "luamake.lua";
+  // ++size;
 }
 
 auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
@@ -1257,7 +1252,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   switch (auto const install_dir_t = lua_getfield(state, -4, "install_dir")) {
   case LUA_TSTRING:
-    install_dir = lua_tolstring(state, -1, nullptr);
+    install_dir = (root / lua_tolstring(state, -1, nullptr)).string();
     break;
   case LUA_TNIL:
     throw MissingField("install_dir");
@@ -1607,6 +1602,63 @@ struct Compiler final {
 };
 
 auto new_exe(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 2, new_exe);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `new_exe` to be of type "
+                    "table, found [%s]",
+                    lua_typename(ret_t));
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected type of argument to `new_exe` to be of type "
+                    "table, found [%s]",
+                    lua_typename(ret_t));
+
+  try {
+    auto const root_t = lua_geti(state, -2, 1);
+    if (root_t != LUA_TSTRING) {
+      throw std::runtime_error(
+          "idk what happened, but an internal error occured, where the type of "
+          "a value was modified when it shouldn't have.");
+    }
+    auto const root = fs::path(lua_tolstring(state, -1, nullptr));
+    lua_pop(state, 1); // need to pop the value off the stack now that we've
+                       // taken over it, and so that the config obj is at the
+                       // top of the stack for the Module function
+
+    auto index_fut = std::async(std::launch::async, [&root]() -> lua_Integer {
+      return static_cast<lua_Integer>(modules.contains(root));
+    });
+
+    auto exe_mod = Module(Module::EXE, state, root);
+    exe_mod.gen_dep_tree();
+
+    auto const idx = index_fut.get();
+    if (idx == lua_Integer{-1}) {
+      std::cerr << "Module " << root.string()
+                << " does not exist in the lake modules currently known.";
+      std::terminate();
+    }
+
+    modules.emplace_at(idx, std::move(exe_mod));
+
+    lua_pushinteger(state, idx);
+
+    return 1;
+  } catch (ModuleErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (DepTreeErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (pp::Exception const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
   (void)lua_pushstring(state, "new_exe not impl");
   return lua_error(state);
 }
@@ -1642,7 +1694,7 @@ auto new_static(lua_State *state) noexcept -> int {
     static_mod.gen_dep_tree();
 
 #ifdef DEBUG
-    static_mod.display(std::cout);
+    // static_mod.display(std::cout);
 #endif // DEBUG
 
     auto const idx = index_fut.get();
@@ -1656,8 +1708,8 @@ auto new_static(lua_State *state) noexcept -> int {
 
     lua_pushinteger(state, idx);
 #ifdef DEBUG
-    modules.dump_paths();
-    modules.dump_modules();
+    // modules.dump_paths();
+    // modules.dump_modules();
 #endif // DEBUG
 
     return 1;
@@ -1817,12 +1869,16 @@ auto install_static(lua_State *state) noexcept -> int {
 
   try {
     auto const mod_idx = lua_tointeger(state, -1);
-    expr_dbg(mod_idx);
+    lua_pop(state, 1);
 
 #ifdef DEBUG
-    modules.dump_paths();
-    modules.dump_modules();
+    expr_dbg(mod_idx);
+    // modules.dump_paths();
+    // modules.dump_modules();
 #endif // DEBUG
+
+    // TODO: pass the parent_path to the compiler
+    auto const &parent_path = modules.get_module_path(mod_idx).parent_path();
 
     auto const &static_mod = modules.module_at(mod_idx);
     // TODO: better error handling with this
@@ -1833,10 +1889,14 @@ auto install_static(lua_State *state) noexcept -> int {
                            static_mod.type)));
     }
 
+    auto const install_dir =
+        parent_path / fs::path(std::format("{}/{}.o", static_mod.install_dir,
+                                           static_mod.name));
+    std::cout << std::format("making directory [{}]", install_dir.string())
+              << '\n';
+    std::cout.flush();
     auto ec = std::error_code{};
-    if (fs::create_directories(fs::path(
-            std::format("{}/{}.o", static_mod.install_dir, static_mod.name)));
-        ec) {
+    if (fs::create_directories(install_dir); ec) {
       lua_pushfstring(state, "Unable to create directory\n\t[%s]",
                       ec.message().c_str());
       return lua_error(state);
@@ -2347,6 +2407,43 @@ auto require(lua_State *state) noexcept -> int {
     return lua_error(state);
   }
 }
+
+auto link_lib(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 2, require)
+  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -2), LUA_TNUMBER,
+                    "Expected integer to `link_lib` function, found [%s]",
+                    lua_typename(arg_t));
+  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected integer to `link_lib` function, found [%s]",
+                    lua_typename(arg_t));
+  try {
+    auto const lib_to_be_linked = lua_tointeger(state, -2);
+    auto const lib_getting_diddled = lua_tointeger(state, -1);
+
+    auto &mod_linked = modules.module_at(lib_to_be_linked);
+    auto &mod_d = modules.module_at(lib_getting_diddled);
+
+    // this is all we *should* have to do, i think we just need to make sure the
+    // install_static and install_exe functions work with this data layout
+    mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
+                            ("lib" + mod_linked.name + ".a"));
+
+#ifdef DEBUG
+    modules.dump_modules();
+#endif // DEBUG
+
+    return 0;
+  } catch (std::exception const &e) {
+    (void)lua_pushfstring(
+        state, "An exception was encountered in the requires function, [%s]",
+        e.what());
+    return lua_error(state);
+  } catch (...) {
+    (void)lua_pushstring(
+        state, "An unknown exception was encountered in the requires function");
+    return lua_error(state);
+  }
+}
 } // namespace
 
 namespace builtins {
@@ -2376,7 +2473,7 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 8);
+  lua_createtable(state, 1, 9);
 
   lua_pushcfunction(state, clang);
   lua_setfield(state, -2, "clang");
@@ -2401,6 +2498,9 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, require);
   lua_setfield(state, -2, "requires");
+
+  lua_pushcfunction(state, link_lib);
+  lua_setfield(state, -2, "link_lib");
 
   // this will set Lake[1] = $CWD, which could cause issues, but you should be
   // calling luamake in the same directory with the luamake.lua file in it
