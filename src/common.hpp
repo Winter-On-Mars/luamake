@@ -42,6 +42,7 @@
     assert(false);                                                             \
   }
 
+#ifdef DEBUG
 #define fn_print()                                                             \
   fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
 
@@ -53,6 +54,7 @@
     auto const res = (expr);                                                   \
     std::cerr << DBG "[expr] " NORMAL #expr " = " << res << '\n';              \
   } while (false);
+#endif // DEBUG
 
 [[noreturn]] auto unreachable() noexcept -> void;
 
