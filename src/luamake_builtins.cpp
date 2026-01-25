@@ -509,8 +509,9 @@ LakeModules::LakeModules() noexcept
       compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
       luamake_paths(std::make_unique<fs::path[]>(cap)),
       mods(std::make_unique<Module[]>(cap)) {
-  // luamake_paths[0] = fs::current_path() / "luamake.lua";
-  // ++size;
+  luamake_paths[0] = fs::current_path() / "luamake.lua";
+  is_compileds[0] = false;
+  ++size;
 }
 
 auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
@@ -1634,7 +1635,7 @@ auto new_exe(lua_State *state) noexcept -> int {
     auto const idx = index_fut.get();
     if (idx == lua_Integer{-1}) {
       std::cerr << "Module " << root.string()
-                << " does not exist in the lake modules currently known.";
+                << " does not exist in the lake modules currently known.\n";
       std::terminate();
     }
 
