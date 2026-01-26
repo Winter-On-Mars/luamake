@@ -372,7 +372,6 @@ struct Module final {
       return SourceFile_t::MISC;
     }
 
-  private:
     // a parallel array for all of the source files
     // NOTE: this could be pushed further, and we could have a
     // memory allocator as a part of this struct, then just
@@ -423,9 +422,6 @@ struct Module final {
   };
 
   Module_t type;
-  // it *might* be a cool idea to have this as a union of
-  // vector<fs::path> and fs::path for better domain modeling, but
-  // unions are a bit of a pain to work with in c++
   DepTree tree;
   vector<fs::path> roots;
   vector<fs::path> includes;
@@ -487,8 +483,8 @@ struct LakeModules final {
   auto contains(fs::path const &) const noexcept -> int;
 
 #ifdef DEBUG
-  auto dump_paths() const noexcept -> void;
-  auto dump_modules() const noexcept -> void;
+  auto dump_paths(std::ostream &) const noexcept -> void;
+  auto dump_modules(std::ostream &) const noexcept -> void;
 #endif // DEBUG
 
 private:
@@ -570,22 +566,24 @@ auto LakeModules::resize() -> void {
 }
 
 #ifdef DEBUG
-auto LakeModules::dump_paths() const noexcept -> void {
-  std::cout << "modules.paths = {\n";
+auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
+  out << "modules.paths = {\n";
   for (auto i = size_t{0}; i < size; ++i) {
-    std::cout << "\t[" << i << "][" << luamake_paths[i].string() << "]\n";
+    out << "\t[" << i << "][" << luamake_paths[i].string() << "]\n";
   }
-  std::cout << "}\n";
-  std::cout.flush();
+  out << "}\n";
+  out.flush();
 }
 
-auto LakeModules::dump_modules() const noexcept -> void {
-  std::cout << "modules.mods = {\n";
+auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
+  out << "modules.mods = {\n";
   for (auto i = size_t{}; i < size; ++i) {
-    mods[i].display(std::cout);
+    out << '[' << i << "] {";
+    mods[i].display(out);
+    out << '}';
   }
-  std::cout << "}\n";
-  std::cout.flush();
+  out << "}\n";
+  out.flush();
 }
 #endif // DEBUG
 
@@ -680,12 +678,6 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
     auto const maybe_file = [&]() -> std::optional<fs::path> {
       for (auto const &include : includes) {
         auto const p = fs::canonical(include / file);
-#ifdef DEBUG
-        std::cerr << std::format("p.parent_path()/p.stem() = [{}], "
-                                 "dep.parent_path()/dep.stem() = [{}]\n",
-                                 (p.parent_path() / p.stem()).string(),
-                                 (dep.parent_path() / dep.stem()).string());
-#endif
         if (!fs::exists(p)) {
           continue;
         }
@@ -838,7 +830,7 @@ auto Module::deserialize(fs::path const &path)
   if (file == nullptr) {
     return std::format("unable to open serialization file [{}]", path.c_str());
   }
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+  return std::format("{} not impl", __PRETTY_FUNCTION__);
 }
 
 auto Module::operator==(Module const &that) const noexcept -> bool {
@@ -1357,10 +1349,6 @@ auto Module::gen_dep_tree() -> void {
   for (auto const &root : roots) {
     append_dep(root, DepTree::ROOT_IDX);
   }
-
-#ifdef DEBUG
-  tree.display(std::cout);
-#endif
 }
 
 auto Module::format_includes() const -> std::string {
@@ -1694,10 +1682,6 @@ auto new_static(lua_State *state) noexcept -> int {
     auto static_mod = Module(Module::STATIC, state, root);
     static_mod.gen_dep_tree();
 
-#ifdef DEBUG
-    // static_mod.display(std::cout);
-#endif // DEBUG
-
     auto const idx = index_fut.get();
     if (idx == lua_Integer{-1}) {
       std::cerr << "Module " << root.string()
@@ -1708,11 +1692,6 @@ auto new_static(lua_State *state) noexcept -> int {
     modules.emplace_at(idx, std::move(static_mod));
 
     lua_pushinteger(state, idx);
-#ifdef DEBUG
-    // modules.dump_paths();
-    // modules.dump_modules();
-#endif // DEBUG
-
     return 1;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
@@ -1778,23 +1757,11 @@ auto install_exe(lua_State *state) noexcept -> int {
     auto maybe_cached_mod_fut = std::async(
         std::launch::async, [&path]() { return Module::deserialize(path); });
 
-#ifdef DEBUG
-    std::cout << "uncached mod\n";
-    exe_mod.display(std::cout);
-    std::cout << "---\n";
-#endif // DEBUG
-
     auto maybe_cached_mod = maybe_cached_mod_fut.get();
     /* compare the current mod with the cached mod */
     switch (maybe_cached_mod.index()) {
     case 0: {
       auto const &cached_mod = std::get<Module>(maybe_cached_mod);
-#ifdef DEBUG
-      std::cout << "cached mod\n";
-      cached_mod.tree.display(std::cout);
-      cached_mod.display(std::cout);
-      std::cout << "---\n";
-#endif // DEBUG
       if (exe_mod == cached_mod) {
         return 0;
       }
@@ -1868,13 +1835,6 @@ auto install_static(lua_State *state) noexcept -> int {
     auto const mod_idx = lua_tointeger(state, -1);
     lua_pop(state, 1);
 
-#ifdef DEBUG
-    expr_dbg(mod_idx);
-    // modules.dump_paths();
-    // modules.dump_modules();
-#endif // DEBUG
-
-    // TODO: pass the parent_path to the compiler
     auto const &parent_path = modules.get_module_path(mod_idx).parent_path();
 
     auto const &static_mod = modules.module_at(mod_idx);
@@ -2425,10 +2385,6 @@ auto link_lib(lua_State *state) noexcept -> int {
     mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
                             ("lib" + mod_linked.name + ".a"));
 
-#ifdef DEBUG
-    modules.dump_modules();
-#endif // DEBUG
-
     return 0;
   } catch (std::exception const &e) {
     (void)lua_pushfstring(
@@ -2438,6 +2394,58 @@ auto link_lib(lua_State *state) noexcept -> int {
   } catch (...) {
     (void)lua_pushstring(
         state, "An unknown exception was encountered in the requires function");
+    return lua_error(state);
+  }
+}
+
+auto compile_commands_json(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, cc_json);
+  /*
+  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected table to `cc_json` function, found [%s]",
+                    lua_typename(arg_t));
+                    */
+  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected integer to `cc_json` function, found [%s]",
+                    lua_typename(arg_t));
+
+  try {
+#ifdef DEBUG
+    modules.dump_paths(std::cout);
+    modules.dump_modules(std::cout);
+#endif // DEBUG
+    auto const idx = lua_tointeger(state, -1);
+    lua_pop(state, 1);
+
+    auto const &mod = modules.module_at(idx);
+#ifdef DEBUG
+    mod.tree.display(std::cout);
+#endif // DEBUG
+
+    auto const cc_json_path =
+        mod.install_dir / fs::path("compile_commands.json");
+    auto cc_json = File(cc_json_path, File::WRITE);
+    if (!cc_json) {
+      throw std::runtime_error(
+          std::format("Unable to make file {}", cc_json_path.string()));
+    }
+
+    auto const &directory = mod.install_dir;
+    for (auto i = size_t{}; i < mod.tree.num_files; ++i) {
+    }
+
+    lua_pushstring(state, "cc_json not impl");
+    return lua_error(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(
+        state,
+        std::format("An exception was thrown in the cc_json function, [{}]",
+                    e.what())
+            .c_str());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state,
+                   "An unknown exception has occured in cc_json function");
     return lua_error(state);
   }
 }
@@ -2470,7 +2478,7 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 9);
+  lua_createtable(state, 1, 10);
 
   lua_pushcfunction(state, clang);
   lua_setfield(state, -2, "clang");
@@ -2498,6 +2506,9 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, link_lib);
   lua_setfield(state, -2, "link_lib");
+
+  lua_pushcfunction(state, compile_commands_json);
+  lua_setfield(state, -2, "cc_json");
 
   // this will set Lake[1] = $CWD, which could cause issues, but you should be
   // calling luamake in the same directory with the luamake.lua file in it
