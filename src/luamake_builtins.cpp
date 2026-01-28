@@ -2398,6 +2398,10 @@ auto link_lib(lua_State *state) noexcept -> int {
   }
 }
 
+// TODO: add caching, because this definately does not need to be run
+// every single time, and it would take up a lot of time to generate every
+// single time, we might be able to add a run once step that could generate
+// this, but i think just having good caching would mitigate a lot of the issues
 auto compile_commands_json(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, cc_json);
   /*
@@ -2422,6 +2426,63 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
     mod.tree.display(std::cout);
 #endif // DEBUG
 
+    auto const &directory = mod.install_dir;
+    auto cc_json_string = std::string(1, '[');
+    for (auto i = size_t{}; i < mod.tree.num_files - 1; ++i) {
+      cc_json_string.append("{");
+      cc_json_string.append(std::format("\"directory\":\"{}\",", directory));
+      cc_json_string.append("\"arguments\":[");
+      auto prev = size_t{};
+      for (auto j = size_t{}; j < mod.compiler.size(); ++j) {
+        if (mod.compiler[j] == ' ') {
+          cc_json_string.append(
+              std::format("\"{}\",", mod.compiler.substr(prev, j - prev)));
+          prev = j + 1;
+        }
+      }
+      cc_json_string.append("\"-c\",\"-o\",");
+      cc_json_string.append(std::format(
+          "\"{}\",\"{}\"",
+          (mod.tree.get_path(i).parent_path() /
+           fs::path(mod.tree.get_path(i).filename().string() + ".o"))
+              .c_str(),
+          mod.tree.get_path(i).c_str()));
+      cc_json_string.append("],");
+      // for some reason we can't use the .string method on the file path,
+      // because it includes the null terminator
+      cc_json_string.append(
+          std::format("\"file\":\"{}\"", mod.tree.get_path(i).c_str()));
+      cc_json_string.append("},");
+    }
+    // generate the last module
+    cc_json_string.append("{");
+    cc_json_string.append(std::format("\"directory\":\"{}\",", directory));
+    // TODO: get all the arguments
+    cc_json_string.append("\"arguments\":[");
+    auto prev = size_t{};
+    for (auto j = size_t{}; j < mod.compiler.size(); ++j) {
+      if (mod.compiler[j] == ' ') {
+        cc_json_string.append(
+            std::format("\"{}\",", mod.compiler.substr(prev, j - prev)));
+        prev = j + 1;
+      }
+    }
+    cc_json_string.append("\"-c\",\"-o\",");
+    cc_json_string.append(std::format(
+        "\"{}\",\"{}\"",
+        (mod.tree.get_path(mod.tree.num_files - 1).parent_path() /
+         fs::path(
+             mod.tree.get_path(mod.tree.num_files - 1).filename().string() +
+             ".o"))
+            .c_str(),
+        mod.tree.get_path(mod.tree.num_files - 1).c_str()));
+    cc_json_string.append("],");
+    cc_json_string.append(std::format(
+        "\"file\":\"{}\"", mod.tree.get_path(mod.tree.num_files - 1).c_str()));
+    cc_json_string.append("}");
+
+    cc_json_string += ']';
+
     auto const cc_json_path =
         mod.install_dir / fs::path("compile_commands.json");
     auto cc_json = File(cc_json_path, File::WRITE);
@@ -2429,10 +2490,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
       throw std::runtime_error(
           std::format("Unable to make file {}", cc_json_path.string()));
     }
-
-    auto const &directory = mod.install_dir;
-    for (auto i = size_t{}; i < mod.tree.num_files; ++i) {
-    }
+    cc_json.write(cc_json_string.c_str(), 1, cc_json_string.size());
 
     lua_pushstring(state, "cc_json not impl");
     return lua_error(state);
