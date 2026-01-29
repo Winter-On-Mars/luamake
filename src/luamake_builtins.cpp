@@ -295,6 +295,8 @@ struct MisformattedOutput final : public ModuleErr {
   }
 };
 
+// TODO: add exported header field, and probably refactor this to be a tagged
+// union to discriminate between exe and library type modules
 struct Module final {
   enum class Module_t : u8 {
     EXE,
@@ -1871,9 +1873,8 @@ auto install_static(lua_State *state) noexcept -> int {
       lua_pushstring(
           state, std::format("Error compiling [{}]", invoked_command).c_str());
       return lua_error(state);
-    } else {
-      return 0;
     }
+    return 0;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
