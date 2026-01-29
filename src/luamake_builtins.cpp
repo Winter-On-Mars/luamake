@@ -2427,19 +2427,34 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
 #endif // DEBUG
 
     auto const &directory = mod.install_dir;
+    auto const arguments = [&]() -> string {
+      auto res = string();
+      auto prev = size_t{};
+      auto i = size_t{};
+      for (; i < mod.compiler.size(); ++i) {
+        if (mod.compiler[i] == ' ') {
+          res.append(1, '"');
+          res.append(mod.compiler.substr(prev, i - prev));
+          res.append(1, '"');
+          res.append(1, ',');
+          prev = i + 1;
+        }
+      }
+      res.append(1, '"');
+      res.append(mod.compiler.substr(prev, i - prev));
+      res.append(1, '"');
+      res.append(1, ',');
+      return res;
+    }();
+
     auto cc_json_string = std::string(1, '[');
     for (auto i = size_t{}; i < mod.tree.num_files - 1; ++i) {
       cc_json_string.append("{");
       cc_json_string.append(std::format("\"directory\":\"{}\",", directory));
+
       cc_json_string.append("\"arguments\":[");
-      auto prev = size_t{};
-      for (auto j = size_t{}; j < mod.compiler.size(); ++j) {
-        if (mod.compiler[j] == ' ') {
-          cc_json_string.append(
-              std::format("\"{}\",", mod.compiler.substr(prev, j - prev)));
-          prev = j + 1;
-        }
-      }
+      cc_json_string.append(arguments);
+
       cc_json_string.append("\"-c\",\"-o\",");
       auto const fname = mod.tree.get_path(i).stem().string();
       auto const obj_path =
@@ -2450,6 +2465,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
       cc_json_string.append(
           std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
       cc_json_string.append("],");
+
       // for some reason we can't use the .string method on the file path,
       // because it includes the null terminator
       cc_json_string.append(
@@ -2459,16 +2475,10 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
     // generate the last module
     cc_json_string.append("{");
     cc_json_string.append(std::format("\"directory\":\"{}\",", directory));
-    // TODO: get all the arguments
+
     cc_json_string.append("\"arguments\":[");
-    auto prev = size_t{};
-    for (auto j = size_t{}; j < mod.compiler.size(); ++j) {
-      if (mod.compiler[j] == ' ') {
-        cc_json_string.append(
-            std::format("\"{}\",", mod.compiler.substr(prev, j - prev)));
-        prev = j + 1;
-      }
-    }
+    cc_json_string.append(arguments);
+
     cc_json_string.append("\"-c\",\"-o\",");
     auto const fname =
         mod.tree.get_path(mod.tree.num_files - 1).stem().string();
@@ -2480,6 +2490,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
     cc_json_string.append(
         std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
     cc_json_string.append("],");
+
     cc_json_string.append(std::format(
         "\"file\":\"{}\"", mod.tree.get_path(mod.tree.num_files - 1).c_str()));
     cc_json_string.append("}");
