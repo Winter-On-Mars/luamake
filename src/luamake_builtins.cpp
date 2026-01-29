@@ -2441,12 +2441,14 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
         }
       }
       cc_json_string.append("\"-c\",\"-o\",");
-      cc_json_string.append(std::format(
-          "\"{}\",\"{}\"",
-          (mod.tree.get_path(i).parent_path() /
-           fs::path(mod.tree.get_path(i).filename().string() + ".o"))
-              .c_str(),
-          mod.tree.get_path(i).c_str()));
+      auto const fname = mod.tree.get_path(i).stem().string();
+      auto const obj_path =
+          std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
+      expr_dbg(obj_path);
+      auto const fpath = mod.tree.get_path(i);
+      expr_dbg(fpath);
+      cc_json_string.append(
+          std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
       cc_json_string.append("],");
       // for some reason we can't use the .string method on the file path,
       // because it includes the null terminator
@@ -2468,14 +2470,15 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
       }
     }
     cc_json_string.append("\"-c\",\"-o\",");
-    cc_json_string.append(std::format(
-        "\"{}\",\"{}\"",
-        (mod.tree.get_path(mod.tree.num_files - 1).parent_path() /
-         fs::path(
-             mod.tree.get_path(mod.tree.num_files - 1).filename().string() +
-             ".o"))
-            .c_str(),
-        mod.tree.get_path(mod.tree.num_files - 1).c_str()));
+    auto const fname =
+        mod.tree.get_path(mod.tree.num_files - 1).stem().string();
+    auto const obj_path =
+        std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
+    expr_dbg(obj_path);
+    auto const fpath = mod.tree.get_path(mod.tree.num_files - 1);
+    expr_dbg(fpath);
+    cc_json_string.append(
+        std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
     cc_json_string.append("],");
     cc_json_string.append(std::format(
         "\"file\":\"{}\"", mod.tree.get_path(mod.tree.num_files - 1).c_str()));
