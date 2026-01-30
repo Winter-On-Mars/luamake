@@ -4,6 +4,7 @@
 #include "luamake_file.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
+#include <numeric>
 
 extern "C" {
 #include "lauxlib.h"
@@ -297,6 +298,9 @@ struct MisformattedOutput final : public ModuleErr {
 
 // TODO: add exported header field, and probably refactor this to be a tagged
 // union to discriminate between exe and library type modules
+// TODO: rewrite how the include files are processed to have a system header
+// section and an include header section, to be used later when compiling +
+// generating compile_commands.json
 struct Module final {
   enum class Module_t : u8 {
     EXE,
@@ -423,10 +427,26 @@ struct Module final {
     friend Module;
   };
 
+  // NOTE: we could probably use the empty space in the vector<fs::path> headers
+  // field, where if headers.len == 0, then we have to be an executable
+  // we would need a way to encode the difference between static and dynamic
+  // library's still
+  // moreover, we can optimize this struct more by having the strings all be
+  // held in a giant string, then taking string_view into said string
+  struct Executable final {
+    fs::path root;
+  };
+  struct Library final {
+    vector<fs::path> roots;
+    vector<fs::path> headers;
+  };
+
   Module_t type;
   DepTree tree;
   vector<fs::path> roots;
+  vector<fs::path> headers;
   vector<fs::path> includes;
+  vector<fs::path> sys_includes;
   vector<fs::path> linking;
   pp::Interpreter interpreter;
   // TODO: optimize this :)
@@ -435,8 +455,8 @@ struct Module final {
   std::string install_dir;
 
   Module() noexcept
-      : type(), tree(), roots(), includes(), linking(), interpreter({}, {}),
-        compiler(), name(), install_dir() {}
+      : type(), tree(), roots(), headers(), includes(), sys_includes(),
+        linking(), interpreter({}, {}), compiler(), name(), install_dir() {}
 
 #ifdef DEBUG
   auto display(std::ostream &) const noexcept -> void;
@@ -679,10 +699,11 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   for (auto const &file : files_deps) {
     auto const maybe_file = [&]() -> std::optional<fs::path> {
       for (auto const &include : includes) {
-        auto const p = fs::canonical(include / file);
-        if (!fs::exists(p)) {
+        auto ec = std::error_code{};
+        auto const p = fs::canonical(include / file, ec);
+        if (ec)
           continue;
-        }
+
         if (DepTree::determine_file_type(p.extension()) !=
                 DepTree::SourceFile_t::IMPL &&
             p.parent_path() / p.stem() == dep.parent_path() / dep.stem()) {
@@ -1048,7 +1069,8 @@ auto Module::append_include_paths(string_view const compiler) -> void {
       // there's probably a better way to do this, but idk this is fine for now
       // :)
       if (fs::exists(fs::path(string_view(start_path, end_path)))) {
-        includes.emplace_back(fs::canonical(fs::path(start_path, end_path)));
+        sys_includes.emplace_back(
+            fs::canonical(fs::path(start_path, end_path)));
       }
       start_path = skip_ws(end_path);
     }
@@ -1177,13 +1199,9 @@ auto Module::append_predefined_macros(string_view const compiler)
   unreachable();
 }
 
-// TODO: add a field for the path to the luamake.lua file so that everything in
-// the luamake.lua file can be relative to that, while the luamake.lua file is
-// an absolute path. this also means we'll have to redo how we store the files
-// in the dep tree :)
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
-    : type(type), tree(), roots(), includes(), linking(), interpreter({}, {}),
-      compiler(), name(), install_dir() {
+    : type(type), tree(), roots(), headers(), includes(), sys_includes(),
+      linking(), interpreter({}, {}), compiler(), name(), install_dir() {
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING:
     name = lua_tolstring(state, -1, nullptr);
@@ -1193,11 +1211,12 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   default:
     throw UnexpectedType("name", LUA_TSTRING, name_t);
   }
+  lua_pop(state, 1);
 
   switch (type) {
   case EXE:
     roots.reserve(1);
-    switch (auto const root_t = lua_getfield(state, -2, "root")) {
+    switch (auto const root_t = lua_getfield(state, -1, "root")) {
     case LUA_TSTRING:
       roots.push_back(
           fs::canonical(root / fs::path(lua_tolstring(state, -1, nullptr))));
@@ -1207,21 +1226,22 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     default:
       throw UnexpectedType("root", LUA_TSTRING, root_t);
     }
+    lua_pop(state, 1);
     break;
   case STATIC: {
-    switch (auto const root_t = lua_getfield(state, -2, "roots")) {
+    switch (auto const root_t = lua_getfield(state, -1, "roots")) {
     case LUA_TTABLE: {
       auto const num_roots = lua_rawlen(state, -1);
-      auto const roots_idx = lua_absindex(state, -1);
-      roots.reserve(num_roots);
-      for (lua_pushnil(state); lua_next(state, roots_idx) != 0;) {
-        if (auto const value_t = lua_type(state, -1); value_t != LUA_TSTRING) {
+      auto roots_tbl = -1;
+      for (auto i = 1; i <= num_roots; ++i) {
+        auto const value_t = lua_geti(state, roots_tbl, i);
+        if (value_t != LUA_TSTRING) {
           throw UnexpectedType("roots[i]", LUA_TSTRING, value_t);
         }
         roots.push_back(
             fs::canonical(root / fs::path(lua_tolstring(state, -1, nullptr))));
-        lua_pop(state, 1);
       }
+      lua_pop(state, static_cast<int>(num_roots) + 1);
     } break;
     case LUA_TNIL:
       throw MissingField("roots");
@@ -1235,7 +1255,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     break;
   }
 
-  switch (auto const compiler_t = lua_getfield(state, -3, "compiler")) {
+  switch (auto const compiler_t = lua_getfield(state, -1, "compiler")) {
   case LUA_TTABLE:
     compiler = Module::parse_compiler_table(state);
     break;
@@ -1244,8 +1264,9 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   default:
     throw UnexpectedType("compiler", LUA_TTABLE, compiler_t);
   }
+  lua_pop(state, 1);
 
-  switch (auto const install_dir_t = lua_getfield(state, -4, "install_dir")) {
+  switch (auto const install_dir_t = lua_getfield(state, -1, "install_dir")) {
   case LUA_TSTRING:
     install_dir = (root / lua_tolstring(state, -1, nullptr)).string();
     break;
@@ -1254,20 +1275,27 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   default:
     throw UnexpectedType("install_dir", LUA_TSTRING, install_dir_t);
   }
+  lua_pop(state, 1);
 
-  includes.reserve(10);
-  for (auto const &root : roots) {
-    auto found = false;
-    for (auto const &include : includes) {
-      if (include == fs::canonical(root.parent_path())) {
-        found = true;
+  switch (type) {
+  case Module_t::EXE:
+    includes.reserve(1);
+    includes.push_back(fs::canonical(root.parent_path()));
+    break;
+  case Module_t::STATIC:
+    includes.reserve(roots.size());
+    for (auto const &root : roots) {
+      auto const found = std::find(includes.begin(), includes.end(),
+                                   fs::canonical(root.parent_path()));
+      if (found != includes.end()) {
+        includes.push_back(fs::canonical(root.parent_path()));
       }
     }
-    if (!found) {
-      includes.push_back(fs::canonical(root.parent_path()));
-    }
+  case Module_t::DYNAMIC:
+    break;
   }
-  switch (auto const include_t = lua_getfield(state, -5, "include")) {
+
+  switch (auto const include_t = lua_getfield(state, -1, "include")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
     auto include = -1;
@@ -1288,9 +1316,14 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   default:
     throw UnexpectedType("include", LUA_TTABLE, include_t);
   }
+  lua_pop(state, 1);
+
   append_include_paths(compiler);
   auto &&[macros, def_macros] = append_predefined_macros(compiler);
-  switch (auto const linking_t = lua_getfield(state, -6, "linking")) {
+
+  // TODO: rework this, only use it for system/library includes that we
+  // (luamake) doesn't control
+  switch (auto const linking_t = lua_getfield(state, -1, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
     linking.reserve(len);
@@ -1312,8 +1345,9 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   default:
     throw UnexpectedType("linking", LUA_TTABLE, linking_t);
   }
+  lua_pop(state, 1);
 
-  switch (auto const macro_t = lua_getfield(state, -7, "macros")) {
+  switch (auto const macro_t = lua_getfield(state, -1, "macros")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
     auto macros = -1;
@@ -1339,8 +1373,38 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   default:
     throw UnexpectedType("macros", LUA_TTABLE, macro_t);
   }
+  lua_pop(state, 1);
 
-  lua_pop(state, 6);
+  switch (type) {
+  case Module_t::EXE:
+    break;
+  case Module_t::STATIC: {
+    switch (auto const header_t = lua_getfield(state, -1, "headers")) {
+    case LUA_TTABLE: {
+      auto const len = lua_rawlen(state, -1);
+      auto headers_tbl = -1;
+      for (auto i = 1; i <= len; ++i) {
+        switch (auto const value_t = lua_geti(state, headers_tbl, i)) {
+        case LUA_TSTRING: {
+          headers.push_back(lua_tostring(state, 0));
+        } break;
+        default:
+          throw UnexpectedType("headers[i]", LUA_TSTRING, value_t);
+        }
+        --headers_tbl;
+      }
+      lua_pop(state, static_cast<int>(len));
+    } break;
+    case LUA_TNIL:
+      break;
+    default:
+      throw UnexpectedType("headers", LUA_TTABLE, header_t);
+    }
+
+  } break;
+  case Module_t::DYNAMIC:
+    break;
+  }
   interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
 }
 
@@ -2173,6 +2237,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
 }
 
 // TODO: switch this to use userdata, which should make things faster to process
+// TODO: double check that this function isn't doing redundant type checks
 auto clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -2202,7 +2267,7 @@ auto clang(lua_State *state) noexcept -> int {
 
   // this seems slow, should benchmark it to see if it's causing the massive
   // slow down i'm noticing
-  auto string_fut =
+  auto compiler_path_fut =
       std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
 #if defined(_WIN32)
         auto constexpr path_sep = ';';
@@ -2296,7 +2361,7 @@ auto clang(lua_State *state) noexcept -> int {
 
   // wait until the very end to let the async function run the longest, idk if
   // this is a good thing i'm bad with async stuff
-  auto const path_to_compiler = string_fut.get();
+  auto const path_to_compiler = compiler_path_fut.get();
   if (path_to_compiler == fs::path()) {
     lua_pushstring(state, "Unable to find clang++ binary.");
     return lua_error(state);
@@ -2447,6 +2512,14 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
       res.append(1, ',');
       return res;
     }();
+    // this seems to be working, but it really shouldn't be, i need to seperate
+    // the -I and -isystem includes, truthfully i would like to enforce the use
+    // of -iquote :)
+    auto const includes = std::accumulate(
+        mod.includes.cbegin(), mod.includes.cend(), std::string(),
+        [](auto &&a, auto &&next) {
+          return std::format("{}\"-isystem\",\"{}\",", a, next.string());
+        });
 
     auto cc_json_string = std::string(1, '[');
     for (auto i = size_t{}; i < mod.tree.num_files - 1; ++i) {
@@ -2455,6 +2528,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
 
       cc_json_string.append("\"arguments\":[");
       cc_json_string.append(arguments);
+      cc_json_string.append(includes);
 
       cc_json_string.append("\"-c\",\"-o\",");
       auto const fname = mod.tree.get_path(i).stem().string();
@@ -2479,6 +2553,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
 
     cc_json_string.append("\"arguments\":[");
     cc_json_string.append(arguments);
+    cc_json_string.append(includes);
 
     cc_json_string.append("\"-c\",\"-o\",");
     auto const fname =
@@ -2507,8 +2582,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
     }
     cc_json.write(cc_json_string.c_str(), 1, cc_json_string.size());
 
-    lua_pushstring(state, "cc_json not impl");
-    return lua_error(state);
+    return 0;
   } catch (std::exception const &e) {
     lua_pushstring(
         state,
