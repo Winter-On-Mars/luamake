@@ -446,6 +446,7 @@ struct Module final {
   vector<fs::path> roots;
   vector<fs::path> headers;
   vector<fs::path> includes;
+  vector<fs::path> dep_includes;
   vector<fs::path> sys_includes;
   vector<fs::path> linking;
   pp::Interpreter interpreter;
@@ -953,8 +954,20 @@ auto Module::display(std::ostream &out) const noexcept -> void {
   std::for_each(roots.begin(), roots.end(), _display);
   out << "]\n";
 
+  out << "headers = [";
+  std::for_each(headers.begin(), headers.end(), _display);
+  out << "]\n";
+
   out << "includes= [";
   std::for_each(includes.begin(), includes.end(), _display);
+  out << "]\n";
+
+  out << "dep_includes= [";
+  std::for_each(dep_includes.begin(), dep_includes.end(), _display);
+  out << "]\n";
+
+  out << "sys_includes= [";
+  std::for_each(sys_includes.begin(), sys_includes.end(), _display);
   out << "]\n";
 
   out << "linking = [";
@@ -1278,10 +1291,14 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   lua_pop(state, 1);
 
   switch (type) {
-  case Module_t::EXE:
+  case Module_t::EXE: {
     includes.reserve(1);
-    includes.push_back(fs::canonical(root.parent_path()));
-    break;
+    auto const test = fs::canonical(roots[0]).parent_path();
+#ifdef DEBUG
+    expr_dbg(test);
+#endif // DEBUG
+    includes.push_back(test);
+  } break;
   case Module_t::STATIC:
     includes.reserve(roots.size());
     for (auto const &root : roots) {
@@ -1386,7 +1403,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
       for (auto i = 1; i <= len; ++i) {
         switch (auto const value_t = lua_geti(state, headers_tbl, i)) {
         case LUA_TSTRING: {
-          headers.push_back(lua_tostring(state, 0));
+          headers.push_back(root / fs::path(lua_tostring(state, -1)));
         } break;
         default:
           throw UnexpectedType("headers[i]", LUA_TSTRING, value_t);
@@ -1418,12 +1435,21 @@ auto Module::gen_dep_tree() -> void {
 }
 
 auto Module::format_includes() const -> std::string {
-  auto res = string();
-  res.reserve(256); // idk random number can def be optimized :)
-  for (auto const &path : includes) {
-    res += std::format(" -I{}", path.string());
-  }
-  return res;
+  auto include_func = [](auto &&e, auto &&next) {
+    return std::format("{} -I{}", e, next.string());
+  };
+  auto dep_func = [](auto &&e, auto &&next) {
+    return std::format("{} -iquote {}", e, next.parent_path().string());
+  };
+  auto sys_func = [](auto &&e, auto &&next) {
+    return std::format("{} -isystem {}", e, next.string());
+  };
+  return std::accumulate(includes.cbegin(), includes.cend(), std::string(),
+                         include_func) +
+         std::accumulate(dep_includes.cbegin(), dep_includes.cend(),
+                         std::string(), dep_func) +
+         std::accumulate(sys_includes.cbegin(), sys_includes.cend(),
+                         std::string(), sys_func);
 }
 
 auto Module::format_links() const -> std::string {
@@ -1817,6 +1843,8 @@ auto install_exe(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
     ec.clear();
+
+    // rework this caching situation when the caching is actually working
     auto const path = fs::path(std::format("{}/__luamake_cache/{}.cache",
                                            exe_mod.install_dir, exe_mod.name));
 
@@ -1901,6 +1929,9 @@ auto install_static(lua_State *state) noexcept -> int {
     auto const mod_idx = lua_tointeger(state, -1);
     lua_pop(state, 1);
 
+    // i'm not sure if we actually need this variable now that we're using
+    // everything as an absolute path but i'm not going to test that right now
+    // and break everything :)
     auto const &parent_path = modules.get_module_path(mod_idx).parent_path();
 
     auto const &static_mod = modules.module_at(mod_idx);
@@ -1936,6 +1967,25 @@ auto install_static(lua_State *state) noexcept -> int {
     if (system(invoked_command.c_str()) != 0) {
       lua_pushstring(
           state, std::format("Error compiling [{}]", invoked_command).c_str());
+      return lua_error(state);
+    }
+
+    fs::create_directory(parent_path /
+                         fs::path(std::format("{}/{}", static_mod.install_dir,
+                                              static_mod.name)));
+    auto const copy_headers = std::format(
+        "cp --target-directory={} {}",
+        (parent_path / static_mod.install_dir / static_mod.name).string(),
+        std::accumulate(static_mod.headers.begin(), static_mod.headers.end(),
+                        std::string(), [](auto &&e, auto &&next) {
+                          return std::format("{} {}", e, next.string());
+                        }));
+    std::cout << '[' << copy_headers << "]\n";
+    std::cout.flush();
+    if (system(copy_headers.c_str()) != 0) {
+      lua_pushstring(
+          state,
+          std::format("Error moving headers [{}]", copy_headers).c_str());
       return lua_error(state);
     }
     return 0;
@@ -2443,11 +2493,16 @@ auto link_lib(lua_State *state) noexcept -> int {
     auto const lib_to_be_linked = lua_tointeger(state, -2);
     auto const lib_getting_diddled = lua_tointeger(state, -1);
 
-    auto &mod_linked = modules.module_at(lib_to_be_linked);
+    auto const &mod_linked = modules.module_at(lib_to_be_linked);
     auto &mod_d = modules.module_at(lib_getting_diddled);
 
-    // this is all we *should* have to do, i think we just need to make sure the
-    // install_static and install_exe functions work with this data layout
+    // this should be correct, basically stolen from the install_static
+    // function, there shouldn't be any issues, because the install_static
+    // function just dumps all the headers in the same out directory
+    mod_d.dep_includes.push_back(
+        modules.get_module_path(lib_to_be_linked) /
+        fs::path(
+            std::format("{}/{}", mod_linked.install_dir, mod_linked.name)));
     mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
                             ("lib" + mod_linked.name + ".a"));
 
@@ -2512,14 +2567,23 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
       res.append(1, ',');
       return res;
     }();
-    // this seems to be working, but it really shouldn't be, i need to seperate
-    // the -I and -isystem includes, truthfully i would like to enforce the use
-    // of -iquote :)
-    auto const includes = std::accumulate(
-        mod.includes.cbegin(), mod.includes.cend(), std::string(),
+
+    auto const includes =
+        std::accumulate(mod.includes.cbegin(), mod.includes.cend(),
+                        std::string(), [](auto &&a, auto &&next) {
+                          return std::format("{}\"-I{}\",", a, next.string());
+                        });
+    auto const sys_includes = std::accumulate(
+        mod.sys_includes.cbegin(), mod.sys_includes.cend(), std::string(),
         [](auto &&a, auto &&next) {
           return std::format("{}\"-isystem\",\"{}\",", a, next.string());
         });
+    auto const dep_includes =
+        std::accumulate(mod.dep_includes.cbegin(), mod.dep_includes.cend(),
+                        std::string(), [](auto &&a, auto &&next) {
+                          return std::format("{}\"-iquote\",\"{}\",", a,
+                                             next.parent_path().string());
+                        });
 
     auto cc_json_string = std::string(1, '[');
     for (auto i = size_t{}; i < mod.tree.num_files - 1; ++i) {
@@ -2528,15 +2592,16 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
 
       cc_json_string.append("\"arguments\":[");
       cc_json_string.append(arguments);
+
       cc_json_string.append(includes);
+      cc_json_string.append(sys_includes);
+      cc_json_string.append(dep_includes);
 
       cc_json_string.append("\"-c\",\"-o\",");
       auto const fname = mod.tree.get_path(i).stem().string();
       auto const obj_path =
           std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
-      expr_dbg(obj_path);
       auto const fpath = mod.tree.get_path(i);
-      expr_dbg(fpath);
       cc_json_string.append(
           std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
       cc_json_string.append("],");
@@ -2554,15 +2619,15 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
     cc_json_string.append("\"arguments\":[");
     cc_json_string.append(arguments);
     cc_json_string.append(includes);
+    cc_json_string.append(sys_includes);
+    cc_json_string.append(dep_includes);
 
     cc_json_string.append("\"-c\",\"-o\",");
     auto const fname =
         mod.tree.get_path(mod.tree.num_files - 1).stem().string();
     auto const obj_path =
         std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
-    expr_dbg(obj_path);
     auto const fpath = mod.tree.get_path(mod.tree.num_files - 1);
-    expr_dbg(fpath);
     cc_json_string.append(
         std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
     cc_json_string.append("],");
@@ -2573,6 +2638,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
 
     cc_json_string += ']';
 
+    fs::create_directory(mod.install_dir);
     auto const cc_json_path =
         mod.install_dir / fs::path("compile_commands.json");
     auto cc_json = File(cc_json_path, File::WRITE);
