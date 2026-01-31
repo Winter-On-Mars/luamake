@@ -1516,6 +1516,8 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
 // sort of a thread pool like structure that is just for compiling
 // TODO: update this to take advantage of the current layout for DepTree
 // i.e. relying on DepTree.types to determine what to compile
+// TODO: rewrite the system so that this can run in the background while we
+// build the dep tree for other modules, and just queue jobs into this as needed
 struct CompilationPool final {
   CompilationPool(size_t num_threads) noexcept;
 
