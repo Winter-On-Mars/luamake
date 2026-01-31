@@ -675,6 +675,7 @@ auto UndefNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_undef(*this);
 }
 
+#ifdef DEBUG
 struct AstPrinter final : AstVisitor {
   std::ostream &out;
   // i really love that in c++ this is a thing you can do :)
@@ -703,6 +704,7 @@ struct AstPrinter final : AstVisitor {
   auto visit_define_func(DefineFuncNode &) -> void final;
   auto visit_undef(UndefNode &) -> void final;
 };
+#endif
 
 struct AstIncluder final : AstVisitor {
   vector<fs::path> &paths;
@@ -2074,6 +2076,7 @@ auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
   return ExprNode(ExprNode::UNARY, std::move(_un));
 }
 
+#ifdef DEBUG
 auto AstPrinter::visit_if(IfNode &i) -> void {
   out << get_indents() << "(if (" << i.condition << ")\n";
   ++depth;
@@ -2168,6 +2171,7 @@ auto AstPrinter::visit_undef(UndefNode &u) -> void {
   out << get_indents() << "(define (" << u.name;
   out << "))\n";
 }
+#endif // DEBUG
 
 auto AstIncluder::visit_if(IfNode &i) -> void {
   if (ExprNode::eval(i.condition, macros, def_macros) != 0) {
