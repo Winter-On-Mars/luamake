@@ -474,6 +474,12 @@ struct UndefNode final : AstNode {
   string name;
 };
 
+struct PragmaNode final : AstNode {
+  PragmaNode() noexcept {}
+  ~PragmaNode() final = default;
+  auto accept(AstVisitor &visitor) -> void final;
+};
+
 struct Ast final {
   /**
    * @throws std::bad_alloc
@@ -642,6 +648,7 @@ struct AstVisitor {
   virtual auto visit_define(DefineNode &) -> void = 0;
   virtual auto visit_define_func(DefineFuncNode &) -> void = 0;
   virtual auto visit_undef(UndefNode &) -> void = 0;
+  virtual auto visit_pragma(PragmaNode &) -> void = 0;
 };
 
 auto IfNode::accept(AstVisitor &visitor) -> void {
@@ -674,6 +681,9 @@ auto DefineFuncNode::accept(AstVisitor &visitor) -> void {
 auto UndefNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_undef(*this);
 }
+auto PragmaNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_pragma(*this);
+}
 
 #ifdef DEBUG
 struct AstPrinter final : AstVisitor {
@@ -703,6 +713,7 @@ struct AstPrinter final : AstVisitor {
   auto visit_define(DefineNode &) -> void final;
   auto visit_define_func(DefineFuncNode &) -> void final;
   auto visit_undef(UndefNode &) -> void final;
+  auto visit_pragma(PragmaNode &) -> void final;
 };
 #endif
 
@@ -731,6 +742,7 @@ struct AstIncluder final : AstVisitor {
   auto visit_define(DefineNode &) -> void final;
   auto visit_define_func(DefineFuncNode &) -> void final;
   auto visit_undef(UndefNode &) -> void final;
+  auto visit_pragma(PragmaNode &) -> void final;
 };
 
 auto constexpr to_string(ir_t t) -> std::string_view {
@@ -939,6 +951,12 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
         i = skip_ws(fcontent, i) + 1;
         i = lex.produce_macro(fcontent, i);
         break;
+      case ir_t::PRAGMA: {
+        lex.types.push_back(ir_t::PRAGMA);
+        i = skip_ws(fcontent, i) + 1;
+        end = skip_until(" \t\n\r", fcontent, i + 1);
+        lex.push_lexeme(start + i, start + end);
+      } break;
       default:
         lex.types.push_back(keyword->second);
         break;
@@ -1145,9 +1163,11 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
     case ir_t::INCLUDE:
       then_branch.push_back(handle_include(cur_t, cur_lex));
       break;
-    case ir_t::PRAGMA:
-      then_branch.push_back(handle_pragma(cur_t, cur_lex));
-      break;
+    case ir_t::PRAGMA: {
+      auto res = handle_pragma(cur_t, cur_lex);
+      if (res)
+        then_branch.push_back(std::move(res));
+    } break;
     case ir_t::ELIF:
       cur = FoundEnd::elif;
       break;
@@ -1253,9 +1273,11 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
     case ir_t::INCLUDE:
       then_branch.push_back(handle_include(cur_t, cur_lex));
       break;
-    case ir_t::PRAGMA:
-      then_branch.push_back(handle_pragma(cur_t, cur_lex));
-      break;
+    case ir_t::PRAGMA: {
+      auto res = handle_pragma(cur_t, cur_lex);
+      if (res)
+        then_branch.push_back(std::move(res));
+    } break;
     case ir_t::ELIF:
       cur = FoundEnd::elif;
       break;
@@ -1348,9 +1370,11 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
     case ir_t::INCLUDE:
       then_branch.push_back(handle_include(cur_t, cur_lex));
       break;
-    case ir_t::PRAGMA:
-      then_branch.push_back(handle_pragma(cur_t, cur_lex));
-      break;
+    case ir_t::PRAGMA: {
+      auto res = handle_pragma(cur_t, cur_lex);
+      if (res)
+        then_branch.push_back(std::move(res));
+    } break;
     case ir_t::ELIF:
       cur = FoundEnd::elif;
       break;
@@ -1461,9 +1485,21 @@ auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
   }
 }
 
-auto Lexer::handle_pragma(size_t &, size_t &) -> std::unique_ptr<AstNode> {
-  throw Exception(
-      std::format("#pragma statement parsing is not currently implimented"));
+auto Lexer::handle_pragma(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  ++cur_t;
+  if (types[cur_t] != ir_t::LEXEME)
+    throw Exception(
+        std::format("Expected lexeme in #pragma preprocessor directive"));
+  ++cur_t;
+  if (lexemes[cur_lex] != "once") {
+    // ignore all pragma statements that aren't #pragma once, might need to
+    // rethink this
+    ++cur_t;
+    ++cur_lex;
+    return nullptr;
+  }
+  return std::make_unique<PragmaNode>();
 }
 
 auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
@@ -1496,9 +1532,11 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
     case ir_t::INCLUDE:
       res.push_back(handle_include(cur_t, cur_lex));
       break;
-    case ir_t::PRAGMA:
-      res.push_back(handle_pragma(cur_t, cur_lex));
-      break;
+    case ir_t::PRAGMA: {
+      auto prag = handle_pragma(cur_t, cur_lex);
+      if (prag)
+        res.push_back(std::move(prag));
+    } break;
     case ir_t::ELSE: // this error *should* be handled elsewhere
       [[fallthrough]];
     case ir_t::ELIF:
@@ -2171,6 +2209,10 @@ auto AstPrinter::visit_undef(UndefNode &u) -> void {
   out << get_indents() << "(define (" << u.name;
   out << "))\n";
 }
+
+auto AstPrinter::visit_pragma(PragmaNode &p) -> void {
+  out << get_indents() << "(pragma once)\n";
+}
 #endif // DEBUG
 
 auto AstIncluder::visit_if(IfNode &i) -> void {
@@ -2267,6 +2309,10 @@ auto AstIncluder::visit_undef(UndefNode &u) -> void {
     //  according to clang i should check what the docs have to say about this
     //  case
   }
+}
+
+auto AstIncluder::visit_pragma(PragmaNode &) -> void {
+  return; // ? idk if there's actually anything for us to do here
 }
 
 auto Exception::what() const noexcept -> string {
