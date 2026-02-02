@@ -188,9 +188,7 @@ auto Type::run() const noexcept -> exit_t {
         "gh");
     return exit_t::lua_vm_error; // internal service error
   }
-
-  builtins::make_lake_obj(state);
-  lua_setglobal(state, "Lake");
+  (void)lua_gc(state, LUA_GCSTOP);
 
   luaL_openlibs(state);
 

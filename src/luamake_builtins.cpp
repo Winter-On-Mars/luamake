@@ -69,6 +69,12 @@ extern "C" {
     }                                                                          \
   }
 
+#ifndef PERF_TESTING
+#define OS_CALL(command) system(command)
+#else
+#define OS_CALL(command) 0
+#endif
+
 namespace fs = std::filesystem;
 
 // TODO: reorder things in this namespace bc things are kind of all over the
@@ -1632,10 +1638,9 @@ auto CompilationPool::_thread_loop() noexcept -> void {
                       include_path, this_path.c_str(), mod->install_dir,
                       mod->name, this_path.stem().c_str());
       std::cout << "[" << invoked_command << "]\n";
-      std::cout.flush(); // this actually needs to stay here, something about
-                         // if the system command does io operations having an
-                         // unflushed stdout can cause problems
-      auto const res = system(invoked_command.c_str());
+      std::cout.flush();
+
+      auto const res = OS_CALL(invoked_command.c_str());
       if (res == 0) {
         auto res_lock = std::unique_lock(result_mtx);
         result += std::format("{}/{}.o/{}.o ", mod->install_dir, mod->name,
@@ -1882,7 +1887,7 @@ auto install_exe(lua_State *state) noexcept -> int {
     std::cout << "[" << invoked_command << "]\n";
     std::cout.flush();
 
-    if (system(invoked_command.c_str()) != 0) {
+    if (OS_CALL(invoked_command.c_str()) != 0) {
       lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
       return lua_error(state);
     } else {
@@ -1966,7 +1971,7 @@ auto install_static(lua_State *state) noexcept -> int {
 
     std::cout << '[' << invoked_command << "]\n";
     std::cout.flush();
-    if (system(invoked_command.c_str()) != 0) {
+    if (OS_CALL(invoked_command.c_str()) != 0) {
       lua_pushstring(
           state, std::format("Error compiling [{}]", invoked_command).c_str());
       return lua_error(state);
@@ -1984,7 +1989,7 @@ auto install_static(lua_State *state) noexcept -> int {
                         }));
     std::cout << '[' << copy_headers << "]\n";
     std::cout.flush();
-    if (system(copy_headers.c_str()) != 0) {
+    if (OS_CALL(copy_headers.c_str()) != 0) {
       lua_pushstring(
           state,
           std::format("Error moving headers [{}]", copy_headers).c_str());
@@ -2042,7 +2047,7 @@ auto run(lua_State *L) noexcept -> int {
   std::cout << "[" << exe_path << "]\n";
   std::cout.flush();
 
-  system(exe_path.data());
+  OS_CALL(exe_path.data());
 
   return 0;
 }
@@ -2738,19 +2743,6 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, run);
   lua_setfield(state, -2, "run");
-}
-
-// TODO: probably remove this and the Lake object
-auto make_lake_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 1);
-
-  lua_pushcfunction(state, require);
-  lua_setfield(state, -2, "require");
-
-  // this will set Lake[1] = $CWD, which could cause issues, but you should be
-  // calling luamake in the same directory with the luamake.lua file in it
-  lua_pushstring(state, fs::current_path().c_str());
-  lua_seti(state, -2, 1);
 }
 } // namespace builtins
 } // namespace luamake

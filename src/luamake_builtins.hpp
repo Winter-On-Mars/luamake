@@ -11,10 +11,8 @@ namespace luamake {
 namespace builtins {
 auto dump(lua_State *state) noexcept -> int;
 
-// TODO: update error handling
 auto make_builder_obj(lua_State *state) noexcept -> void;
 auto make_runner_obj(lua_State *state) noexcept -> void;
-auto make_lake_obj(lua_State *state) noexcept -> void;
 } // namespace builtins
 } // namespace luamake
 

@@ -4,7 +4,7 @@ bin_name:=build/luamake_c# TODO: change this when the c rewrite is done
 linker:=lld # if someone has clang they should have lld, so this is better, even if mold is a better linker
 includes:=lua
 
-.PHONY: all, dbg, ncolor, release, clean_submod
+.PHONY: all, dbg, ncolor, release, clean_submod, perf_testing
 
 files:=build/common.o build/luamake_strings.o build/luamake_pre_ir.o build/luamake_file.o build/luamake_builtins.o build/main.o
 lua_a:=lua/liblua.a
@@ -12,7 +12,7 @@ lua_a:=lua/liblua.a
 all: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
-dbg: cc_flags+=-ggdb3 -DDEBUG# might be a good idea to just use -g, but idk i only use gdb for debugging :)
+dbg: cc_flags+=-ggdb3 -DDEBUG -DPERF_TESTING
 dbg: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
@@ -22,6 +22,10 @@ ncolor: $(files)
 
 release: cc_flags+=-O3 -ffast-math -flto -march=native
 release: $(files)
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+
+perf_testing: cc_flags+=-ggdb3 -DPERF_TESTING
+perf_testing: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
 build/%.o: src/%.cpp
