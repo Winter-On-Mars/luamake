@@ -4,44 +4,19 @@
 #include "common.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <memory>
+#include <unistd.h>
 #include <utility>
 
-#ifdef DEBUG
-#include <cstring>
-#include <iostream>
+#ifdef __unix__
+#include <fcntl.h>
+#include <sys/stat.h>
 #endif
 
 namespace luamake {
-/*
-   shamelessly stealing this idea from
-[[https://www.youtube.com/watch?v=f30PceqQWko]]
-
-
-enum class IoType { SOURCE, SINK };
-
-template <IoType type> struct _File final {
-  auto write() {
-    if constexpr (type == IoType::SOURCE) {
-      write(...);
-
-    } else {
-      throw UnsupportedOperation();
-    }
-  }
-  auto read();
-#ifdef __unix__
-  int fd;
-#else
-  FILE* file;
-#endif
-};
-
-using SourceFile = _File<IoType::SOURCE>;
-using SinkFile = _File<IoType::SINK>;
-*/
-
 // TODO: add a macro to test if on unix system, and use unix os functions like
 // open, read, write, etc..., also update this to not be as bad :)
 struct File final {
@@ -53,7 +28,26 @@ struct File final {
 
   constexpr File(std::filesystem::path const &path,
                  permissions &&perms) noexcept
-      : file(nullptr) {
+      :
+#ifdef __unix__
+        fd(-1)
+#else
+        file(nullptr)
+#endif
+  {
+#ifdef __unix__
+    auto unix_perms = int{};
+    // there's probably a better way of writing this, but i can't think of it rn
+    if ((perms & READ) == READ && (perms & WRITE) == WRITE) {
+      unix_perms |= O_RDWR;
+    } else {
+      if ((perms & READ) == READ)
+        unix_perms |= O_RDONLY;
+      if ((perms & WRITE) == WRITE) {
+        unix_perms |= O_WRONLY;
+      }
+    }
+#else
     char max_length_perms[] = {0, 0, 0,
                                0}; // this should be 5 or 7 from man fread
     if ((perms & READ) == READ)
@@ -64,38 +58,91 @@ struct File final {
       max_length_perms[max_length_perms[0] != 0
                            ? max_length_perms[1] != 0 ? 2 : 1
                            : 0] = 'b';
-
+#endif
 #ifdef DEBUG
+#ifdef __unix__
+    std::cerr << "Opening [" << path << "] with options ["
+              << [](int perms) -> std::string {
+      auto res = std::string();
+      if ((perms & O_RDONLY) == O_RDONLY)
+        res += "r";
+      if ((perms & O_WRONLY) == O_WRONLY)
+        res += "w";
+      return res;
+    }(unix_perms) << "]\n";
+#else
     std::cerr << "Opening [" << path << "] with options [" << max_length_perms
               << "]\n";
+#endif // __unix__
 #endif // DEBUG
+
+#ifdef __unix__
+    fd = open(path.c_str(), unix_perms);
+#else
     file = fopen(path.c_str(), max_length_perms);
+#endif
   }
   constexpr ~File() noexcept {
+#ifdef __unix__
+    if (fd != -1)
+      close(fd);
+#else
     if (file != nullptr)
       fclose(file);
+#endif
   }
 
+#ifndef __unix__
   // implicit conversion operator to FILE*
   operator FILE *() const noexcept { return file; }
+#endif
 
   auto write(void const *__restrict ptr, size_t size, size_t amount) noexcept
       -> size_t {
+#ifdef __unix__
+    return static_cast<size_t>(::write(fd, ptr, size * amount));
+#else
     return fwrite(ptr, size, amount, file);
+#endif // __unix__
   }
 
   /// @return returns the amount read from the file stream
   auto read(void *__restrict dest, size_t size, size_t n) noexcept -> size_t {
+#ifdef __unix__
+    return static_cast<size_t>(::read(fd, dest, size * n));
+#else
     return fread(dest, size, n, file);
+#endif // __unix__
   }
 
-  auto write_num(int c) noexcept -> int { return fputc(c, file); }
-
-  auto flush() noexcept -> void { fflush(file); }
+  auto flush() noexcept -> void {
+#ifdef __unix__
+    fdatasync(fd);
+#else
+    fflush(file);
+#endif // __unix__
+  }
 
   // TODO: add better error handling
   // doesn't reset the file, consumes the entire content
   auto dump_content() noexcept -> std::pair<size_t, std::unique_ptr<u8[]>> {
+#ifdef __unix__
+    struct ::stat file_stats = {};
+    ::memset(&file_stats, 0, sizeof(file_stats));
+
+    auto const res = ::fstat(fd, &file_stats);
+    if (res == -1) {
+      std::cerr << "Error reading stats of file\n";
+      std::terminate();
+    }
+    auto const fsize = static_cast<size_t>(file_stats.st_size);
+    auto fcontent = std::make_unique<u8[]>(fsize + 1);
+    if (::read(fd, fcontent.get(), fsize) == -1) {
+      return std::make_pair(0, nullptr);
+    }
+    fcontent[fsize] = 0;
+    return std::make_pair(fsize, std::move(fcontent));
+#else
     auto fsize = size_t{};
     if (fseek(file, 0, SEEK_END) == -1) {
 #ifdef DEBUG
@@ -125,10 +172,23 @@ struct File final {
 
     fcontent[fsize] = 0;
     return {fsize, std::move(fcontent)};
+#endif
+  }
+
+  constexpr operator bool() const {
+#ifdef __unix__
+    return fd != -1;
+#else
+    return file != nullptr;
+#endif
   }
 
 private:
+#ifdef __unix__
+  int fd;
+#else
   FILE *file;
+#endif
 };
 
 auto constexpr operator|(File::permissions lhs, File::permissions rhs) noexcept

@@ -215,7 +215,7 @@ struct Lexer final {
   /**
    * @throws Lex_Exc
    */
-  static auto lex(FixedString const &) -> Lexer;
+  static auto lex(std::string_view const) -> Lexer;
 
   /**
    * @throws Lex_Exc
@@ -816,7 +816,7 @@ auto constexpr ExprNode::readable_type(Expr_t t) noexcept -> std::string_view {
 // interpreted as an int (0 == false, x == true), so we can just have our
 // interpreter worry about int's and their expressions, how they get converted
 // to int's etc
-auto Lexer::lex(FixedString const &file) -> Lexer {
+auto Lexer::lex(std::string_view const file) -> Lexer {
   // clang-format off
   static auto const keywords = unordered_map<string_view, ir_t>{{
     {string_view{"#if"}, ir_t::IF},
@@ -836,9 +836,11 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
   lex.types.reserve(64);
   lex.lexemes.reserve(10);
 
-  auto const fcontent = file.view();
+  // this can be removed idk i'm just leaving it here rn because i don't want to
+  // do a big refactor of this system rn
+  auto const fcontent = file;
   auto const start = fcontent.begin();
-  for (auto i = size_t{}; i < file.size;) {
+  for (auto i = size_t{}; i < file.size();) {
     switch (fcontent[i]) {
     case '#': {
       auto end = skip_until(" \t\r\n", fcontent, i);
@@ -855,12 +857,12 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
 
       switch (keyword->second) {
       case ir_t::INCLUDE: {
-        if (i >= file.size)
+        if (i >= file.size())
           throw Exception(string("Unable to parse include parameter"));
 
         i = skip_ws(fcontent, i) + 1;
 
-        if (i >= file.size)
+        if (i >= file.size())
           throw Exception(string("Unable to parse include parameter"));
 
         lex.types.push_back(ir_t::INCLUDE);
@@ -870,7 +872,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
 
           end = skip_until<'>'>(fcontent, i + 1);
 
-          if (!(end < file.size)) {
+          if (!(end < file.size())) {
             throw Exception(string("Non terminated global include"));
           }
 
@@ -884,7 +886,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
 
           end = skip_until<'"'>(fcontent, i + 1);
 
-          if (!(end < file.size)) {
+          if (!(end < file.size())) {
             throw Exception(string("Non terminated local include"));
           }
 
@@ -963,7 +965,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
       }
     } break;
     case '/': {
-      if (!(i + 1 < file.size)) {
+      if (!(i + 1 < file.size())) {
         throw Exception(string("'/' found at end of file"));
       }
       ++i;
@@ -975,7 +977,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
         // TODO: check this code, there might be an issue if the file
         // ends with a multi line comment, i.e. */ at the end of the file
         i = skip_until_close_multicomment(fcontent, i + 1);
-        if (i == file.size)
+        if (i == file.size())
           throw Exception(string("Non terminated multi line comment"));
       } break;
       default: // probably just an op /
@@ -985,7 +987,7 @@ auto Lexer::lex(FixedString const &file) -> Lexer {
     } break;
     case '"': {
       i = skip_until<'"'>(fcontent, i + 1) + 1;
-      if (!(i < file.size)) {
+      if (!(i < file.size())) {
         throw Exception(string("Non terminated string"));
       }
     } break;
@@ -2319,7 +2321,7 @@ auto Exception::what() const noexcept -> string {
   return std::format("[{}]", message);
 }
 
-auto Interpreter::interpret(FixedString const &file) -> vector<fs::path> {
+auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {
   auto ast = Lexer::lex(file).ast();
   auto vec = vector<fs::path>();
 #ifdef DEBUG

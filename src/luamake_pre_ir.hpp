@@ -1,8 +1,6 @@
 #ifndef __LUAMAKE_PRE_IR_HPP
 #define __LUAMAKE_PRE_IR_HPP
 
-#include "luamake_strings.hpp"
-
 #include <filesystem>
 #include <string>
 #include <unordered_map>
@@ -38,7 +36,7 @@ struct Interpreter final {
    * @throws Exception
    */
   [[nodiscard]]
-  auto interpret(FixedString const &) -> std::vector<std::filesystem::path>;
+  auto interpret(std::string_view const) -> std::vector<std::filesystem::path>;
 
 private:
   std::unordered_map<std::string, Macro> macros;

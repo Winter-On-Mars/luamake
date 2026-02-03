@@ -133,7 +133,7 @@ auto skip_ws(char const *ch) -> char const * {
 
 // algorithm
 // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function#FNV-1a_hash
-auto constexpr fnv1a(size_t size, char const *buffer) noexcept -> size_t {
+auto constexpr fnv1a(std::span<u8 const> const bytes) noexcept -> size_t {
   auto [hash, fnv1a_prime] = []() -> std::pair<size_t, size_t> {
     if constexpr (sizeof(size_t) == 4) {
       return std::make_pair(0x01000193, 0x811c9dc5);
@@ -144,8 +144,8 @@ auto constexpr fnv1a(size_t size, char const *buffer) noexcept -> size_t {
     }
   }();
 
-  for (size_t i{0}; i < size; ++i) {
-    hash = hash ^ static_cast<size_t>(buffer[i]);
+  for (size_t i{0}; i < bytes.size(); ++i) {
+    hash = hash ^ static_cast<size_t>(bytes[i]);
     hash = hash * fnv1a_prime;
   }
 
@@ -678,12 +678,12 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   if (!file)
     throw FileDoesNotExist(dep, tree.get_path(parent_idx));
 
-  auto const file_string = DepTree::get_file_content(file);
-  auto &&[fcontent, fsize] = file_string;
+  auto &&[fsize, fcontent] = file.dump_content();
 
-  auto hash_fut = std::async(std::launch::async, [fcontent, fsize]() {
-    return fnv1a(fsize, fcontent);
-  });
+  auto hash_fut = std::async(
+      std::launch::async,
+      [fsize](u8 const *fcontent) { return fnv1a(std::span(fcontent, fsize)); },
+      fcontent.get());
   auto const ftype = DepTree::determine_file_type(dep.extension());
   if (ftype == DepTree::SourceFile_t::HEADER) {
     auto constexpr potential_extensions = array<string_view, 2>{{".cpp", ".c"}};
@@ -701,7 +701,10 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   tree.types[this_idx] = ftype;
   tree.files[this_idx] = str;
 
-  auto const files_deps = interpreter.interpret(file_string);
+  // this is a big point of failure that needs to be checked to make sure it
+  // works
+  auto const files_deps = interpreter.interpret(
+      std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
 
   for (auto const &file : files_deps) {
     auto const maybe_file = [&]() -> std::optional<fs::path> {
@@ -848,7 +851,7 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 
 auto Module::serialize(fs::path const &path) const -> void {
   auto outfile = File(path, File::WRITE | File::BINARY);
-  if (outfile == nullptr) {
+  if (!outfile) {
     return;
   }
   throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
@@ -857,7 +860,7 @@ auto Module::serialize(fs::path const &path) const -> void {
 auto Module::deserialize(fs::path const &path)
     -> std::variant<Module, std::string> {
   auto file = File(path, File::READ | File::BINARY);
-  if (file == nullptr) {
+  if (!file) {
     return std::format("unable to open serialization file [{}]", path.c_str());
   }
   return std::format("{} not impl", __PRETTY_FUNCTION__);
