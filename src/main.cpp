@@ -6,6 +6,11 @@
 #include <string_view>
 #include <type_traits>
 
+#ifdef __unix__
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 extern "C" {
 #include "lauxlib.h"
 #include "lua.h"
@@ -43,6 +48,21 @@ struct user_func_config final {
   lua_State *state;
   bool release;
 };
+
+// TODO: add a version of this that doesn't depend of __unix__ or c++>=20
+auto file_exists(fs::path &&path) noexcept -> bool {
+#ifdef __unix__
+  auto file = open(path.c_str(), O_PATH);
+  close(file);
+  return file != -1;
+#else
+  try {
+    return fs::exists(path);
+  } catch (...) {
+    return false;
+  }
+#endif
+}
 
 static auto build(user_func_config const *const) noexcept -> exit_t;
 static auto new_proj(char const *, proj_t const) noexcept -> exit_t;
@@ -192,12 +212,7 @@ auto Type::run() const noexcept -> exit_t {
 
   luaL_openlibs(state);
 
-  // TODO: change this to just use the fs::exists function
-  // could probably run some tests to see which is faster
-  // also we can try to have a compatability layer so you don't
-  // need as modern of a compiler, i.e. one that doesn't support c++20
-  auto *lm_lua = fopen((fs::current_path() / "luamake.lua").c_str(), "r");
-  if (lm_lua == nullptr) {
+  if (!file_exists(fs::current_path() / "luamake.lua")) {
     ferror_message("unable to discover `luamake.lua` in current dir at [%s]" NL
                    "\tRun "
                    "init <proj-name> to create a initialize a new project, "
@@ -205,7 +220,6 @@ auto Type::run() const noexcept -> exit_t {
                    fs::current_path().c_str());
     return exit_t::config_error;
   }
-  (void)fclose(lm_lua);
   if (luaL_dofile(state, "luamake.lua") != LUA_OK) {
     ferror_message("unable to run the discovered `luamake.lua` file at "
                    "[%s]" NL "\tLua error message [%s]",
