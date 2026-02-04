@@ -24,6 +24,7 @@ struct File final {
     READ = 1 << 0,
     WRITE = 1 << 1,
     BINARY = 1 << 2,
+    CREATE = 1 << 3,
   };
 
   constexpr File(std::filesystem::path const &path,
@@ -36,15 +37,19 @@ struct File final {
 #endif
   {
 #ifdef __unix__
+#define bitset(bit) (perms & bit) == bit
     auto unix_perms = int{};
     // there's probably a better way of writing this, but i can't think of it rn
-    if ((perms & READ) == READ && (perms & WRITE) == WRITE) {
+    if (bitset(READ) && bitset(WRITE)) {
       unix_perms |= O_RDWR;
     } else {
-      if ((perms & READ) == READ)
+      if (bitset(READ))
         unix_perms |= O_RDONLY;
-      if ((perms & WRITE) == WRITE) {
+      if (bitset(WRITE)) {
         unix_perms |= O_WRONLY;
+      }
+      if (bitset(CREATE)) {
+        unix_perms |= O_CREAT;
       }
     }
 #else
@@ -64,10 +69,12 @@ struct File final {
     std::cerr << "Opening [" << path << "] with options ["
               << [](int perms) -> std::string {
       auto res = std::string();
-      if ((perms & O_RDONLY) == O_RDONLY)
+      if (bitset(READ))
         res += "r";
-      if ((perms & O_WRONLY) == O_WRONLY)
+      if (bitset(WRITE))
         res += "w";
+      if (bitset(CREATE))
+        res += "c";
       return res;
     }(unix_perms) << "]\n";
 #else
@@ -77,7 +84,15 @@ struct File final {
 #endif // DEBUG
 
 #ifdef __unix__
-    fd = open(path.c_str(), unix_perms);
+    if (bitset(CREATE)) {
+      // read write user, read for everyone else, this seems to be the standard
+      // that most file systems use when you create a file
+      fd =
+          open(path.c_str(), unix_perms, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    } else {
+      fd = open(path.c_str(), unix_perms);
+    }
+#undef bitset
 #else
     file = fopen(path.c_str(), max_length_perms);
 #endif
