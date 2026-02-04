@@ -1,7 +1,12 @@
+#include "common.hpp"
+#include "luamake_builtins.hpp"
+#include "luamake_file.hpp"
+
 #include <array>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <iostream>
 #include <string_view>
 #include <type_traits>
@@ -16,9 +21,6 @@ extern "C" {
 #include "lua.h"
 #include "lualib.h"
 }
-
-#include "common.hpp"
-#include "luamake_builtins.hpp"
 
 namespace fs = std::filesystem;
 
@@ -44,6 +46,8 @@ enum class proj_t : unsigned char {
   Static,
 };
 
+// TODO: add the command line args to this function so that the functions/ the
+// luamake files themselves can use them
 struct user_func_config final {
   lua_State *state;
   bool release;
@@ -65,7 +69,7 @@ auto file_exists(fs::path &&path) noexcept -> bool {
 }
 
 static auto build(user_func_config const *const) noexcept -> exit_t;
-static auto new_proj(char const *, proj_t const) noexcept -> exit_t;
+static auto new_proj(string_view const, proj_t const) noexcept -> exit_t;
 static auto init_proj(char const *, proj_t const) noexcept -> exit_t;
 static auto clean() noexcept -> exit_t;
 static auto test(user_func_config const *const) noexcept -> exit_t;
@@ -317,13 +321,13 @@ static auto build(user_func_config const *const c) noexcept -> exit_t {
   return exit_t::ok;
 }
 
-static auto new_proj(char const *project_name, proj_t const type) noexcept
+static auto new_proj(string_view const project_name, proj_t const type) noexcept
     -> exit_t {
   auto const project_root = fs::current_path() / project_name;
 
   if (fs::exists(project_root)) {
     ferror_message("Project [%s] already exists at [%s]" NL "\tExiting",
-                   project_name, project_root.c_str());
+                   project_name.data(), project_root.c_str());
     return exit_t::useage_error;
   }
 
@@ -335,88 +339,100 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
   fs::create_directory(project_root / "src");
 
   // creating default `luamake.lua`
-  auto *luamake_lua = fopen((project_root / "luamake.lua").c_str(), "w");
-  if (luamake_lua == nullptr) {
+  auto luamake_lua =
+      File(project_root / "luamake.lua", File::WRITE | File::CREATE);
+  if (!luamake_lua) {
     ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
                    "with permissions, or out of space.",
                    (fs::current_path() / "luamake.lua").c_str());
     return exit_t::internal_error;
   }
 
+  // these are all format strings, so they need to be passed to std::format
   auto constexpr lua_f_content = std::array<string_view, 3>{
       // clang-format off
       string_view{"function Build(b)" NL
-                  "    local exe = {" NL
-                  "        name = \"a\"," NL
+                  "    local exe = b:new_exe({{" NL
+                  "        name = \"{0}\"," NL
                   "        root = \"src/main.cpp\"," NL
-                  "        compiler = b.clang({})," NL
+                  "        compiler = b.clang({{}})," NL
                   "        version = \"0.0.1\"," NL
                   "        install_dir = \"build\"," NL
-                  "    }" NL
+                  "    }})" NL
                   NL
-                  "    b.install_exe(exe)" NL
+                  "    return b.install_exe(exe)" NL
                   "end" NL
                   NL
                   "function Run(r)" NL
-                  "    local exe = {" NL
-                  "        name = \"a\"," NL
-                  "        path = \"build/a\"," NL
-                  "        args = {}," NL
-                  "    }" NL
+                  "    local exe = {{" NL
+                  "        name = \"{0}\"," NL
+                  "        path = \"build/{0}\"," NL
+                  "        args = {{}}," NL
+                  "    }}" NL
                   NL
                   "    r.run(exe)" NL
                   "end" NL
                   NL
-                  "Tests = {" NL
-                  "    {" NL
+                  "Tests = {{" NL
+                  "    {{" NL
                   "        fun = function(t)" NL
-                  "            t.exe = \"build/a\"" NL
-                  "            t.args = {\"This does nothing\"}" NL
+                  "            t.exe = \"build/{0}\"" NL
+                  "            t.args = {{\"This does nothing\"}}" NL
                   "        end," NL
-                  "        output = {" NL
+                  "        output = {{" NL
                   "            expected = \"Hello World!\\n\"," NL
                   "            from = \"stdout\"," NL
-                  "        }," NL
-                  "    }" NL
-                  "}" NL},
-      string_view{"function Build(b)" NL
-                  "    local dlib = {" NL
-                  "        roots = { \"src/dyn.cpp\" }," NL
-                  "        compiler = b.clang({})," NL
-                  "        name = \"a\"," NL
+                  "        }}," NL
+                  "    }}" NL
+                  "}}" NL},
+      string_view{"local function Build(b)" NL
+                  "    local dlib = b:new_dynamic({{" NL
+                  "        roots = {{ \"src/dyn.cpp\" }}," NL
+                  "        headers = {{ \"src/dyn.hpp\" }}," NL
+                  "        compiler = b.clang({{}})," NL
+                  "        name = \"{0}\"," NL
                   "        version = \"0.0.1\"," NL
                   "        install_dir = \"build\"," NL
-                  "    }" NL
-                  "    b.install_dynamic(dlib)" NL
+                  "    }})" NL
+                  "    return b.install_dynamic(dlib)" NL
                   "end" NL
+                  NL
+                  "return {{" NL
+                  "    Build = Build" NL
+                  "}}"
                   },
-      string_view{"function Build(b)" NL
-                  "    local slib = {" NL
-                  "        roots = { \"src/static.cpp\" }," NL
-                  "        compiler = b.clang({})," NL
-                  "        name = \"a\"," NL
+      string_view{"local function Build(b)" NL
+                  "    local slib = b:new_static({{" NL
+                  "        roots = {{ \"src/static.cpp\" }}," NL
+                  "        headers = {{ \"src/static.hpp\" }}," NL
+                  "        compiler = b.clang({{}})," NL
+                  "        name = \"{0}\"," NL
                   "        version = \"0.0.1\"," NL
                   "        install_dir = \"build\"," NL
-                  "    }" NL
-                  "    b.install_static(slib)" NL
+                  "    }})" NL
+                  "    return b.install_static(slib)" NL
                   "end" NL
+                  NL
+                  "return {{" NL
+                  "    Build = Build" NL
+                  "}}"
                   },
       // clang-format on
   };
 
-  auto const actual_string =
-      lua_f_content[static_cast<std::underlying_type_t<proj_t>>(type)];
+  auto const actual_string = std::vformat(
+      lua_f_content[static_cast<std::underlying_type_t<proj_t>>(type)],
+      std::make_format_args(project_name));
 
-  if (fprintf(luamake_lua, "%s", actual_string.data()) !=
-      actual_string.length()) {
+  if (luamake_lua.write(actual_string.c_str(), actual_string.size(), 1) !=
+      actual_string.size()) {
     ferror_message("Unable to write full luamake template string into the lua "
                    "file at [%s]",
                    (project_root / "luamake.lua").c_str());
-    fclose(luamake_lua);
     return exit_t::internal_error;
   }
 
-  fflush(luamake_lua);
+  luamake_lua.flush();
 
   auto constexpr file_paths = array<pair<string_view, string_view>, 3>{
       pair("", "src/main.cpp"),
@@ -505,8 +521,8 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
     return exit_t::internal_error;
   }
 
-  auto *impl = fopen((project_root / impl_f_name).c_str(), "w");
-  if (impl == nullptr) {
+  auto impl = File(project_root / impl_f_name, File::WRITE | File::CREATE);
+  if (!impl) {
     ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
                    "with permissions, or out of space.",
                    (project_root / impl_f_name).c_str());
@@ -517,25 +533,20 @@ static auto new_proj(char const *project_name, proj_t const type) noexcept
       fprintf(header, "%s", header_string.data()) != header_string.length()) {
     ferror_message("Unable to write full hpp file template string at [%s]",
                    (project_root / header_f_name).c_str());
-    fclose(luamake_lua);
     fclose(header);
-    fclose(impl);
     return exit_t::internal_error;
   }
 
-  if (fprintf(impl, "%s", impl_string.data()) != impl_string.length()) {
+  if (impl.write(impl_string.data(), impl_string.size(), 1) !=
+      impl_string.size()) {
     ferror_message("Unable to write full cpp file template string at [%s]",
                    (project_root / impl_f_name).c_str());
-    fclose(luamake_lua);
     fclose(header);
-    fclose(impl);
     return exit_t::internal_error;
   }
 
-  fclose(luamake_lua);
   if (header != nullptr)
     fclose(header);
-  fclose(impl);
 
   return exit_t::ok;
 }
