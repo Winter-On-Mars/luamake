@@ -871,6 +871,10 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
     return false;
 
   // tree
+  for (auto i = size_t{}; i < tree.num_files; ++i) {
+    if (tree.hashes[i] != that.tree.hashes[i])
+      return false;
+  }
   if (tree.all_paths.view() != that.tree.all_paths.view())
     return false;
 
@@ -894,10 +898,6 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
       if (tree.deps[i][j] != that.tree.deps[i][j])
         return false;
     }
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    if (tree.hashes[i] != that.tree.hashes[i])
-      return false;
   }
 
   // rest of the class
@@ -1005,13 +1005,20 @@ auto Module::display(std::ostream &out) const noexcept -> void {
 }
 #endif // DEBUG
 
+static auto include_path_cache =
+    std::unordered_map<std::string_view, vector<fs::path>>();
 // TODO: i think i'm not properly handling child procs, so see about fixing it
 // in these two functions :)
-//
-// this function is breaking things :), fix it, figue
-// out how pipes work and shit also because we have this now windows support is
-// most likely borked :)
+// from some basic perf testing, these two functions seem to be the biggest slow
+// downs, they should be run in parallel (or just in the background) which will
+// help speed things up. We could rework the thread pool to allow for arbitrary
+// functions to be run(?)
 auto Module::append_include_paths(string_view const compiler) -> void {
+  if (auto includes = include_path_cache.find(compiler);
+      includes != include_path_cache.end()) {
+    sys_includes = includes->second;
+    return;
+  }
   auto _pipes = array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
     throw CAPI(strerror(errno));
@@ -1047,6 +1054,8 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     // there's probably a better way of doing this, but this is the most
     // straightforward way i can think of
     close(write_pipe);
+    auto includes = vector<fs::path>();
+    includes.reserve(10);
     auto constexpr buffer_size = sizeof(char) * size_t{2 << 8};
     // code is technically unsafe, bc many of the std::string functions can
     // throw, leaking this buffer :)
@@ -1091,19 +1100,32 @@ auto Module::append_include_paths(string_view const compiler) -> void {
       // there's probably a better way to do this, but idk this is fine for now
       // :)
       if (fs::exists(fs::path(string_view(start_path, end_path)))) {
+        includes.emplace_back(fs::canonical(fs::path(start_path, end_path)));
+        /*
         sys_includes.emplace_back(
             fs::canonical(fs::path(start_path, end_path)));
+            */
       }
       start_path = skip_ws(end_path);
     }
+    include_path_cache[compiler] = includes;
+    sys_includes = includes;
     (void)waitpid(pid, nullptr, WNOHANG);
   } break;
   }
 }
 
+static auto predefined_macros_cache =
+    std::unordered_map<std::string_view,
+                       std::pair<std::unordered_map<std::string, pp::Macro>,
+                                 std::unordered_set<std::string>>>();
 auto Module::append_predefined_macros(string_view const compiler)
     -> std::pair<std::unordered_map<std::string, pp::Macro>,
                  std::unordered_set<std::string>> {
+  if (auto macros = predefined_macros_cache.find(compiler);
+      macros != predefined_macros_cache.end()) {
+    return macros->second;
+  }
   auto _pipes = array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
     throw CAPI(strerror(errno));
@@ -1215,7 +1237,9 @@ auto Module::append_predefined_macros(string_view const compiler)
     close(read_pipe);
 
     // reached EOF
-    return std::make_pair(macros, def_macros);
+    auto res = std::make_pair(std::move(macros), std::move(def_macros));
+    predefined_macros_cache[compiler] = res;
+    return res;
   } break;
   }
   unreachable();
@@ -1288,6 +1312,14 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
   lua_pop(state, 1);
 
+  auto res = std::async(std::launch::async, [this]() {
+    this->append_include_paths(this->compiler);
+  });
+  auto macros_res = std::async(std::launch::async, [this]() {
+    return this->append_predefined_macros(this->compiler);
+  });
+  // auto &&[macros, def_macros] = append_predefined_macros(compiler);
+
   switch (auto const install_dir_t = lua_getfield(state, -1, "install_dir")) {
   case LUA_TSTRING:
     install_dir = (root / lua_tolstring(state, -1, nullptr)).string();
@@ -1344,9 +1376,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
   lua_pop(state, 1);
 
-  append_include_paths(compiler);
-  auto &&[macros, def_macros] = append_predefined_macros(compiler);
-
   // TODO: rework this, only use it for system/library includes that we
   // (luamake) doesn't control
   switch (auto const linking_t = lua_getfield(state, -1, "linking")) {
@@ -1370,34 +1399,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     break;
   default:
     throw UnexpectedType("linking", LUA_TTABLE, linking_t);
-  }
-  lua_pop(state, 1);
-
-  switch (auto const macro_t = lua_getfield(state, -1, "macros")) {
-  case LUA_TTABLE: {
-    auto const len = lua_rawlen(state, -1);
-    auto macros = -1;
-    for (auto i = 1; i <= len; ++i) {
-      switch (auto const value_t = lua_geti(state, macros, i)) {
-      case LUA_TSTRING: {
-        auto mac = string(lua_tolstring(state, -1, nullptr));
-        if (mac.find('=') != mac.npos) {
-          // TODO: parse macro being set to value
-        } else {
-          def_macros.insert(std::move(mac));
-        }
-      } break;
-      default:
-        throw UnexpectedType("macros[i]", LUA_TSTRING, value_t);
-      }
-      --macros;
-    }
-    lua_pop(state, static_cast<int>(len));
-  } break;
-  case LUA_TNIL:
-    break;
-  default:
-    throw UnexpectedType("macros", LUA_TTABLE, macro_t);
   }
   lua_pop(state, 1);
 
@@ -1431,6 +1432,37 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   case Module_t::DYNAMIC:
     break;
   }
+
+  auto &&[macros, def_macros] = macros_res.get();
+  switch (auto const macro_t = lua_getfield(state, -1, "macros")) {
+  case LUA_TTABLE: {
+    auto const len = lua_rawlen(state, -1);
+    auto macros = -1;
+    for (auto i = 1; i <= len; ++i) {
+      switch (auto const value_t = lua_geti(state, macros, i)) {
+      case LUA_TSTRING: {
+        auto mac = string(lua_tolstring(state, -1, nullptr));
+        if (mac.find('=') != mac.npos) {
+          // TODO: parse macro being set to value
+        } else {
+          def_macros.insert(std::move(mac));
+        }
+      } break;
+      default:
+        throw UnexpectedType("macros[i]", LUA_TSTRING, value_t);
+      }
+      --macros;
+    }
+    lua_pop(state, static_cast<int>(len));
+  } break;
+  case LUA_TNIL:
+    break;
+  default:
+    throw UnexpectedType("macros", LUA_TTABLE, macro_t);
+  }
+  lua_pop(state, 1);
+
+  res.get();
   interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
 }
 
