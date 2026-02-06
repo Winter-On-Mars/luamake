@@ -4,7 +4,7 @@ bin_name:=build/luamake_c# TODO: change this when the c rewrite is done
 linker:=lld # if someone has clang they should have lld, so this is better, even if mold is a better linker
 includes:=lua
 
-.PHONY: all, dbg, ncolor, release, clean_submod, perf_testing
+.PHONY: all, dbg, ncolor, release, clean_submod, perf_testing, perf_testing_release
 
 files:=build/common.o build/luamake_strings.o build/luamake_pre_ir.o build/luamake_file.o build/luamake_builtins.o build/main.o
 lua_a:=lua/liblua.a
@@ -26,6 +26,10 @@ release: $(files)
 
 perf_testing: cc_flags+=-ggdb3 -DPERF_TESTING
 perf_testing: $(files) $(lua_a)
+	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+
+perf_testing_release: cc_flags+=-DPERF_TESTING -O3 -ffast-math -flto -march=native
+perf_testing_release: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
 build/%.o: src/%.cpp
