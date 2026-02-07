@@ -53,18 +53,21 @@ struct user_func_config final {
   bool release;
 };
 
-// TODO: add a version of this that doesn't depend of __unix__ or c++>=20
 auto file_exists(fs::path &&path) noexcept -> bool {
-#ifdef __unix__
+#if defined(__unix__)
   auto file = open(path.c_str(), O_PATH);
   close(file);
   return file != -1;
-#else
+#elif __cplusplus >= 201703L
   try {
     return fs::exists(path);
   } catch (...) {
     return false;
   }
+#else
+  auto *file = fopen(path.c_str(), "r");
+  fclose(file);
+  return file != nullptr;
 #endif
 }
 
