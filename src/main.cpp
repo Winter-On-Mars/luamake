@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include "luamake_builtins.hpp"
 #include "luamake_file.hpp"
+#include "luamake_string_manip.hpp"
 
 #include <array>
 #include <cstdio>
@@ -71,13 +72,14 @@ auto file_exists(fs::path &&path) noexcept -> bool {
 #endif
 }
 
-static auto build(user_func_config const *const) noexcept -> exit_t;
-static auto new_proj(string_view const, proj_t const) noexcept -> exit_t;
-static auto init_proj(char const *, proj_t const) noexcept -> exit_t;
 static auto clean() noexcept -> exit_t;
-static auto test(user_func_config const *const) noexcept -> exit_t;
-static auto run(user_func_config const *const) noexcept -> exit_t;
+static auto new_proj(string_view const, proj_t const) noexcept -> exit_t;
+static auto init_proj(string_view const, proj_t const) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
+
+static auto build(user_func_config const &) noexcept -> exit_t;
+static auto run(user_func_config const &) noexcept -> exit_t;
+static auto test(user_func_config const &) noexcept -> exit_t;
 
 struct Type final {
   // TODO: add command for generating compile_commands.json to the project
@@ -99,7 +101,7 @@ struct Type final {
 
   static auto make(int, char **) noexcept -> Type;
 
-  auto run() const noexcept -> exit_t;
+  auto do_command() const noexcept -> exit_t;
 };
 
 auto Type::make(int argc, char **argv) noexcept -> Type {
@@ -135,7 +137,7 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
   }
 }
 
-auto Type::run() const noexcept -> exit_t {
+auto Type::do_command() const noexcept -> exit_t {
   switch (type_t) {
   case UNKNOWN_ARG:
     return help();
@@ -152,7 +154,7 @@ auto Type::run() const noexcept -> exit_t {
         break;
       }
     }
-    return new_proj(argv[2], project_type);
+    return new_proj(string_view{argv[2]}, project_type);
   }
   case INIT: {
     char const *project_root = nullptr;
@@ -251,77 +253,43 @@ auto Type::run() const noexcept -> exit_t {
   }
 
   switch (type_t) {
-  case BUILD: {
-    res = build(&cfg);
-  } break;
-  case TEST: {
-    res = test(&cfg);
-  } break;
-  case RUN: {
-    res = luamake::run(&cfg);
-  } break;
+  case BUILD:
+    res = build(cfg);
+    break;
+  case TEST:
+    res = test(cfg);
+    break;
+  case RUN:
+    res = run(cfg);
+    break;
+  case CLEAN:
+    [[fallthrough]];
   case UNKNOWN_ARG:
     [[fallthrough]];
   case NEW:
     [[fallthrough]];
   case INIT:
     [[fallthrough]];
-  case CLEAN:
-    [[fallthrough]];
   case HELP:
-    res = exit_t::internal_error;
-    break;
+    unreachable();
   }
   lua_close(state);
   return res;
 }
 
-static auto build(user_func_config const *const c) noexcept -> exit_t {
-  using enum exit_t;
-
-  auto build_lua_fn = lua_getglobal(c->state, "Build");
-  // function undefined in `luamake.lua`
-  if (build_lua_fn == LUA_TNIL) {
-    error_message(
-        "Unable to find function `Build` in discovered `luamake.lua`." NL
-        "\tSee README/wiki for more info");
-    return exit_t::config_error;
-  }
-  // value Build is defined as a global, but isn't a function
-  if (build_lua_fn != LUA_TFUNCTION) {
-    error_message("`Build` value found in `luamake.lua`, but is not a "
-                  "function (might be callable [why would you do that?])." NL
-                  "\tSee README/wiki for more info, and if is a callable, feel "
-                  "free to open a gh issue to fix this problem (and maybe "
-                  "explain why the code's formatted this way lol)");
-    return exit_t::config_error;
-  }
-
-  auto builder = lua_getglobal(c->state, BUILDER_OBJ);
-  switch (builder) {
-  case LUA_TNIL:
-    lua_pop(c->state, 1);
-    builtins::make_builder_obj(c->state);
-    break;
-  case LUA_TTABLE:
-    break;
-  default:
-    ferror_message("`builder` object was defined, but it's type was expected "
-                   "to be table, got [%s]",
-                   lua_typename(c->state, lua_type(c->state, -1)));
-    return exit_t::config_error;
-  }
-
-  if (lua_pcall(c->state, 1, 1, 0) != LUA_OK) {
-    auto const err_message = lua_tolstring(c->state, -1, nullptr);
-    ferror_message("While in the lua vm, Build function" NL "\t[%s]",
-                   err_message);
-    return exit_t::lua_vm_error; // ?
-  }
-
-  (void)lua_gc(c->state, LUA_GCSTOP);
-
-  return exit_t::ok;
+// TODO: update this to have an optional command line arg called like
+// --recursive, to recursively clear the build files, maybe that should just be
+// folded into the base behaviour of this function, but as of now it will
+// require reworking how we deal with modules, which seems like a really big
+// thing i don't wanna do rn
+// TODO: update how we store and access the modules, because we need them here
+// so that we can get the names of certain directories, that way we make sure
+// we're only cleaning things that we produce, i.e. cache files, obj files that
+// we generate etc
+static auto clean() noexcept -> exit_t {
+  error_message("cleaning is not currently implimented, feel free to work on "
+                "contributing to the project by adding it");
+  return exit_t::internal_error;
 }
 
 static auto new_proj(string_view const project_name, proj_t const type) noexcept
@@ -555,7 +523,7 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
 }
 
 // TODO: update this function so that the template strings are actually correct
-static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
+static auto init_proj(string_view root, proj_t const type) noexcept -> exit_t {
   auto *luamake_file = fopen("./luamake.lua", "w");
   if (luamake_file == nullptr) {
     ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
@@ -650,107 +618,6 @@ static auto init_proj(char const *root, proj_t const type) noexcept -> exit_t {
   return exit_t::ok;
 }
 
-// TODO: update this to clean the install_dir param of the users config
-static auto clean() noexcept -> exit_t {
-  // remove everything from ./build
-  // where `.` is the dir that luamake is being called from
-
-  auto const clean_path = fs::current_path() / "build";
-  using namespace std::string_view_literals;
-  printf("Cleaning [%s]\n", clean_path.c_str());
-
-  if (!fs::exists(clean_path)) {
-    printf("[%s] does not exist (either previously cleaned, or never "
-           "constructed).\nNothing to do exiting\n",
-           clean_path.c_str());
-    return exit_t::ok;
-  }
-
-  // TODO: finish writting this stuff
-  for (auto const &dir_ent : fs::recursive_directory_iterator(clean_path)) {
-    // maybe a better way to go about thing?
-    switch (dir_ent.status().type()) {
-    case fs::file_type::not_found:
-    case fs::file_type::none:
-    case fs::file_type::regular:
-    case fs::file_type::block:
-    case fs::file_type::directory:
-    case fs::file_type::fifo:
-    case fs::file_type::character:
-    case fs::file_type::socket:
-    case fs::file_type::symlink:
-    case fs::file_type::unknown:
-      break;
-    }
-    if (dir_ent.is_regular_file()) {
-      std::cout << "Removing" << dir_ent << '\n';
-      fs::remove(dir_ent);
-    }
-    // fs::remove(file);
-  }
-
-  printf("Done Cleaning\n");
-
-  return exit_t::ok;
-}
-
-static auto test(user_func_config const *const c) noexcept -> exit_t {
-  builtins::make_builder_obj(c->state);
-  lua_pushboolean(c->state, true);
-  lua_setfield(c->state, -2, TESTING_MACRO);
-
-  auto const build_res = build(c);
-  if (build_res != exit_t::ok) {
-    error_message("Occurred during build phase of test");
-    return build_res;
-  }
-
-  // TODO
-  return exit_t::internal_error;
-}
-
-static auto run(user_func_config const *const c) noexcept -> exit_t {
-  auto build_res = build(c);
-  if (build_res != exit_t::ok) {
-    error_message("Occurred during build phase of run");
-    return build_res;
-  }
-
-  auto run_fn = lua_getglobal(c->state, "Run");
-  if (run_fn == LUA_TNIL) {
-    error_message("Function `Run` is undefined in the "
-                  "discovered `luamake.lua`." NL
-                  "\tSee README in [[github link]] for more info.");
-    return exit_t::config_error;
-  }
-
-  auto runner_t = lua_getglobal(c->state, RUNNER_OBJ);
-  switch (runner_t) {
-  case LUA_TNIL:
-    lua_pop(c->state, 1);
-    builtins::make_runner_obj(c->state);
-    break;
-  case LUA_TTABLE:
-    break;
-  default:
-    ferror_message("`runner` object was defined, but it's type was expected to "
-                   "be table, got [%s]",
-                   lua_typename(c->state, lua_type(c->state, -1)));
-    return exit_t::config_error;
-  };
-
-  if (lua_pcall(c->state, 1, 0, 0) != LUA_OK) {
-    auto const err_message = lua_tolstring(c->state, -1, nullptr);
-    ferror_message("While in the lua vm, Run function" NL "\t[%s]",
-                   err_message);
-    return exit_t::lua_vm_error;
-  }
-
-  (void)lua_gc(c->state, LUA_GCSTOP);
-
-  return exit_t::ok;
-}
-
 static auto help() noexcept -> exit_t {
   // clang-format off
   printf(
@@ -780,22 +647,122 @@ static auto help() noexcept -> exit_t {
   fflush(stdout);
   return exit_t::ok;
 }
+
+static auto build(user_func_config const &c) noexcept -> exit_t {
+  auto const build_lua_fn = lua_getglobal(c.state, "Build");
+  // function undefined in `luamake.lua`
+  if (build_lua_fn == LUA_TNIL) {
+    error_message(
+        "Unable to find function `Build` in discovered `luamake.lua`." NL
+        "\tSee README/wiki for more info");
+    return exit_t::config_error;
+  }
+  // value Build is defined as a global, but isn't a function
+  if (build_lua_fn != LUA_TFUNCTION) {
+    error_message("`Build` value found in `luamake.lua`, but is not a "
+                  "function (might be callable [why would you do that?])." NL
+                  "\tSee README/wiki for more info, and if is a callable, feel "
+                  "free to open a gh issue to fix this problem (and maybe "
+                  "explain why the code's formatted this way lol)");
+    return exit_t::config_error;
+  }
+
+  auto const builder = lua_getglobal(c.state, BUILDER_OBJ);
+  switch (builder) {
+  case LUA_TNIL:
+    lua_pop(c.state, 1);
+    builtins::make_builder_obj(c.state);
+    break;
+  case LUA_TTABLE:
+    break;
+  default:
+    ferror_message("`builder` object was defined, but it's type was expected "
+                   "to be table, got [%s]",
+                   lua_typename(c.state, lua_type(c.state, -1)));
+    return exit_t::config_error;
+  }
+
+  if (lua_pcall(c.state, 1, 1, 0) != LUA_OK) {
+    auto const err_message = lua_tolstring(c.state, -1, nullptr);
+    ferror_message("While in the lua vm, Build function" NL "\t[%s]",
+                   err_message);
+    return exit_t::lua_vm_error; // ?
+  }
+
+  return exit_t::ok;
+}
+
+static auto run(user_func_config const &c) noexcept -> exit_t {
+  auto build_res = build(c);
+  if (build_res != exit_t::ok) {
+    error_message("Occurred during build phase of run");
+    return build_res;
+  }
+
+  auto run_fn = lua_getglobal(c.state, "Run");
+  if (run_fn == LUA_TNIL) {
+    error_message("Function `Run` is undefined in the "
+                  "discovered `luamake.lua`." NL
+                  "\tSee README in [[github link]] for more info.");
+    return exit_t::config_error;
+  }
+
+  auto runner_t = lua_getglobal(c.state, RUNNER_OBJ);
+  switch (runner_t) {
+  case LUA_TNIL:
+    lua_pop(c.state, 1);
+    builtins::make_runner_obj(c.state);
+    break;
+  case LUA_TTABLE:
+    break;
+  default:
+    ferror_message("`runner` object was defined, but it's type was expected to "
+                   "be table, got [%s]",
+                   lua_typename(c.state, lua_type(c.state, -1)));
+    return exit_t::config_error;
+  };
+
+  if (lua_pcall(c.state, 1, 0, 0) != LUA_OK) {
+    auto const err_message = lua_tolstring(c.state, -1, nullptr);
+    ferror_message("While in the lua vm, Run function" NL "\t[%s]",
+                   err_message);
+    return exit_t::lua_vm_error;
+  }
+
+  return exit_t::ok;
+}
+
+static auto test(user_func_config const &c) noexcept -> exit_t {
+  builtins::make_builder_obj(c.state);
+  lua_pushboolean(c.state, true);
+  lua_setfield(c.state, -2, TESTING_MACRO);
+
+  auto const build_res = build(c);
+  if (build_res != exit_t::ok) {
+    error_message("Occurred during build phase of test");
+    return build_res;
+  }
+
+  // TODO
+  return exit_t::internal_error;
+}
 } // namespace
 } // namespace luamake
 
 auto main(int argc, char **argv) -> int {
-  auto const flags = luamake::Type::Type::make(argc, argv);
-  switch (flags.run()) {
-  case luamake::exit_t::ok:
+  using namespace luamake;
+  auto const flags = Type::Type::make(argc, argv);
+  switch (flags.do_command()) {
+  case exit_t::ok:
     return 0;
-  case luamake::exit_t::internal_error:
+  case exit_t::internal_error:
     error_message("Internal Service Error, probably not implimented yet :)");
     return 1;
-  case luamake::exit_t::lua_vm_error:
+  case exit_t::lua_vm_error:
     return 1;
-  case luamake::exit_t::config_error:
+  case exit_t::config_error:
     return 70;
-  case luamake::exit_t::useage_error:
+  case exit_t::useage_error:
     return 65;
   }
 }

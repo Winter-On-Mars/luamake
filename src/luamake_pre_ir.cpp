@@ -1,5 +1,6 @@
 #include "luamake_pre_ir.hpp"
 #include "common.hpp"
+#include "luamake_string_manip.hpp"
 #include "luamake_strings.hpp"
 
 #include <algorithm>
@@ -40,43 +41,6 @@ using buffer_views = luamake::StringViews;
 namespace luamake {
 namespace pp {
 namespace {
-auto constexpr skip_ws(string_view const buf, size_t i) -> size_t {
-  auto constexpr ws = std::string_view{" \t\n\r"};
-  // idk could probably just use this for this function
-  // it might be faster, something to test, also maybe more readable,
-  // maybe somebody could commit a pr with this as a commit that would be a good
-  // first commit :)
-  // [[auto const x = buf.find(ws, i);]]
-  while (i < buf.size()) {
-    if (ws.find(buf[i]) != ws.npos) {
-      return i;
-    }
-    ++i;
-  }
-  return i;
-}
-
-auto constexpr skip_until(string_view const delims, string_view const buf,
-                          size_t i) -> size_t {
-  while (i < buf.size()) {
-    if (delims.find(buf[i]) != delims.npos) {
-      return i;
-    }
-    ++i;
-  }
-  return i;
-}
-
-template <char delim>
-auto constexpr skip_until(string_view const buf, size_t i) -> size_t {
-  while (i < buf.size()) {
-    if (delim == buf[i])
-      return i;
-    ++i;
-  }
-  return i;
-}
-
 auto constexpr skip_until_close_multicomment(string_view const buf, size_t i)
     -> size_t {
   while (i < buf.size() && i + 1 < buf.size()) {
@@ -98,10 +62,6 @@ auto constexpr skip_until(size_t i, std::span<T> const buf, T delim) -> size_t {
     ++i;
   }
   return i;
-}
-
-auto constexpr is_any_of(string_view const delims, char ch) -> bool {
-  return delims.find(ch) != delims.npos;
 }
 
 enum class delims : size_t {
@@ -128,34 +88,6 @@ auto constexpr delims_list = std::array<string_view, 9>{{
 auto constexpr delims_at(delims &&del) -> string_view {
   return delims_list[static_cast<std::underlying_type_t<delims>>(del)];
 }
-
-auto constexpr is_digit(char ch) noexcept -> bool {
-  if (ch - '0' >= 0 && ch - '9' <= 0)
-    return true;
-  else
-    return false;
-}
-
-static_assert(is_digit('9'));
-static_assert(!is_digit('a'));
-static_assert(is_digit('4'));
-static_assert(is_digit('5'));
-static_assert(!is_digit('!'));
-
-auto constexpr is_alpha(char ch) noexcept -> bool {
-  if ((ch - 'a' >= 0 && ch - 'z' <= 0) || (ch - 'A' >= 0 && ch - 'Z' <= 0))
-    return true;
-  else
-    return false;
-}
-
-static_assert(!is_alpha('9'));
-static_assert(is_alpha('a'));
-static_assert(is_alpha('A'));
-static_assert(is_alpha('X'));
-static_assert(!is_alpha('4'));
-static_assert(!is_alpha('5'));
-static_assert(!is_alpha('!'));
 
 // TODO: extract this function out so we can use it in the ExprNode::eval
 // function
@@ -843,14 +775,14 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
   for (auto i = size_t{}; i < file.size();) {
     switch (fcontent[i]) {
     case '#': {
-      auto end = skip_until(" \t\r\n", fcontent, i);
+      auto end = luamake::skip_until(std::string_view(" \t\r\n"), fcontent, i);
 
       auto const hash_keyword = string_view{start + i, start + end};
       i = end;
       auto const keyword = keywords.find(hash_keyword);
       if (keyword == keywords.end()) {
         // continue to next character of interest
-        i = skip_until(chars_of_interest, fcontent, i);
+        i = luamake::skip_until(chars_of_interest, fcontent, i);
         throw Exception(
             std::format("Hash keyword [{}], is not implimented", hash_keyword));
       }
@@ -870,7 +802,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         case '<': {
           lex.types.push_back(ir_t::LANGLE);
 
-          end = skip_until<'>'>(fcontent, i + 1);
+          end = luamake::skip_until('>', fcontent, i + 1);
 
           if (!(end < file.size())) {
             throw Exception(string("Non terminated global include"));
@@ -884,7 +816,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         case '"': {
           lex.types.push_back(ir_t::QUOTE);
 
-          end = skip_until<'"'>(fcontent, i + 1);
+          end = luamake::skip_until('"', fcontent, i + 1);
 
           if (!(end < file.size())) {
             throw Exception(string("Non terminated local include"));
@@ -902,19 +834,20 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       case ir_t::IFDEF: {
         lex.types.push_back(ir_t::IFDEF);
         i = skip_ws(fcontent, i) + 1;
-        end = skip_until(" \t\n\r", fcontent, i + 1);
+        end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
       case ir_t::IFNDEF: {
         lex.types.push_back(ir_t::IFNDEF);
         i = skip_ws(fcontent, i) + 1;
-        end = skip_until(" \t\n\r", fcontent, i + 1);
+        end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
       case ir_t::DEFINE: {
         lex.types.push_back(ir_t::DEFINE);
         i = skip_ws(fcontent, i) + 1;
-        end = skip_until(" (\t\n\r", fcontent, i + 1);
+        end =
+            luamake::skip_until(std::string_view(" (\t\n\r"), fcontent, i + 1);
         lex.push_lexeme(string(start + i, start + end));
         i = end;
         switch (fcontent[i]) {
@@ -945,7 +878,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       case ir_t::UNDEF: {
         lex.types.push_back(ir_t::UNDEF);
         i = skip_ws(fcontent, i) + 1;
-        end = skip_until(" \t\n\r", fcontent, i + 1);
+        end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
       case ir_t::IF:
@@ -956,7 +889,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       case ir_t::PRAGMA: {
         lex.types.push_back(ir_t::PRAGMA);
         i = skip_ws(fcontent, i) + 1;
-        end = skip_until(" \t\n\r", fcontent, i + 1);
+        end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
       default:
@@ -971,7 +904,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       ++i;
       switch (fcontent[i]) {
       case '/': { // skip until \n
-        i = skip_until<'\n'>(fcontent, i + 1);
+        i = luamake::skip_until('\n', fcontent, i + 1);
       } break;
       case '*': { // skip until */
         // TODO: check this code, there might be an issue if the file
@@ -981,18 +914,18 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           throw Exception(string("Non terminated multi line comment"));
       } break;
       default: // probably just an op /
-        i = skip_until("#/\"", fcontent, i + 1);
+        i = luamake::skip_until(std::string_view("#/\""), fcontent, i + 1);
         break;
       }
     } break;
     case '"': {
-      i = skip_until<'"'>(fcontent, i + 1) + 1;
+      i = luamake::skip_until('"', fcontent, i + 1) + 1;
       if (!(i < file.size())) {
         throw Exception(string("Non terminated string"));
       }
     } break;
     default:
-      i = skip_until("#/\"", fcontent, i + 1);
+      i = luamake::skip_until(std::string_view("#/\""), fcontent, i + 1);
       break;
     }
   }
@@ -1890,7 +1823,7 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
         tkns.push_back(DEFINED);
       } else {
         auto const start = i;
-        i = skip_until(delims_at(delims::LEXEME), str, i);
+        i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
         tkns.push_back(MACRO);
         macros.push_back(string(str.data() + start, str.data() + i));
       }
@@ -1981,13 +1914,13 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
           }
         } else {
           auto const start = i;
-          i = skip_until(delims_at(delims::ALLOWED_DECIMAL), str, i);
+          i = luamake::skip_until(delims_at(delims::ALLOWED_DECIMAL), str, i);
           tkns.push_back(LIT_DEC);
           macros.push_back(string(str.data() + start, str.data() + i));
         }
       } else if (is_alpha(ch)) {
         auto const start = i;
-        i = skip_until(delims_at(delims::LEXEME), str, i);
+        i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
         tkns.push_back(MACRO);
         macros.push_back(string(str.data() + start, str.data() + i));
       } else {
