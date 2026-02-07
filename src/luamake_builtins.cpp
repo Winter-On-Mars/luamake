@@ -2683,7 +2683,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
     fs::create_directory(mod.install_dir);
     auto const cc_json_path =
         mod.install_dir / fs::path("compile_commands.json");
-    auto cc_json = File(cc_json_path, File::WRITE);
+    auto cc_json = File(cc_json_path, File::WRITE | File::CREATE);
     if (!cc_json) {
       throw std::runtime_error(
           std::format("Unable to make file {}", cc_json_path.string()));
