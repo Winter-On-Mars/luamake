@@ -2087,120 +2087,6 @@ auto run(lua_State *L) noexcept -> int {
   return 0;
 }
 
-// TODO: update this function to work with the static_lib.roots
-auto link_static(lua_State *state) noexcept -> int {
-  LUA_ASSERT_FORMAT(
-      state, num_args, lua_gettop(state), 3,
-      "Expected 3 arguments to the link static function '[static library]"
-      "[exe][args]?', found [%d] arguments",
-      num_args);
-  for (int i = -1; i >= -3; --i) {
-    LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, i), LUA_TTABLE,
-                      "Expected type of argument to be table, found [%s]",
-                      lua_typename(arg_t));
-  }
-
-  // going to ignore the args parameter for now, idk what would even go in it
-  // tbh
-  auto const slib_idx = lua_absindex(state, -3);
-  auto const exe_idx = lua_absindex(state, -2);
-
-  // check if there is already an include table
-  switch (auto const include_table_t =
-              lua_getfield(state, exe_idx, "include")) {
-  case LUA_TNIL:
-    lua_pop(state, 1);
-    lua_createtable(state, 1, 0); // include_tbl
-    break;
-  case LUA_TTABLE:
-    break;
-  default:
-    lua_pushstring(state,
-                   std::format("Found include field in [exe] table, but was "
-                               "of incorrect type. Expected [table] found {}",
-                               lua_typename(include_table_t))
-                       .c_str());
-    return lua_error(state);
-  }
-  auto const include_tbl = lua_absindex(state, -1);
-
-  // get slib.roots for the -I flag
-  switch (auto const roots_t = lua_getfield(state, slib_idx, "roots")) {
-  case LUA_TTABLE:
-    break;
-  case LUA_TNIL:
-    lua_pushstring(
-        state,
-        "Missing field [static library].roots in the `link_static` function");
-    return lua_error(state);
-  default:
-    lua_pushstring(
-        state,
-        std::format("In `link_static` function, expected type of field [static "
-                    "labrary].roots to be of type [table] found [{}]",
-                    lua_typename(roots_t))
-            .c_str());
-    return lua_error(state);
-  }
-  auto const roots = lua_absindex(state, -1);
-  // i'm just assuming that this table is an array, and that the user won't
-  // mess that up
-  auto init_include_tbl_len = lua_rawlen(state, -2);
-  for (lua_pushnil(state); lua_next(state, roots); ++init_include_tbl_len) {
-    LUA_ASSERT_FORMAT(
-        state, value_t, lua_type(state, -1), LUA_TSTRING,
-        "Expected value type in roots table to be a [string], found %s",
-        lua_typename(value_t));
-    auto const path = fs::path(lua_tolstring(state, -1, nullptr));
-    lua_pushstring(state, path.parent_path().c_str());
-    lua_seti(state, include_tbl,
-             static_cast<lua_Integer>(init_include_tbl_len) + 1);
-    lua_pop(state, 1); // still need to pop the original value from the stack
-  }
-
-  lua_pop(state, 1); // remove the roots table from the top of the stack
-
-  lua_setfield(state, exe_idx, "include");
-
-  // check if there's already a linking table in the object
-  switch (auto const linking_tbl_t = lua_getfield(state, exe_idx, "linking")) {
-  case LUA_TNIL:
-    lua_pop(state, 1);
-    lua_createtable(state, 1, 0); // include_tbl
-    break;
-  case LUA_TTABLE:
-    break;
-  default:
-    lua_pushstring(state,
-                   std::format("Found linking field in [exe], but was "
-                               "of incorrect type. Expected [table] found [{}]",
-                               lua_typename(linking_tbl_t))
-                       .c_str());
-    return lua_error(state);
-  }
-  // get slib.name and slib.install_dir for adding the archive to be linked
-  LUA_ASSERT_FORMAT(
-      state, name_t, lua_getfield(state, slib_idx, "name"), LUA_TSTRING,
-      "Expected type of [static library].name to be [string] found [%s]",
-      lua_typename(name_t));
-  LUA_ASSERT_FORMAT(
-      state, install_dir_t, lua_getfield(state, slib_idx, "install_dir"),
-      LUA_TSTRING,
-      "Expected type of [static library].root to be [string] found [%s]",
-      lua_typename(install_dir_t));
-  auto const link_format =
-      std::format("{}/lib{}.a", lua_tolstring(state, -1, nullptr),
-                  lua_tolstring(state, -2, nullptr));
-  lua_pop(state, 2);
-  lua_pushstring(state, link_format.c_str());
-
-  auto const link_tbl_len = lua_rawlen(state, -2);
-  lua_seti(state, -2, static_cast<lua_Integer>(link_tbl_len + 1));
-
-  lua_setfield(state, exe_idx, "linking");
-  return 0;
-}
-
 // NOTE: this function pushes a new builder object onto the stack, which means
 // that if you want to test subprojects you can't really (because the
 // LUAMAKE_TEST#n macro won't be included in the compilation)
@@ -2715,7 +2601,7 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 10);
+  lua_createtable(state, 1, 9);
 
   lua_pushcfunction(state, clang);
   lua_setfield(state, -2, "clang");
@@ -2731,9 +2617,6 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, install_static);
   lua_setfield(state, -2, "install_static");
-
-  lua_pushcfunction(state, link_static);
-  lua_setfield(state, -2, "link_static");
 
   lua_pushcfunction(state, build_dep);
   lua_setfield(state, -2, "build_dep");
