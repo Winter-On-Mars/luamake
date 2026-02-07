@@ -2201,21 +2201,23 @@ auto link_static(lua_State *state) noexcept -> int {
   return 0;
 }
 
+// NOTE: this function pushes a new builder object onto the stack, which means
+// that if you want to test subprojects you can't really (because the
+// LUAMAKE_TEST#n macro won't be included in the compilation)
 auto build_dep(lua_State *state) noexcept -> int {
-  LUA_EXPECTED_ARGUMENTS(state, 2, build_dep);
+  LUA_EXPECTED_ARGUMENTS(state, 1, build_dep);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to function "
                     "`build_dep` to be number, found [%s]",
                     lua_typename(ret_t));
-  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
-                    "Expected type of argument to function "
-                    "`build_dep` to be table, found [%s]",
-                    lua_typename(ret_t));
 
   try {
     auto const luamake_path = modules.get_module_path(lua_tointeger(state, -1));
+    lua_pop(state, 1);
+#ifdef DEBUG
     std::cout << "luamake_path = [" << luamake_path.c_str() << "]\n";
     std::cout.flush();
+#endif
 
     if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
       (void)lua_pushfstring(
@@ -2225,46 +2227,26 @@ auto build_dep(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
 
-    switch (auto const t = lua_type(state, -1)) {
-    case LUA_TTABLE: {
-      if (auto const build_t = lua_getfield(state, -1, "Build");
-          build_t != LUA_TFUNCTION) {
-        (void)lua_pushstring(state, "Expected `Build` to have type function "
-                                    "when returned from script file in table");
-        return lua_error(state);
-      }
+    LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                      "Expected table, found [%s]", lua_typename(ret_t));
 
-      // this seems wasteful, but idk how to get the b that is calling this
-      // function on top of the stack
-      builtins::make_builder_obj(state);
-
-      lua_pushstring(state, luamake_path.parent_path().c_str());
-      lua_seti(state, -2, lua_Integer{1});
-
-      if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
-        return lua_error(state);
-      }
-      return 0;
-    } break;
-    case LUA_TFUNCTION: {
-      builtins::make_builder_obj(state);
-
-      lua_pushstring(state, luamake_path.parent_path().c_str());
-      lua_seti(state, -2, lua_Integer{1});
-
-      if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
-        return lua_error(state);
-      }
-      return 0;
-    } break;
-    default:
-      (void)lua_pushfstring(state,
-                            "Unexpected return type from function, found %s, "
-                            "expected either table or function",
-                            lua_typename(t));
+    if (auto const build_func_t = lua_getfield(state, -1, "Build");
+        build_func_t != LUA_TFUNCTION) {
+      (void)lua_pushfstring(
+          state,
+          "Expected `Build` to have type function when "
+          "returned in a table from the `luamake.lua` script at [%s]",
+          luamake_path.c_str());
       return lua_error(state);
     }
 
+    builtins::make_builder_obj(state);
+    lua_pushstring(state, luamake_path.parent_path().c_str());
+    lua_seti(state, -2, lua_Integer{1});
+    if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
+      return lua_error(state);
+    }
+    return 0;
   } catch (std::exception const &e) {
     lua_pushfstring(state, "%s", e.what());
     return lua_error(state);
