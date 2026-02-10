@@ -439,13 +439,6 @@ struct Module final {
   // library's still
   // moreover, we can optimize this struct more by having the strings all be
   // held in a giant string, then taking string_view into said string
-  struct Executable final {
-    fs::path root;
-  };
-  struct Library final {
-    vector<fs::path> roots;
-    vector<fs::path> headers;
-  };
 
   Module_t type;
   DepTree tree;
@@ -849,66 +842,383 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 }
 #endif // DEBUG
 
+// TODO: idk make this better (faster, or smaller file size)
+// TODO: update this function to return some error code or whatever
+// TODO: update this to also include the files that were actually compiled for
+// some kind of incrimental build process
 auto Module::serialize(fs::path const &path) const -> void {
-  auto outfile = File(path, File::WRITE | File::BINARY);
+  auto outfile = File(path, File::WRITE | File::CREATE);
   if (!outfile) {
     return;
   }
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+
+  struct memory_buffer final {
+    auto resize(size_t at_least = 0) noexcept -> void {
+      auto const new_size = 3 * size / 2 + at_least;
+      auto new_buffer = std::make_unique<u8[]>(new_size);
+      memcpy(new_buffer.get(), buffer.get(), size);
+      buffer = std::move(new_buffer);
+      size = new_size;
+    }
+    auto write(void const *src, size_t n_bytes) noexcept -> void {
+      if (cur + n_bytes >= size)
+        resize(n_bytes);
+      memcpy(buffer.get() + cur, src, n_bytes);
+      cur += n_bytes;
+    }
+    auto write_string(std::string_view const str) noexcept -> void {
+      auto const str_size = str.size();
+      write(&str_size, sizeof(str_size));
+      write(str.data(), str_size * sizeof(char));
+    }
+    auto write_vector(std::span<fs::path const> const span) noexcept -> void {
+      auto const span_size = span.size();
+      write(&span_size, sizeof(span_size));
+
+      for (auto i = size_t{}; i < span_size; ++i) {
+        write_string(span[i].string());
+      }
+    }
+
+    std::unique_ptr<u8[]> buffer;
+    size_t cur;
+    size_t size;
+  } mem = {std::make_unique<u8[]>(1024), 0, 1024};
+
+  mem.write(&type, sizeof(type));
+
+#pragma region DepTree
+  mem.write(&tree.all_paths.size, sizeof(tree.all_paths.size));
+  mem.write(tree.all_paths.buffer, tree.all_paths.size * sizeof(char));
+
+  mem.write(&tree.num_files, sizeof(tree.num_files));
+
+  // it would probably be better to have a vec_write function or something like
+  // that, which would help with buffering, but this should be a fine hack for
+  // now
+  mem.write(tree.types.get(), sizeof(decltype(tree.types[0])) * tree.num_files);
+  mem.write(tree.files.get(), sizeof(decltype(tree.files[0])) * tree.num_files);
+
+  auto constexpr tree_dep_size = sizeof(decltype(tree.deps[0][0]));
+  for (auto i = size_t{}; i < tree.num_files; ++i) {
+    auto const dep_size = tree.deps[i].size();
+    mem.write(&dep_size, sizeof(dep_size));
+
+    mem.write(tree.deps[i].data(), dep_size * tree_dep_size);
+  }
+
+  mem.write(tree.hashes.get(),
+            sizeof(decltype(tree.hashes[0])) * tree.num_files);
+
+#pragma endregion DepTree
+
+  mem.write_vector(roots);
+  mem.write_vector(headers);
+  mem.write_vector(includes);
+  mem.write_vector(dep_includes);
+  mem.write_vector(sys_includes);
+  mem.write_vector(linking);
+
+  // TODO: serialize pp::Interpreter
+  mem.write_string(compiler);
+  mem.write_string(name);
+  mem.write_string(install_dir);
+
+  // TODO: this part can fail and we should report it :)
+  outfile.write(mem.buffer.get(), mem.cur, 1);
+  outfile.flush();
+#ifdef DEBUG
+  std::cout << "serialized file [" << path.string() << "] with [" << mem.cur
+            << "] byte\n";
+#endif // DEBUG
 }
 
+// TODO: write this, figure out how to work with the pp::Interpreter macros
 auto Module::deserialize(fs::path const &path)
     -> std::variant<Module, std::string> {
   auto file = File(path, File::READ | File::BINARY);
   if (!file) {
     return std::format("unable to open serialization file [{}]", path.c_str());
   }
-  return std::format("{} not impl", __PRETTY_FUNCTION__);
+  std::cout << "deserializing file " << path.string();
+  struct Deserializer final {
+    constexpr Deserializer(File &file) noexcept
+        : buf(nullptr), cur(0), size(0) {
+      auto &&[fsize, fcontent] = file.dump_content();
+      size = fsize;
+      buf = std::move(fcontent);
+#ifdef DEBUG
+      std::cout << "with [" << fsize << "] bytes\n";
+#endif // DEBUG
+    }
+
+    auto check(size_t const amount, std::string_view const name) -> void {
+      // i think this should be >=, but when that happens we seem to get false
+      // positives when cur + amount == size(?)
+      // i'm not smart enough with serialization to know if that is what's
+      // supposed to happen or not
+      if (cur + amount > size) {
+        throw std::runtime_error(std::format(
+            "Attempting to read [{}] bytes for [{}], but not enough bytes "
+            "available in buffer. cur = [{}], size = [{}].",
+            amount, name, cur, size));
+      }
+    }
+
+#define read_basic_t(t)                                                        \
+  auto read_##t() -> t {                                                       \
+    check(sizeof(t), #t);                                                      \
+    auto const res = static_cast<t>(buf[cur]);                                 \
+    cur += sizeof(t);                                                          \
+    return res;                                                                \
+  }
+    read_basic_t(size_t);
+    read_basic_t(len_t);
+    read_basic_t(Module_t);
+#undef read_basic_t
+    auto read_uint() -> unsigned int {
+      check(sizeof(unsigned), "unsigned int");
+      auto const res = static_cast<unsigned int>(buf[cur]);
+      cur += sizeof(unsigned int);
+      return res;
+    }
+
+    auto read_OwnedString() -> OwnedString {
+      auto const str_size = read_len_t();
+      if (cur + str_size >= size)
+        unreachable();
+      // we would normally have to allocate str_size + 1, but the null
+      // terminator is being included in the cache (which is not intended and
+      // when that's fixed this will need to be updated as well)
+      auto str = (char *)malloc(sizeof(char) * str_size);
+      auto res = OwnedString(str, str_size);
+      memcpy(res.buffer, buf.get() + cur, sizeof(char) * str_size);
+      res.size = str_size; // this shouldn't really be allowed, but i fucked
+                           // up the api for OwnedString, and this seems
+                           // like the only way to make this work :)
+      cur += sizeof(char) * str_size;
+      return res;
+    }
+
+    auto vec_read_types(size_t const vec_size)
+        -> std::unique_ptr<DepTree::SourceFile_t[]> {
+      check(vec_size * sizeof(DepTree::SourceFile_t), "SourceFile_t");
+
+      auto res = std::make_unique<DepTree::SourceFile_t[]>(vec_size);
+      memcpy(res.get(), buf.get() + cur,
+             vec_size * sizeof(DepTree::SourceFile_t));
+      cur += vec_size * sizeof(DepTree::SourceFile_t);
+      return res;
+    }
+    auto vec_read_files(size_t const vec_size)
+        -> std::unique_ptr<StringViews[]> {
+      check(vec_size * sizeof(StringViews), "StringViews");
+
+      auto res = std::make_unique<StringViews[]>(vec_size);
+      memcpy(res.get(), buf.get() + cur, vec_size * sizeof(StringViews));
+      cur += vec_size * sizeof(StringViews);
+      return res;
+    }
+    auto vec_read_deps(size_t const vec_size)
+        -> std::unique_ptr<vector<unsigned int>[]> {
+      auto res = std::make_unique<vector<unsigned int>[]>(vec_size);
+      for (auto i = size_t{}; i < vec_size; ++i) {
+        auto const this_vec_size = read_size_t();
+        // TODO: optimize this
+        res[i].reserve(this_vec_size);
+        for (auto j = size_t{}; j < this_vec_size; ++j) {
+          res[i].push_back(read_uint());
+        }
+      }
+      return res;
+    }
+
+    auto vec_read_hashes(size_t const vec_size) -> std::unique_ptr<size_t[]> {
+      check(vec_size * sizeof(size_t), "Hashes");
+
+      auto res = std::make_unique<size_t[]>(vec_size);
+      memcpy(res.get(), buf.get() + cur, vec_size * sizeof(size_t));
+      cur += vec_size * sizeof(size_t);
+      return res;
+    }
+
+    auto read_std_string() -> std::string {
+      auto res = std::string();
+      auto const str_size = read_size_t();
+      check(str_size * sizeof(char), "std::string");
+      res.reserve(str_size);
+      res.assign(buf.get() + cur, buf.get() + cur + str_size * sizeof(char));
+      cur += str_size * sizeof(char);
+      return res;
+    }
+
+    auto read_std_vector_fs_path() -> std::vector<fs::path> {
+      auto res = vector<fs::path>();
+      auto const vec_size = read_size_t();
+      res.reserve(vec_size);
+      for (auto i = size_t{}; i < vec_size; ++i) {
+        res.emplace_back(fs::path(read_std_string()));
+      }
+      return res;
+    }
+
+    std::unique_ptr<u8[]> buf;
+    size_t cur;
+    size_t size;
+  } mem = Deserializer(file);
+  try {
+    auto mod = Module();
+
+    mod.type = mem.read_Module_t();
+
+#pragma region DepTree
+    mod.tree = DepTree();
+    mod.tree.all_paths = mem.read_OwnedString();
+    mod.tree.num_files = mem.read_size_t();
+    mod.tree.types = mem.vec_read_types(mod.tree.num_files);
+    mod.tree.files = mem.vec_read_files(mod.tree.num_files);
+    // TODO: do the vector read of the vectors for the deps
+    mod.tree.deps = mem.vec_read_deps(mod.tree.num_files);
+    mod.tree.hashes = mem.vec_read_hashes(mod.tree.num_files);
+#pragma endregion DepTree
+    mod.roots = mem.read_std_vector_fs_path();
+    mod.headers = mem.read_std_vector_fs_path();
+    mod.includes = mem.read_std_vector_fs_path();
+    mod.dep_includes = mem.read_std_vector_fs_path();
+    mod.sys_includes = mem.read_std_vector_fs_path();
+    mod.linking = mem.read_std_vector_fs_path();
+
+    // TODO: deserialize pp::Interpreter
+
+    mod.compiler = mem.read_std_string();
+    mod.name = mem.read_std_string();
+    mod.install_dir = mem.read_std_string();
+
+    return mod;
+  } catch (std::exception const &e) {
+    return std::string(e.what());
+  }
 }
 
+// TODO: optimize this, reorder equality checks, maybe in memory serialize the
+// objects and just compare the bytes(?)
 auto Module::operator==(Module const &that) const noexcept -> bool {
-  if (type != that.type)
+#ifdef DEBUG
+  std::cout << "comparing module @[" << this << "] with module @[" << &that
+            << "]\n";
+#endif // DEBUG
+  if (type != that.type) {
+#ifdef DEBUG
+    std::cout << "Different types\n";
+#endif // DEBUG
     return false;
+  }
 
   // tree
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    if (tree.hashes[i] != that.tree.hashes[i])
-      return false;
+  if (tree.num_files != that.tree.num_files) {
+#ifdef DEBUG
+    std::cout << "Different num_files\n";
+#endif // DEBUG
+    return false;
   }
-  if (tree.all_paths.view() != that.tree.all_paths.view())
-    return false;
-
-  if (tree.num_files != that.tree.num_files)
-    return false;
 
   for (auto i = size_t{}; i < tree.num_files; ++i) {
-    if (tree.types[i] != that.tree.types[i])
+    if (tree.hashes[i] != that.tree.hashes[i]) {
+#ifdef DEBUG
+      std::cout << "Different hashes[" << i << "]\n";
+#endif // DEBUG
       return false;
+    }
+  }
+  if (tree.all_paths.size != that.tree.all_paths.size) {
+#ifdef DEBUG
+    std::cout << "Different tree.all_paths sizes\n";
+    std::cout << "this.tree.all_paths.size: [" << tree.all_paths.size << "]\n";
+    std::cout << "that.tree.all_paths.size: [" << that.tree.all_paths.size
+              << "]\n";
+#endif // DEBUG
+    return false;
+  }
+  if (strncmp(tree.all_paths.buffer, that.tree.all_paths.buffer,
+              tree.all_paths.size)) {
+#ifdef DEBUG
+    std::cout << "Different all_paths\n";
+    std::cout << "this: '" << tree.all_paths.view() << "'\n";
+    std::cout << "this.buffer: '" << tree.all_paths.buffer << "'\n";
+    std::cout << "that: '" << that.tree.all_paths.view() << "'\n";
+    std::cout << "that.buffer: '" << that.tree.all_paths.buffer << "'\n";
+#endif // DEBUG
+    return false;
+  }
+
+  for (auto i = size_t{}; i < tree.num_files; ++i) {
+    if (tree.types[i] != that.tree.types[i]) {
+#ifdef DEBUG
+      std::cout << "Different tree.types[" << i << "]\n";
+#endif // DEBUG
+      return false;
+    }
   }
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     if (tree.files[i].start != that.tree.files[i].start &&
-        tree.files[i].end != that.tree.files[i].end)
+        tree.files[i].end != that.tree.files[i].end) {
+#ifdef DEBUG
+      std::cout << "Different tree.files[" << i << "]\n";
+#endif // DEBUG
       return false;
+    }
   }
   for (auto i = size_t{}; i < tree.num_files; ++i) {
-    if (tree.deps[i].size() != that.tree.deps[i].size())
+    if (tree.deps[i].size() != that.tree.deps[i].size()) {
+#ifdef DEBUG
+      std::cout << "Different tree.deps[" << i << "].size()\n";
+      std::cout << "this: " << tree.deps[i].size() << "\n";
+      std::cout << "that: " << that.tree.deps[i].size() << "\n";
+      for (auto idx = size_t{}; idx < tree.num_files; ++idx) {
+        std::cout << "this.tree.deps[" << idx
+                  << "].size():  " << tree.deps[idx].size() << '\n';
+        std::cout << "that.tree.deps[" << idx
+                  << "].size():  " << that.tree.deps[idx].size() << '\n';
+      }
+#endif // DEBUG
       return false;
+    }
 
     for (auto j = size_t{}; j < tree.deps[i].size(); ++j) {
-      if (tree.deps[i][j] != that.tree.deps[i][j])
+      if (tree.deps[i][j] != that.tree.deps[i][j]) {
+#ifdef DEBUG
+        std::cout << "Different tree.deps[" << i << "][" << j << "]\n";
+#endif // DEBUG
         return false;
+      }
     }
   }
 
+  // TODO: compare interpreters, i.e. the macros
+
   // rest of the class
-  if (compiler != that.compiler)
+  if (compiler != that.compiler) {
+#ifdef DEBUG
+    std::cout << "Different compilers\n";
+    std::cout << "this: " << compiler << "\n";
+    std::cout << "that: " << that.compiler << "\n";
+#endif // DEBUG
     return false;
+  }
 
-  if (name != that.name)
+  if (name != that.name) {
+#ifdef DEBUG
+    std::cout << "Different names\n";
+#endif // DEBUG
     return false;
+  }
 
-  if (install_dir != that.install_dir)
+  if (install_dir != that.install_dir) {
+#ifdef DEBUG
+    std::cout << "Different install_dir\n";
+#endif // DEBUG
     return false;
+  }
 
   return true;
 }
@@ -1335,9 +1645,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   case Module_t::EXE: {
     includes.reserve(1);
     auto const test = fs::canonical(roots[0]).parent_path();
-#ifdef DEBUG
-    expr_dbg(test);
-#endif // DEBUG
     includes.push_back(test);
   } break;
   case Module_t::STATIC:
@@ -1887,20 +2194,29 @@ auto install_exe(lua_State *state) noexcept -> int {
     ec.clear();
 
     // rework this caching situation when the caching is actually working
-    auto const path = fs::path(std::format("{}/__luamake_cache/{}.cache",
-                                           exe_mod.install_dir, exe_mod.name));
+    auto const cache_path = fs::path(std::format(
+        "{}/__luamake_cache/{}.cache", exe_mod.install_dir, exe_mod.name));
 
-    auto maybe_cached_mod_fut = std::async(
-        std::launch::async, [&path]() { return Module::deserialize(path); });
-
-    auto maybe_cached_mod = maybe_cached_mod_fut.get();
+    // NOTE: we might be able to put this on a background thread, then just
+    // continue on doing things, and when this is done we do the comparison, but
+    // for now we'll have this be blocking :)
+    auto const maybe_cached_mod = Module::deserialize(cache_path);
     /* compare the current mod with the cached mod */
     switch (maybe_cached_mod.index()) {
     case 0: {
       auto const &cached_mod = std::get<Module>(maybe_cached_mod);
+#ifdef DEBUG
+      std::cout << "\tGot a module (exe), and am now comparing them\n";
+#endif // DEBUG
       if (exe_mod == cached_mod) {
+#ifdef DEBUG
+        std::cout << "they're equal\n";
+#endif // DEBUG
         return 0;
       }
+#ifdef DEBUG
+      std::cout << "they're NOT equal\n";
+#endif // DEBUG
     } break;
     case 1: {
       auto const &error_message = std::get<std::string>(maybe_cached_mod);
@@ -1912,9 +2228,6 @@ auto install_exe(lua_State *state) noexcept -> int {
 
     auto const actually_compiled_files = Compiler::compile(exe_mod);
 
-    // because of the format of `actually_compiled_files` for the best
-    // formatting of the command there shouldn't be a space between it and the
-    // -o
     auto const invoked_command = std::format(
         "{} -o {}/{} {} {}", exe_mod.compiler, exe_mod.install_dir,
         exe_mod.name, actually_compiled_files, exe_mod.format_links());
@@ -1926,20 +2239,7 @@ auto install_exe(lua_State *state) noexcept -> int {
       lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
       return lua_error(state);
     } else {
-#if 0
-      // only serialize if everything went right, need to figure out a better
-      // way to do this, so that we only serialize what was actually
-      // successfully compiled for incrimental builds and stuff
-      auto serializer = Serializer();
-      serializer.serialize(main_mod);
-
-      auto &&[size, buf] = main_mod.serialize(path).buffer();
-
-      auto cache = File(path);
-
-      cache.write(buf.get(), size);
-#endif
-
+      exe_mod.serialize(cache_path);
       return 0;
     }
   } catch (ModuleErr const &e) {
@@ -1999,6 +2299,47 @@ auto install_static(lua_State *state) noexcept -> int {
     }
     ec.clear();
 
+    // TODO: try to move these calls to create directory to be do when the
+    // initial project is set up, that way we don't have to worry about trying
+    // to make them everytime which will slow things down on average
+    if (fs::create_directories(fs::path(
+            std::format("{}/__luamake_cache", static_mod.install_dir)));
+        ec) {
+      std::cerr << ec.message() << '\n';
+      lua_pushstring(state, "Unable to create directory");
+      return lua_error(state);
+    }
+    ec.clear();
+
+    auto const cache_path =
+        fs::path(std::format("{}/__luamake_cache/{}.cache",
+                             static_mod.install_dir, static_mod.name));
+    // NOTE: see note in install_exe
+    auto const maybe_cached_mod = Module::deserialize(cache_path);
+    switch (maybe_cached_mod.index()) {
+    case 0: {
+      auto const &cached_mod = std::get<Module>(maybe_cached_mod);
+#ifdef DEBUG
+      std::cout << "\tGot a module (static), and am now comparing them\n";
+#endif // DEBUG
+      if (static_mod == cached_mod) {
+#ifdef DEBUG
+        std::cout << "they're equal\n";
+#endif // DEBUG
+        return 0;
+      }
+#ifdef DEBUG
+      std::cout << "they're NOT equal\n";
+#endif // DEBUG
+    } break;
+    case 1: {
+      auto const &error_message = std::get<std::string>(maybe_cached_mod);
+      std::cerr << std::format("Error message = [{}]\n", error_message);
+    } break;
+    default:
+      unreachable();
+    }
+
     auto const compiled_files = Compiler::compile(static_mod);
     auto const invoked_command =
         std::format("ar crs {}/lib{}.a {}", static_mod.install_dir,
@@ -2030,6 +2371,10 @@ auto install_static(lua_State *state) noexcept -> int {
           std::format("Error moving headers [{}]", copy_headers).c_str());
       return lua_error(state);
     }
+
+    // if nothing goes wrong we can serialize the whole data, check the note in
+    // install_exe for more details about improvements
+    static_mod.serialize(cache_path);
     return 0;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
@@ -2100,10 +2445,6 @@ auto build_dep(lua_State *state) noexcept -> int {
   try {
     auto const luamake_path = modules.get_module_path(lua_tointeger(state, -1));
     lua_pop(state, 1);
-#ifdef DEBUG
-    std::cout << "luamake_path = [" << luamake_path.c_str() << "]\n";
-    std::cout.flush();
-#endif
 
     if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
       (void)lua_pushfstring(
@@ -2445,17 +2786,10 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
                     lua_typename(arg_t));
 
   try {
-#ifdef DEBUG
-    modules.dump_paths(std::cout);
-    modules.dump_modules(std::cout);
-#endif // DEBUG
     auto const idx = lua_tointeger(state, -1);
     lua_pop(state, 1);
 
     auto const &mod = modules.module_at(idx);
-#ifdef DEBUG
-    mod.tree.display(std::cout);
-#endif // DEBUG
 
     auto const &directory = mod.install_dir;
     auto const arguments = [&]() -> string {
@@ -2556,7 +2890,7 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
       throw std::runtime_error(
           std::format("Unable to make file {}", cc_json_path.string()));
     }
-    cc_json.write(cc_json_string.c_str(), 1, cc_json_string.size());
+    cc_json.write(cc_json_string.c_str(), cc_json_string.size(), 1);
 
     return 0;
   } catch (std::exception const &e) {
