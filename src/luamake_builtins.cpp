@@ -2181,7 +2181,6 @@ auto install_exe(lua_State *state) noexcept -> int {
       lua_pushstring(state, "Unable to create directory");
       return lua_error(state);
     }
-    ec.clear();
 
     if (fs::create_directories(
             fs::path(std::format("{}/__luamake_cache", exe_mod.install_dir)),
@@ -2191,7 +2190,6 @@ auto install_exe(lua_State *state) noexcept -> int {
       lua_pushstring(state, "Unable to create directory");
       return lua_error(state);
     }
-    ec.clear();
 
     // rework this caching situation when the caching is actually working
     auto const cache_path = fs::path(std::format(
@@ -2297,7 +2295,6 @@ auto install_static(lua_State *state) noexcept -> int {
                       ec.message().c_str());
       return lua_error(state);
     }
-    ec.clear();
 
     // TODO: try to move these calls to create directory to be do when the
     // initial project is set up, that way we don't have to worry about trying
@@ -2309,7 +2306,6 @@ auto install_static(lua_State *state) noexcept -> int {
       lua_pushstring(state, "Unable to create directory");
       return lua_error(state);
     }
-    ec.clear();
 
     auto const cache_path =
         fs::path(std::format("{}/__luamake_cache/{}.cache",
