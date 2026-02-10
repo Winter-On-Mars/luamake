@@ -55,6 +55,8 @@ struct user_func_config final {
 };
 
 auto file_exists(fs::path &&path) noexcept -> bool {
+  // TODO: rewrite this because O_PATH is linux specific, see man 2 open for
+  // info
 #if defined(__unix__)
   auto file = open(path.c_str(), O_PATH);
   close(file);
