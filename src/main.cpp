@@ -1,14 +1,12 @@
 #include "common.hpp"
 #include "luamake_builtins.hpp"
 #include "luamake_file.hpp"
-#include "luamake_string_manip.hpp"
 
 #include <array>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <format>
-#include <iostream>
 #include <string_view>
 #include <type_traits>
 
