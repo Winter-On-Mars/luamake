@@ -301,11 +301,10 @@ struct MisformattedOutput final : public ModuleErr {
                        message);
   }
 };
-
-inline static auto modules = builtins::LakeModules();
 } // namespace
 
 namespace builtins {
+LakeModules mods = LakeModules();
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
   files = std::make_unique<StringViews[]>(num_files);
@@ -1707,7 +1706,7 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
                        // top of the stack for the Module function
 
     auto index_fut = std::async(std::launch::async, [&root]() -> lua_Integer {
-      return static_cast<lua_Integer>(modules.contains(root));
+      return static_cast<lua_Integer>(mods.contains(root));
     });
 
     auto exe_mod = builtins::Module(builtins::Module::EXE, state, root);
@@ -1720,7 +1719,7 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
       std::terminate();
     }
 
-    modules.emplace_at(idx, std::move(exe_mod));
+    mods.emplace_at(idx, std::move(exe_mod));
 
     lua_pushinteger(state, idx);
 
@@ -1769,7 +1768,7 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
                        // top of the stack for the Module function
 
     auto index_fut = std::async(std::launch::async, [&root]() -> lua_Integer {
-      return static_cast<lua_Integer>(modules.contains(root));
+      return static_cast<lua_Integer>(mods.contains(root));
     });
 
     auto static_mod = builtins::Module(builtins::Module::STATIC, state, root);
@@ -1782,7 +1781,7 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
       std::terminate();
     }
 
-    modules.emplace_at(idx, std::move(static_mod));
+    mods.emplace_at(idx, std::move(static_mod));
 
     lua_pushinteger(state, idx);
     return 1;
@@ -1814,9 +1813,9 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
   try {
     auto const mod_idx = lua_tointeger(state, -1);
     lua_pop(state, 1);
-    auto const &parent_path = modules.get_module_path(mod_idx).parent_path();
+    auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
-    auto const &exe_mod = modules.module_at(mod_idx);
+    auto const &exe_mod = mods.module_at(mod_idx);
     if (exe_mod.type != builtins::Module::EXE) {
       throw std::runtime_error(std ::format(
           "module type is not exe, found [{}]",
@@ -1925,9 +1924,9 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     // i'm not sure if we actually need this variable now that we're using
     // everything as an absolute path but i'm not going to test that right now
     // and break everything :)
-    auto const &parent_path = modules.get_module_path(mod_idx).parent_path();
+    auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
-    auto const &static_mod = modules.module_at(mod_idx);
+    auto const &static_mod = mods.module_at(mod_idx);
     // TODO: better error handling with this
     if (static_mod.type != builtins::Module::STATIC) {
       throw std::runtime_error(std ::format(
@@ -2054,7 +2053,7 @@ auto Builder::build_dep(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const luamake_path = modules.get_module_path(lua_tointeger(state, -1));
+    auto const luamake_path = mods.get_module_path(lua_tointeger(state, -1));
     lua_pop(state, 1);
 
     if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
@@ -2329,7 +2328,7 @@ auto Builder::require(lua_State *state) noexcept -> int {
     }
     ec.clear();
 
-    (void)lua_pushinteger(state, modules.new_module(std::move(fpath)));
+    (void)lua_pushinteger(state, mods.new_module(std::move(fpath)));
     return 1;
   } catch (std::exception const &e) {
     (void)lua_pushfstring(
@@ -2355,14 +2354,14 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
     auto const lib_to_be_linked = lua_tointeger(state, -2);
     auto const lib_getting_diddled = lua_tointeger(state, -1);
 
-    auto const &mod_linked = modules.module_at(lib_to_be_linked);
-    auto &mod_d = modules.module_at(lib_getting_diddled);
+    auto const &mod_linked = mods.module_at(lib_to_be_linked);
+    auto &mod_d = mods.module_at(lib_getting_diddled);
 
     // this should be correct, basically stolen from the install_static
     // function, there shouldn't be any issues, because the install_static
     // function just dumps all the headers in the same out directory
     mod_d.dep_includes.push_back(
-        modules.get_module_path(lib_to_be_linked) /
+        mods.get_module_path(lib_to_be_linked) /
         fs::path(
             std::format("{}/{}", mod_linked.install_dir, mod_linked.name)));
     mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
@@ -2395,7 +2394,7 @@ auto Builder::compile_commands_json(lua_State *state) noexcept -> int {
     auto const idx = lua_tointeger(state, -1);
     lua_pop(state, 1);
 
-    auto const &mod = modules.module_at(idx);
+    auto const &mod = mods.module_at(idx);
 
     auto const &directory = mod.install_dir;
     auto const arguments = [&]() -> string {
@@ -2622,13 +2621,28 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 }
 
 LakeModules::LakeModules() noexcept
-    : cap(4), size(0), is_compileds(std::make_unique<bool[]>(cap)),
-      compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
-      luamake_paths(std::make_unique<fs::path[]>(cap)),
-      mods(std::make_unique<Module[]>(cap)) {
+    : cap(0), size(0), is_compileds(nullptr), compiled_files(nullptr),
+      luamake_paths(nullptr), mods(nullptr) {}
+
+auto LakeModules::init(size_t const cap) -> void {
+  this->cap = cap;
+  size = 0;
+  is_compileds = std::make_unique<bool[]>(cap);
+  compiled_files = std::make_unique<std::vector<std::string>[]>(cap);
+  luamake_paths = std::make_unique<fs::path[]>(cap);
+  mods = std::make_unique<Module[]>(cap);
+
   luamake_paths[0] = fs::current_path() / "luamake.lua";
   is_compileds[0] = false;
   ++size;
+}
+
+auto LakeModules::deinit() -> void {
+  cap = size = 0;
+  is_compileds = nullptr;
+  compiled_files = nullptr;
+  luamake_paths = nullptr;
+  mods = nullptr;
 }
 
 auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {

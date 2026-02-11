@@ -289,6 +289,9 @@ struct Compiler final {
 struct LakeModules final {
   LakeModules() noexcept;
 
+  auto init(size_t const cap = 4) -> void;
+  auto deinit() -> void;
+
   auto new_module(std::filesystem::path &&) noexcept -> lua_Integer;
   auto get_module_path(lua_Integer) const noexcept -> std::filesystem::path;
 
@@ -318,6 +321,7 @@ private:
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
   std::unique_ptr<Module[]> mods;
 };
+extern LakeModules mods;
 } // namespace builtins
 } // namespace luamake
 

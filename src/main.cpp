@@ -208,6 +208,7 @@ auto Type::do_command() const noexcept -> exit_t {
     break;
   }
 
+  builtins::mods.init();
   auto *state = luaL_newstate();
   if (state == nullptr) {
     error_message(
@@ -274,6 +275,7 @@ auto Type::do_command() const noexcept -> exit_t {
     unreachable();
   }
   lua_close(state);
+  builtins::mods.deinit();
   return res;
 }
 
