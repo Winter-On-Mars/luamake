@@ -302,317 +302,10 @@ struct MisformattedOutput final : public ModuleErr {
   }
 };
 
-// TODO: add exported header field, and probably refactor this to be a tagged
-// union to discriminate between exe and library type modules
-// TODO: rewrite how the include files are processed to have a system header
-// section and an include header section, to be used later when compiling +
-// generating compile_commands.json
-struct Module final {
-  enum class Module_t : u8 {
-    EXE,
-    STATIC,
-    DYNAMIC,
-  };
-  using enum Module_t;
-
-  /**
-   * @throws ModuleErr
-   */
-  Module(Module_t &&type, lua_State *state, fs::path const &) noexcept(false);
-
-  /**
-   * @throws
-   */
-  auto gen_dep_tree() noexcept(false) -> void;
-
-  auto serialize(fs::path const &path) const -> void;
-  [[nodiscard(
-      "We spent all this time deserializing you better use the result")]]
-  static auto deserialize(fs::path const &path)
-      -> std::variant<Module, std::string>;
-
-  Module(Module &&) noexcept = default;
-
-  Module &operator=(Module &&that) noexcept = default;
-
-  ~Module() noexcept = default;
-
-  Module(Module const &) = delete;
-  Module &operator=(Module const &) = delete;
-
-  auto operator==(Module const &) const noexcept -> bool;
-
-  // this is kinda stupid i'm not gonna lie, but this is the only
-  // way i can think to have DepTree be able to reference Module and vice versa
-  // without having to worry about pointer indirection
-  struct DepTree final {
-    enum class SourceFile_t : u8 {
-      IMPL,
-      HEADER,
-      SYSTEM,
-      MISC,
-    };
-
-    /**
-     * @throws DepTreeErr | std::bad_alloc
-     */
-    [[nodiscard]]
-    DepTree(size_t const num_files = 8) noexcept(false);
-
-    DepTree(DepTree const &) = delete;
-    DepTree &operator=(DepTree const &) = delete;
-
-    DepTree(DepTree &&) = default;
-    DepTree &operator=(DepTree &&) = default;
-
-    ~DepTree() noexcept = default;
-
-#ifdef DEBUG
-    // displays the function in a pseudo json format
-    auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
-        -> void;
-#endif // DEBUG
-
-    [[nodiscard]]
-    static auto determine_file_type(fs::path &&ext) noexcept -> SourceFile_t {
-      if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".c") {
-        return SourceFile_t::IMPL;
-      }
-      if (ext == ".hpp" || ext == ".hxx" || ext == ".hh" || ext == ".h") {
-        return SourceFile_t::HEADER;
-      }
-      return SourceFile_t::MISC;
-    }
-
-    // a parallel array for all of the source files
-    // NOTE: this could be pushed further, and we could have a
-    // memory allocator as a part of this struct, then just
-    // clearing the memory allocator would act as the destructor
-    // TODO: if performance becomes an issue, it might be good to switch this to
-    // a hash set for the `find` function
-    OwnedString all_paths;
-    size_t num_files;
-    size_t cap_files;
-    std::unique_ptr<SourceFile_t[]> types;
-    std::unique_ptr<StringViews[]> files;
-    std::unique_ptr<vector<unsigned int>[]> deps;
-    std::unique_ptr<size_t[]> hashes;
-
-    [[nodiscard]]
-    auto append_path(fs::path const &) -> std::pair<bool, StringViews>;
-    [[nodiscard]]
-    auto get_path(size_t const) const noexcept -> fs::path;
-    [[nodiscard]]
-    auto find(string_view const) const noexcept -> std::pair<bool, StringViews>;
-    /**
-     * @throws std::bad_alloc
-     */
-    auto resize() noexcept(false) -> void;
-    /**
-     * @throws std::bad_alloc
-     */
-    auto reserve(size_t) noexcept(false) -> void;
-
-    // basically making the assumption that a project isn't gonna have
-    // size_t.max files in it, idk if that's even physically possible
-    // so this *seems like* a valid assumption
-    static constexpr auto ROOT_IDX = static_cast<size_t>(-1);
-
-    /**
-     * @throws DepTreeErr
-     */
-    static auto get_file_content(FILE *file) noexcept(false) -> FixedString;
-
-#ifdef DEBUG
-    auto display_impl(std::ostream &out, unsigned int const depth,
-                      unsigned int const idx) const noexcept -> void;
-#endif // DEBUG
-
-    friend Compiler;
-    friend CompilationPool;
-    friend Module;
-  };
-
-  // NOTE: we could probably use the empty space in the vector<fs::path> headers
-  // field, where if headers.len == 0, then we have to be an executable
-  // we would need a way to encode the difference between static and dynamic
-  // library's still
-  // moreover, we can optimize this struct more by having the strings all be
-  // held in a giant string, then taking string_view into said string
-
-  Module_t type;
-  DepTree tree;
-  vector<fs::path> roots;
-  vector<fs::path> headers;
-  vector<fs::path> includes;
-  vector<fs::path> dep_includes;
-  vector<fs::path> sys_includes;
-  vector<fs::path> linking;
-  pp::Interpreter interpreter;
-  // TODO: optimize this :)
-  std::string compiler;
-  std::string name;
-  std::string install_dir;
-
-  Module() noexcept
-      : type(), tree(), roots(), headers(), includes(), sys_includes(),
-        linking(), interpreter({}, {}), compiler(), name(), install_dir() {}
-
-#ifdef DEBUG
-  auto display(std::ostream &) const noexcept -> void;
-#endif // DEBUG
-
-  /**
-   * @throws CAPI
-   */
-  auto append_include_paths(string_view const) -> void;
-  /**
-   * @throws CAPI
-   */
-  [[nodiscard]]
-  auto append_predefined_macros(string_view const)
-      -> std::pair<std::unordered_map<std::string, pp::Macro>,
-                   std::unordered_set<std::string>>;
-  /**
-   * @throws DepTreeErr
-   */
-  auto append_dep(fs::path const &, size_t const) -> void;
-
-  // TODO: update these to return FixedString
-  auto format_includes() const -> string;
-  auto format_links() const -> string;
-  static auto parse_compiler_table(lua_State *state) -> string;
-
-  friend CompilationPool;
-  friend Compiler;
-};
-
-// TODO: add an explicit init and deinit function to this so that we can have
-// better control over the lifetime of this object
-struct LakeModules final {
-  LakeModules() noexcept;
-
-  auto new_module(fs::path &&) noexcept -> lua_Integer;
-  auto get_module_path(lua_Integer) const noexcept -> fs::path;
-
-  auto emplace_at(lua_Integer, Module &&) -> void;
-
-  auto construct_module_at(lua_Integer, Module::Module_t, lua_State *,
-                           fs::path const &) -> void;
-  auto module_at(lua_Integer const) noexcept -> Module &;
-
-  // returns -1 on failure
-  auto contains(fs::path const &) const noexcept -> int;
-
-#ifdef DEBUG
-  auto dump_paths(std::ostream &) const noexcept -> void;
-  auto dump_modules(std::ostream &) const noexcept -> void;
-#endif // DEBUG
-
-private:
-  auto resize() -> void;
-
-  // maybe switch to these being ints, it's not "correct" to do, but it would
-  // make things faster
-  size_t cap;
-  size_t size;
-  std::unique_ptr<bool[]> is_compileds;
-  std::unique_ptr<std::vector<std::string>[]> compiled_files; // ?
-  std::unique_ptr<fs::path[]> luamake_paths;
-  std::unique_ptr<Module[]> mods;
-};
-
-LakeModules::LakeModules() noexcept
-    : cap(4), size(0), is_compileds(std::make_unique<bool[]>(cap)),
-      compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
-      luamake_paths(std::make_unique<fs::path[]>(cap)),
-      mods(std::make_unique<Module[]>(cap)) {
-  luamake_paths[0] = fs::current_path() / "luamake.lua";
-  is_compileds[0] = false;
-  ++size;
-}
-
-auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
-  if (size == cap)
-    resize();
-  luamake_paths[size] = std::move(path);
-  is_compileds[size] = false;
-
-  auto const ret_idx = static_cast<lua_Integer>(size);
-  ++size;
-  return ret_idx;
-}
-
-auto LakeModules::get_module_path(lua_Integer idx) const noexcept -> fs::path {
-  return luamake_paths[static_cast<size_t>(idx)];
-}
-
-auto LakeModules::emplace_at(lua_Integer idx, Module &&mod) -> void {
-  auto const i = static_cast<size_t>(idx);
-  mods[i] = std::move(mod);
-}
-
-auto LakeModules::module_at(lua_Integer const idx) noexcept -> Module & {
-  return mods[static_cast<size_t>(idx)];
-}
-
-auto LakeModules::contains(fs::path const &module_name) const noexcept -> int {
-  for (auto i = size_t{0}; i < size; ++i) {
-    if (luamake_paths[i] == module_name / "luamake.lua") {
-      return static_cast<int>(i);
-    }
-  }
-  return -1;
-}
-
-auto LakeModules::resize() -> void {
-  auto const n_cap = 3 * cap / 2;
-  auto n_is_compileds = std::make_unique<bool[]>(n_cap);
-  auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
-  auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
-  auto n_mods = std::make_unique<Module[]>(n_cap);
-
-  std::memcpy(n_is_compileds.get(), is_compileds.get(), sizeof(bool) * cap);
-
-  for (auto i = size_t{}; i < cap; ++i)
-    n_compiled_files[i] = std::move(compiled_files[i]);
-  for (auto i = size_t{}; i < cap; ++i)
-    n_luamake_paths[i] = std::move(luamake_paths[i]);
-  for (auto i = size_t{}; i < cap; ++i)
-    n_mods[i] = std::move(mods[i]);
-
-  is_compileds = std::move(n_is_compileds);
-  compiled_files = std::move(n_compiled_files);
-  luamake_paths = std::move(n_luamake_paths);
-  mods = std::move(n_mods);
-}
-
-#ifdef DEBUG
-auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
-  out << "modules.paths = {\n";
-  for (auto i = size_t{0}; i < size; ++i) {
-    out << "\t[" << i << "][" << luamake_paths[i].string() << "]\n";
-  }
-  out << "}\n";
-  out.flush();
-}
-
-auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
-  out << "modules.mods = {\n";
-  for (auto i = size_t{}; i < size; ++i) {
-    out << '[' << i << "] {";
-    mods[i].display(out);
-    out << '}';
-  }
-  out << "}\n";
-  out.flush();
-}
-#endif // DEBUG
-
-inline static auto modules = LakeModules();
+inline static auto modules = builtins::LakeModules();
 } // namespace
 
-namespace {
+namespace builtins {
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
   files = std::make_unique<StringViews[]>(num_files);
@@ -1861,45 +1554,6 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
   return str;
 }
 
-// sort of a thread pool like structure that is just for compiling
-// TODO: update this to take advantage of the current layout for DepTree
-// i.e. relying on DepTree.types to determine what to compile
-// TODO: rewrite the system so that this can run in the background while we
-// build the dep tree for other modules, and just queue jobs into this as needed
-struct CompilationPool final {
-  CompilationPool(size_t num_threads) noexcept;
-
-  ~CompilationPool() noexcept;
-
-  auto init(Module const *const mod) noexcept -> void;
-
-private:
-  auto add_task(Module::DepTree const &) -> void;
-  auto run() -> void;
-  auto busy() noexcept -> bool;
-  auto get() -> string;
-  auto constexpr done() const noexcept -> bool { return mod == nullptr; }
-
-  CompilationPool() = delete;
-  CompilationPool(CompilationPool &&) = delete;
-  CompilationPool &operator=(CompilationPool &&) = delete;
-  CompilationPool(CompilationPool const &) = delete;
-  CompilationPool &operator=(CompilationPool const &) = delete;
-
-  auto _thread_loop() noexcept -> void;
-
-  vector<std::thread> workers;
-  vector<fs::path> remaining_tasks;
-  std::mutex task_mtx;
-
-  string result = string();
-  std::mutex result_mtx;
-
-  Module const *mod = nullptr;
-
-  friend Compiler;
-};
-
 CompilationPool::CompilationPool(size_t num_threads) noexcept {
   workers.reserve(num_threads);
 }
@@ -2013,25 +1667,23 @@ auto CompilationPool::get() -> string {
   return result;
 }
 
-struct Compiler final {
-  [[nodiscard]]
-  static auto compile(Module const &mod) noexcept -> string {
-    auto res = string();
-    auto pool = CompilationPool(std::thread::hardware_concurrency() - 1);
-    // pass this value to the _thread_loop function so we don't have to call
-    // it in each thread (plus we can make it a string_view so it shouldn't
-    // have to worry too much about memory allocations) auto includes =
-    // mod.includes();
+[[nodiscard]]
+auto Compiler::compile(Module const &mod) noexcept -> string {
+  auto res = string();
+  auto pool = CompilationPool(std::thread::hardware_concurrency() - 1);
+  // pass this value to the _thread_loop function so we don't have to call
+  // it in each thread (plus we can make it a string_view so it shouldn't
+  // have to worry too much about memory allocations) auto includes =
+  // mod.includes();
 
-    pool.init(&mod);
-    pool.add_task(mod.tree);
-    pool.run();
-    res = pool.get();
-    return res;
-  }
-};
+  pool.init(&mod);
+  pool.add_task(mod.tree);
+  pool.run();
+  res = pool.get();
+  return res;
+}
 
-auto new_exe(lua_State *state) noexcept -> int {
+auto Builder::new_exe(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 2, new_exe);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
                     "Expected type of argument to `new_exe` to be of type "
@@ -2058,7 +1710,7 @@ auto new_exe(lua_State *state) noexcept -> int {
       return static_cast<lua_Integer>(modules.contains(root));
     });
 
-    auto exe_mod = Module(Module::EXE, state, root);
+    auto exe_mod = builtins::Module(builtins::Module::EXE, state, root);
     exe_mod.gen_dep_tree();
 
     auto const idx = index_fut.get();
@@ -2093,7 +1745,7 @@ auto new_exe(lua_State *state) noexcept -> int {
   return lua_error(state);
 }
 
-auto new_static(lua_State *state) noexcept -> int {
+auto Builder::new_static(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 2, new_static);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
                     "Expected type of argument to `new_static` to be of type "
@@ -2120,7 +1772,7 @@ auto new_static(lua_State *state) noexcept -> int {
       return static_cast<lua_Integer>(modules.contains(root));
     });
 
-    auto static_mod = Module(Module::STATIC, state, root);
+    auto static_mod = builtins::Module(builtins::Module::STATIC, state, root);
     static_mod.gen_dep_tree();
 
     auto const idx = index_fut.get();
@@ -2152,7 +1804,7 @@ auto new_static(lua_State *state) noexcept -> int {
   }
 }
 
-auto install_exe(lua_State *state) noexcept -> int {
+auto Builder::install_exe(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, install_exe)
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to `install_exe` to be of type "
@@ -2165,10 +1817,11 @@ auto install_exe(lua_State *state) noexcept -> int {
     auto const &parent_path = modules.get_module_path(mod_idx).parent_path();
 
     auto const &exe_mod = modules.module_at(mod_idx);
-    if (exe_mod.type != Module::EXE) {
+    if (exe_mod.type != builtins::Module::EXE) {
       throw std::runtime_error(std ::format(
           "module type is not exe, found [{}]",
-          static_cast<std::underlying_type_t<Module::Module_t>>(exe_mod.type)));
+          static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
+              exe_mod.type)));
     }
 
     // TODO: update these functions to throw exceptions
@@ -2198,11 +1851,11 @@ auto install_exe(lua_State *state) noexcept -> int {
     // NOTE: we might be able to put this on a background thread, then just
     // continue on doing things, and when this is done we do the comparison, but
     // for now we'll have this be blocking :)
-    auto const maybe_cached_mod = Module::deserialize(cache_path);
+    auto const maybe_cached_mod = builtins::Module::deserialize(cache_path);
     /* compare the current mod with the cached mod */
     switch (maybe_cached_mod.index()) {
     case 0: {
-      auto const &cached_mod = std::get<Module>(maybe_cached_mod);
+      auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
 #ifdef DEBUG
       std::cout << "\tGot a module (exe), and am now comparing them\n";
 #endif // DEBUG
@@ -2224,7 +1877,7 @@ auto install_exe(lua_State *state) noexcept -> int {
       unreachable();
     }
 
-    auto const actually_compiled_files = Compiler::compile(exe_mod);
+    auto const actually_compiled_files = builtins::Compiler::compile(exe_mod);
 
     auto const invoked_command = std::format(
         "{} -o {}/{} {} {}", exe_mod.compiler, exe_mod.install_dir,
@@ -2258,7 +1911,7 @@ auto install_exe(lua_State *state) noexcept -> int {
   }
 }
 
-auto install_static(lua_State *state) noexcept -> int {
+auto Builder::install_static(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, install_static);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to `install_static` "
@@ -2276,11 +1929,11 @@ auto install_static(lua_State *state) noexcept -> int {
 
     auto const &static_mod = modules.module_at(mod_idx);
     // TODO: better error handling with this
-    if (static_mod.type != Module::STATIC) {
-      throw std::runtime_error(
-          std ::format("module type is not static, found [{}]",
-                       static_cast<std::underlying_type_t<Module::Module_t>>(
-                           static_mod.type)));
+    if (static_mod.type != builtins::Module::STATIC) {
+      throw std::runtime_error(std ::format(
+          "module type is not static, found [{}]",
+          static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
+              static_mod.type)));
     }
 
     auto const install_dir =
@@ -2311,10 +1964,10 @@ auto install_static(lua_State *state) noexcept -> int {
         fs::path(std::format("{}/__luamake_cache/{}.cache",
                              static_mod.install_dir, static_mod.name));
     // NOTE: see note in install_exe
-    auto const maybe_cached_mod = Module::deserialize(cache_path);
+    auto const maybe_cached_mod = builtins::Module::deserialize(cache_path);
     switch (maybe_cached_mod.index()) {
     case 0: {
-      auto const &cached_mod = std::get<Module>(maybe_cached_mod);
+      auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
 #ifdef DEBUG
       std::cout << "\tGot a module (static), and am now comparing them\n";
 #endif // DEBUG
@@ -2336,7 +1989,7 @@ auto install_static(lua_State *state) noexcept -> int {
       unreachable();
     }
 
-    auto const compiled_files = Compiler::compile(static_mod);
+    auto const compiled_files = builtins::Compiler::compile(static_mod);
     auto const invoked_command =
         std::format("ar crs {}/lib{}.a {}", static_mod.install_dir,
                     static_mod.name, compiled_files);
@@ -2390,48 +2043,10 @@ auto install_static(lua_State *state) noexcept -> int {
   }
 }
 
-auto run(lua_State *L) noexcept -> int {
-  auto const num_args = lua_gettop(L);
-  if (num_args != 1) {
-    lua_pushstring(L, "Too many args to function run");
-    return lua_error(L);
-  }
-
-  lua_getfield(L, -1, "path");
-  LUA_ASSERT(L, lua_type(L, -1), LUA_TSTRING,
-             "Expected type of exe.path to be string [in function Run]");
-  auto const exe_path = string_view(lua_tolstring(L, -1, nullptr));
-
-  lua_getfield(L, -2, "args");
-  switch (auto t = lua_type(L, -1)) {
-  case LUA_TNIL:
-    // nothing to do either type is explicitly nil, or field is undefined so
-    // which is fine bc it's an optional field
-    break;
-  case LUA_TTABLE:
-    // TODO: concatinate all these strings
-    break;
-  default:
-    lua_pushfstring(
-        L,
-        "Expected type of exe.args to either be `nil` "
-        "(undefined) or a table (array), found [%s] [in function Run]",
-        lua_typename(t));
-    return lua_error(L);
-  }
-
-  std::cout << "[" << exe_path << "]\n";
-  std::cout.flush();
-
-  OS_CALL(exe_path.data());
-
-  return 0;
-}
-
 // NOTE: this function pushes a new builder object onto the stack, which means
 // that if you want to test subprojects you can't really (because the
 // LUAMAKE_TEST#n macro won't be included in the compilation)
-auto build_dep(lua_State *state) noexcept -> int {
+auto Builder::build_dep(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, build_dep);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to function "
@@ -2535,7 +2150,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
 
 // TODO: switch this to use userdata, which should make things faster to process
 // TODO: double check that this function isn't doing redundant type checks
-auto clang(lua_State *state) noexcept -> int {
+auto Builder::clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
     lua_pushstring(state, "Expected one argument to the clang function");
@@ -2670,7 +2285,7 @@ auto clang(lua_State *state) noexcept -> int {
   return 1;
 }
 
-auto require(lua_State *state) noexcept -> int {
+auto Builder::require(lua_State *state) noexcept -> int {
   // because this is a function on an api boundary, we have to make sure that no
   // exceptions leak from it
   LUA_EXPECTED_ARGUMENTS(state, 2, require)
@@ -2728,7 +2343,7 @@ auto require(lua_State *state) noexcept -> int {
   }
 }
 
-auto link_lib(lua_State *state) noexcept -> int {
+auto Builder::link_lib(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 2, require)
   LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -2), LUA_TNUMBER,
                     "Expected integer to `link_lib` function, found [%s]",
@@ -2770,13 +2385,8 @@ auto link_lib(lua_State *state) noexcept -> int {
 // every single time, and it would take up a lot of time to generate every
 // single time, we might be able to add a run once step that could generate
 // this, but i think just having good caching would mitigate a lot of the issues
-auto compile_commands_json(lua_State *state) noexcept -> int {
+auto Builder::compile_commands_json(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, cc_json);
-  /*
-  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -2), LUA_TTABLE,
-                    "Expected table to `cc_json` function, found [%s]",
-                    lua_typename(arg_t));
-                    */
   LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected integer to `cc_json` function, found [%s]",
                     lua_typename(arg_t));
@@ -2902,9 +2512,45 @@ auto compile_commands_json(lua_State *state) noexcept -> int {
     return lua_error(state);
   }
 }
-} // namespace
 
-namespace builtins {
+auto Runner::run(lua_State *L) noexcept -> int {
+  auto const num_args = lua_gettop(L);
+  if (num_args != 1) {
+    lua_pushstring(L, "Too many args to function run");
+    return lua_error(L);
+  }
+
+  lua_getfield(L, -1, "path");
+  LUA_ASSERT(L, lua_type(L, -1), LUA_TSTRING,
+             "Expected type of exe.path to be string [in function Run]");
+  auto const exe_path = string_view(lua_tolstring(L, -1, nullptr));
+
+  lua_getfield(L, -2, "args");
+  switch (auto t = lua_type(L, -1)) {
+  case LUA_TNIL:
+    // nothing to do either type is explicitly nil, or field is undefined so
+    // which is fine bc it's an optional field
+    break;
+  case LUA_TTABLE:
+    // TODO: concatinate all these strings
+    break;
+  default:
+    lua_pushfstring(
+        L,
+        "Expected type of exe.args to either be `nil` "
+        "(undefined) or a table (array), found [%s] [in function Run]",
+        lua_typename(t));
+    return lua_error(L);
+  }
+
+  std::cout << "[" << exe_path << "]\n";
+  std::cout.flush();
+
+  OS_CALL(exe_path.data());
+
+  return 0;
+}
+
 auto dump(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 2) {
@@ -2933,31 +2579,31 @@ auto dump(lua_State *state) noexcept -> int {
 auto make_builder_obj(lua_State *state) noexcept -> void {
   lua_createtable(state, 1, 9);
 
-  lua_pushcfunction(state, clang);
+  lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
 
-  lua_pushcfunction(state, new_exe);
+  lua_pushcfunction(state, &Builder::new_exe);
   lua_setfield(state, -2, "new_exe");
 
-  lua_pushcfunction(state, new_static);
+  lua_pushcfunction(state, &Builder::new_static);
   lua_setfield(state, -2, "new_static");
 
-  lua_pushcfunction(state, install_exe);
+  lua_pushcfunction(state, &Builder::install_exe);
   lua_setfield(state, -2, "install_exe");
 
-  lua_pushcfunction(state, install_static);
+  lua_pushcfunction(state, &Builder::install_static);
   lua_setfield(state, -2, "install_static");
 
-  lua_pushcfunction(state, build_dep);
+  lua_pushcfunction(state, &Builder::build_dep);
   lua_setfield(state, -2, "build_dep");
 
-  lua_pushcfunction(state, require);
+  lua_pushcfunction(state, &Builder::require);
   lua_setfield(state, -2, "requires");
 
-  lua_pushcfunction(state, link_lib);
+  lua_pushcfunction(state, &Builder::link_lib);
   lua_setfield(state, -2, "link_lib");
 
-  lua_pushcfunction(state, compile_commands_json);
+  lua_pushcfunction(state, &Builder::compile_commands_json);
   lua_setfield(state, -2, "cc_json");
 
   // this will set Lake[1] = $CWD, which could cause issues, but you should be
@@ -2971,9 +2617,97 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
 auto make_runner_obj(lua_State *state) noexcept -> void {
   lua_createtable(state, 0, 1);
 
-  lua_pushcfunction(state, run);
+  lua_pushcfunction(state, &Runner::run);
   lua_setfield(state, -2, "run");
 }
+
+LakeModules::LakeModules() noexcept
+    : cap(4), size(0), is_compileds(std::make_unique<bool[]>(cap)),
+      compiled_files(std::make_unique<std::vector<std::string>[]>(cap)),
+      luamake_paths(std::make_unique<fs::path[]>(cap)),
+      mods(std::make_unique<Module[]>(cap)) {
+  luamake_paths[0] = fs::current_path() / "luamake.lua";
+  is_compileds[0] = false;
+  ++size;
+}
+
+auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
+  if (size == cap)
+    resize();
+  luamake_paths[size] = std::move(path);
+  is_compileds[size] = false;
+
+  auto const ret_idx = static_cast<lua_Integer>(size);
+  ++size;
+  return ret_idx;
+}
+
+auto LakeModules::get_module_path(lua_Integer idx) const noexcept -> fs::path {
+  return luamake_paths[static_cast<size_t>(idx)];
+}
+
+auto LakeModules::emplace_at(lua_Integer idx, Module &&mod) -> void {
+  auto const i = static_cast<size_t>(idx);
+  mods[i] = std::move(mod);
+}
+
+auto LakeModules::module_at(lua_Integer const idx) noexcept -> Module & {
+  return mods[static_cast<size_t>(idx)];
+}
+
+auto LakeModules::contains(fs::path const &module_name) const noexcept -> int {
+  for (auto i = size_t{0}; i < size; ++i) {
+    if (luamake_paths[i] == module_name / "luamake.lua") {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+auto LakeModules::resize() -> void {
+  auto const n_cap = 3 * cap / 2;
+  auto n_is_compileds = std::make_unique<bool[]>(n_cap);
+  auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
+  auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
+  auto n_mods = std::make_unique<Module[]>(n_cap);
+
+  std::memcpy(n_is_compileds.get(), is_compileds.get(), sizeof(bool) * cap);
+
+  for (auto i = size_t{}; i < cap; ++i)
+    n_compiled_files[i] = std::move(compiled_files[i]);
+  for (auto i = size_t{}; i < cap; ++i)
+    n_luamake_paths[i] = std::move(luamake_paths[i]);
+  for (auto i = size_t{}; i < cap; ++i)
+    n_mods[i] = std::move(mods[i]);
+
+  is_compileds = std::move(n_is_compileds);
+  compiled_files = std::move(n_compiled_files);
+  luamake_paths = std::move(n_luamake_paths);
+  mods = std::move(n_mods);
+}
+
+#ifdef DEBUG
+auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
+  out << "modules.paths = {\n";
+  for (auto i = size_t{0}; i < size; ++i) {
+    out << "\t[" << i << "][" << luamake_paths[i].string() << "]\n";
+  }
+  out << "}\n";
+  out.flush();
+}
+
+auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
+  out << "modules.mods = {\n";
+  for (auto i = size_t{}; i < size; ++i) {
+    out << '[' << i << "] {";
+    mods[i].display(out);
+    out << '}';
+  }
+  out << "}\n";
+  out.flush();
+}
+#endif // DEBUG
+
 } // namespace builtins
 } // namespace luamake
 #undef LUA_ASSERT
