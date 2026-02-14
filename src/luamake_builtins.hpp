@@ -309,6 +309,26 @@ struct LakeModules final {
   auto dump_modules(std::ostream &) const noexcept -> void;
 #endif // DEBUG
 
+  struct Iterator final {
+    constexpr Iterator(size_t const at, Module const *const mods) noexcept
+        : at(at), mods(mods) {}
+    auto operator++() noexcept -> Iterator & {
+      ++at;
+      return *this;
+    }
+    auto operator*() noexcept -> Module const & { return mods[at]; }
+    auto constexpr operator==(Iterator const that) const noexcept -> bool {
+      return at == that.at;
+    }
+
+  private:
+    size_t at;
+    Module const *const mods;
+  };
+
+  auto begin() const noexcept -> Iterator { return Iterator(0, mods.get()); }
+  auto end() const noexcept -> Iterator { return Iterator(size, mods.get()); }
+
 private:
   auto resize() -> void;
 
