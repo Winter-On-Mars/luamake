@@ -72,12 +72,12 @@ auto file_exists(fs::path &&path) noexcept -> bool {
 #endif
 }
 
-static auto clean() noexcept -> exit_t;
 static auto new_proj(string_view const, proj_t const) noexcept -> exit_t;
 static auto init_proj(string_view const, proj_t const) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
 static auto build(user_func_config const &) noexcept -> exit_t;
+static auto clean(user_func_config const &) noexcept -> exit_t;
 static auto run(user_func_config const &) noexcept -> exit_t;
 static auto test(user_func_config const &) noexcept -> exit_t;
 
@@ -196,10 +196,10 @@ auto Type::do_command() const noexcept -> exit_t {
     }
     return init_proj(project_root, project_type);
   }
-  case CLEAN:
-    return clean();
   case HELP:
     return help();
+  case CLEAN:
+    [[fallthrough]];
   case BUILD:
     [[fallthrough]];
   case TEST:
@@ -208,7 +208,6 @@ auto Type::do_command() const noexcept -> exit_t {
     break;
   }
 
-  builtins::mods.init();
   auto *state = luaL_newstate();
   if (state == nullptr) {
     error_message(
@@ -253,6 +252,7 @@ auto Type::do_command() const noexcept -> exit_t {
     }
   }
 
+  builtins::mods.init();
   switch (type_t) {
   case BUILD:
     res = build(cfg);
@@ -264,6 +264,8 @@ auto Type::do_command() const noexcept -> exit_t {
     res = run(cfg);
     break;
   case CLEAN:
+    res = clean(cfg);
+    break;
     [[fallthrough]];
   case UNKNOWN_ARG:
     [[fallthrough]];
@@ -277,21 +279,6 @@ auto Type::do_command() const noexcept -> exit_t {
   lua_close(state);
   builtins::mods.deinit();
   return res;
-}
-
-// TODO: update this to have an optional command line arg called like
-// --recursive, to recursively clear the build files, maybe that should just be
-// folded into the base behaviour of this function, but as of now it will
-// require reworking how we deal with modules, which seems like a really big
-// thing i don't wanna do rn
-// TODO: update how we store and access the modules, because we need them here
-// so that we can get the names of certain directories, that way we make sure
-// we're only cleaning things that we produce, i.e. cache files, obj files that
-// we generate etc
-static auto clean() noexcept -> exit_t {
-  error_message("cleaning is not currently implimented, feel free to work on "
-                "contributing to the project by adding it");
-  return exit_t::internal_error;
 }
 
 static auto new_proj(string_view const project_name, proj_t const type) noexcept
@@ -691,6 +678,50 @@ static auto build(user_func_config const &c) noexcept -> exit_t {
     return exit_t::lua_vm_error; // ?
   }
 
+  return exit_t::ok;
+}
+
+// TODO: add a command line arg to specify which directories you want to clean,
+// something like --base for the root directory, along with being able to
+// specify the name of a specific module to clean
+// NOTE: this function just clears the cache, it leaves every other file as is,
+// we should add a command line arg to fully remove the files, something like
+// --everything
+static auto clean(user_func_config const &c) noexcept -> exit_t {
+  auto const build_fn_t = lua_getglobal(c.state, "Build");
+  switch (build_fn_t) {
+  case LUA_TFUNCTION:
+    break;
+  case LUA_TNIL:
+    error_message(
+        "Unable to find function `Build` in discovered `luamake.lua`." NL
+        "\tSee README/wiki for more info");
+    return exit_t::config_error;
+  default:
+    error_message("`Build` value found in `luamake.lua`, but is not a "
+                  "function (might be callable [why would you do that?])." NL
+                  "\tSee README/wiki for more info, and if is a callable, feel "
+                  "free to open a gh issue to fix this problem (and maybe "
+                  "explain why the code's formatted this way lol)");
+    return exit_t::config_error;
+  }
+
+  // normally we need to get the builder object from the global, but in this
+  // case there's no other point that can call this function, so we just need to
+  // make a builder object
+  builtins::make_builder_obj(c.state);
+  if (lua_pcall(c.state, 1, 1, 0) != LUA_OK) {
+    auto const err_message = lua_tolstring(c.state, -1, nullptr);
+    ferror_message("While in the lua vm, Build function" NL "\t[%s]",
+                   err_message);
+    return exit_t::lua_vm_error; // ?
+  }
+
+  for (auto &&mod : builtins::mods) {
+    auto const cache_path = fs::path(
+        std::format("{}/__luamake_cache/{}.cache", mod.install_dir, mod.name));
+    (void)fs::remove(cache_path);
+  }
   return exit_t::ok;
 }
 
