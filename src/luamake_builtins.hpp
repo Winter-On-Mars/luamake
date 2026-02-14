@@ -24,6 +24,7 @@ auto dump(lua_State *state) noexcept -> int;
 
 auto make_builder_obj(lua_State *state) noexcept -> void;
 auto make_runner_obj(lua_State *state) noexcept -> void;
+auto make_builder_thunk(lua_State *const) noexcept -> void;
 
 class Builder final {
   static auto new_exe(lua_State *) noexcept -> int;
@@ -35,7 +36,14 @@ class Builder final {
   static auto require(lua_State *) noexcept -> int;
   static auto link_lib(lua_State *) noexcept -> int;
   static auto compile_commands_json(lua_State *) noexcept -> int;
+
+  // used with some of the build commands that want to turn off actually running
+  // the compiler
+  static auto install_exe_thunk(lua_State *) noexcept -> int;
+  static auto install_static_thunk(lua_State *) noexcept -> int;
+
   friend auto make_builder_obj(lua_State *) noexcept -> void;
+  friend auto make_builder_thunk(lua_State *) noexcept -> void;
 };
 
 class Runner final {

@@ -709,7 +709,7 @@ static auto clean(user_func_config const &c) noexcept -> exit_t {
   // normally we need to get the builder object from the global, but in this
   // case there's no other point that can call this function, so we just need to
   // make a builder object
-  builtins::make_builder_obj(c.state);
+  builtins::make_builder_thunk(c.state);
   if (lua_pcall(c.state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(c.state, -1, nullptr);
     ferror_message("While in the lua vm, Build function" NL "\t[%s]",

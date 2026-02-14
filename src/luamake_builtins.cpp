@@ -795,92 +795,46 @@ auto Module::deserialize(fs::path const &path)
 // TODO: optimize this, reorder equality checks, maybe in memory serialize the
 // objects and just compare the bytes(?)
 auto Module::operator==(Module const &that) const noexcept -> bool {
-#ifdef DEBUG
-  std::cout << "comparing module @[" << this << "] with module @[" << &that
-            << "]\n";
-#endif // DEBUG
   if (type != that.type) {
-#ifdef DEBUG
-    std::cout << "Different types\n";
-#endif // DEBUG
     return false;
   }
 
   // tree
   if (tree.num_files != that.tree.num_files) {
-#ifdef DEBUG
-    std::cout << "Different num_files\n";
-#endif // DEBUG
     return false;
   }
 
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     if (tree.hashes[i] != that.tree.hashes[i]) {
-#ifdef DEBUG
-      std::cout << "Different hashes[" << i << "]\n";
-#endif // DEBUG
       return false;
     }
   }
   if (tree.all_paths.size != that.tree.all_paths.size) {
-#ifdef DEBUG
-    std::cout << "Different tree.all_paths sizes\n";
-    std::cout << "this.tree.all_paths.size: [" << tree.all_paths.size << "]\n";
-    std::cout << "that.tree.all_paths.size: [" << that.tree.all_paths.size
-              << "]\n";
-#endif // DEBUG
     return false;
   }
   if (strncmp(tree.all_paths.buffer, that.tree.all_paths.buffer,
               tree.all_paths.size)) {
-#ifdef DEBUG
-    std::cout << "Different all_paths\n";
-    std::cout << "this: '" << tree.all_paths.view() << "'\n";
-    std::cout << "this.buffer: '" << tree.all_paths.buffer << "'\n";
-    std::cout << "that: '" << that.tree.all_paths.view() << "'\n";
-    std::cout << "that.buffer: '" << that.tree.all_paths.buffer << "'\n";
-#endif // DEBUG
     return false;
   }
 
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     if (tree.types[i] != that.tree.types[i]) {
-#ifdef DEBUG
-      std::cout << "Different tree.types[" << i << "]\n";
-#endif // DEBUG
       return false;
     }
   }
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     if (tree.files[i].start != that.tree.files[i].start &&
         tree.files[i].end != that.tree.files[i].end) {
-#ifdef DEBUG
-      std::cout << "Different tree.files[" << i << "]\n";
-#endif // DEBUG
       return false;
     }
   }
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     if (tree.deps[i].size() != that.tree.deps[i].size()) {
-#ifdef DEBUG
-      std::cout << "Different tree.deps[" << i << "].size()\n";
-      std::cout << "this: " << tree.deps[i].size() << "\n";
-      std::cout << "that: " << that.tree.deps[i].size() << "\n";
-      for (auto idx = size_t{}; idx < tree.num_files; ++idx) {
-        std::cout << "this.tree.deps[" << idx
-                  << "].size():  " << tree.deps[idx].size() << '\n';
-        std::cout << "that.tree.deps[" << idx
-                  << "].size():  " << that.tree.deps[idx].size() << '\n';
-      }
-#endif // DEBUG
       return false;
     }
 
     for (auto j = size_t{}; j < tree.deps[i].size(); ++j) {
       if (tree.deps[i][j] != that.tree.deps[i][j]) {
-#ifdef DEBUG
-        std::cout << "Different tree.deps[" << i << "][" << j << "]\n";
-#endif // DEBUG
         return false;
       }
     }
@@ -890,25 +844,14 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
 
   // rest of the class
   if (compiler != that.compiler) {
-#ifdef DEBUG
-    std::cout << "Different compilers\n";
-    std::cout << "this: " << compiler << "\n";
-    std::cout << "that: " << that.compiler << "\n";
-#endif // DEBUG
     return false;
   }
 
   if (name != that.name) {
-#ifdef DEBUG
-    std::cout << "Different names\n";
-#endif // DEBUG
     return false;
   }
 
   if (install_dir != that.install_dir) {
-#ifdef DEBUG
-    std::cout << "Different install_dir\n";
-#endif // DEBUG
     return false;
   }
 
@@ -1855,18 +1798,9 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     switch (maybe_cached_mod.index()) {
     case 0: {
       auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
-#ifdef DEBUG
-      std::cout << "\tGot a module (exe), and am now comparing them\n";
-#endif // DEBUG
       if (exe_mod == cached_mod) {
-#ifdef DEBUG
-        std::cout << "they're equal\n";
-#endif // DEBUG
         return 0;
       }
-#ifdef DEBUG
-      std::cout << "they're NOT equal\n";
-#endif // DEBUG
     } break;
     case 1: {
       auto const &error_message = std::get<std::string>(maybe_cached_mod);
@@ -1967,18 +1901,9 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     switch (maybe_cached_mod.index()) {
     case 0: {
       auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
-#ifdef DEBUG
-      std::cout << "\tGot a module (static), and am now comparing them\n";
-#endif // DEBUG
       if (static_mod == cached_mod) {
-#ifdef DEBUG
-        std::cout << "they're equal\n";
-#endif // DEBUG
         return 0;
       }
-#ifdef DEBUG
-      std::cout << "they're NOT equal\n";
-#endif // DEBUG
     } break;
     case 1: {
       auto const &error_message = std::get<std::string>(maybe_cached_mod);
@@ -2512,6 +2437,89 @@ auto Builder::compile_commands_json(lua_State *state) noexcept -> int {
   }
 }
 
+// probably shouldn't call it a thunk, but basically just a dummy function that
+// doesn't run any commands, nor make any directories, just varifies that there
+// is a module there, and that the module is an exe mod
+auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_exe)
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected type of argument to `install_exe` to be of type "
+                    "integer, found [%s]",
+                    lua_typename(ret_t));
+
+  try {
+    auto const mod_idx = lua_tointeger(state, -1);
+    lua_pop(state, 1);
+    auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
+
+    auto const &exe_mod = mods.module_at(mod_idx);
+    if (exe_mod.type != builtins::Module::EXE) {
+      throw std::runtime_error(std ::format(
+          "module type is not exe, found [{}]",
+          static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
+              exe_mod.type)));
+    }
+    return 0;
+  } catch (ModuleErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (DepTreeErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (pp::Exception const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
+// probably shouldn't call it a thunk, but basically just a dummy function that
+// doesn't run any commands, nor make any directories, just varifies that there
+// is a module there, and that the module is a static mod
+auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_exe)
+  LUA_ASSERT_FORMAT(
+      state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+      "Expected type of argument to `install_static` to be of type "
+      "integer, found [%s]",
+      lua_typename(ret_t));
+
+  try {
+    auto const mod_idx = lua_tointeger(state, -1);
+    lua_pop(state, 1);
+    auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
+
+    auto const &exe_mod = mods.module_at(mod_idx);
+    if (exe_mod.type != builtins::Module::STATIC) {
+      throw std::runtime_error(std ::format(
+          "module type is not static, found [{}]",
+          static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
+              exe_mod.type)));
+    }
+    return 0;
+  } catch (ModuleErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (DepTreeErr const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (pp::Exception const &e) {
+    lua_pushstring(state, e.what().c_str());
+    return lua_error(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
 auto Runner::run(lua_State *L) noexcept -> int {
   auto const num_args = lua_gettop(L);
   if (num_args != 1) {
@@ -2618,6 +2626,44 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, &Runner::run);
   lua_setfield(state, -2, "run");
+}
+
+auto make_builder_thunk(lua_State *state) noexcept -> void {
+  lua_createtable(state, 1, 9);
+
+  lua_pushcfunction(state, &Builder::clang);
+  lua_setfield(state, -2, "clang");
+
+  lua_pushcfunction(state, &Builder::new_exe);
+  lua_setfield(state, -2, "new_exe");
+
+  lua_pushcfunction(state, &Builder::new_static);
+  lua_setfield(state, -2, "new_static");
+
+  lua_pushcfunction(state, &Builder::install_exe_thunk);
+  lua_setfield(state, -2, "install_exe");
+
+  lua_pushcfunction(state, &Builder::install_static_thunk);
+  lua_setfield(state, -2, "install_static");
+
+  lua_pushcfunction(state, &Builder::build_dep);
+  lua_setfield(state, -2, "build_dep");
+
+  lua_pushcfunction(state, &Builder::require);
+  lua_setfield(state, -2, "requires");
+
+  lua_pushcfunction(state, &Builder::link_lib);
+  lua_setfield(state, -2, "link_lib");
+
+  lua_pushcfunction(state, &Builder::compile_commands_json);
+  lua_setfield(state, -2, "cc_json");
+
+  // this will set Lake[1] = $CWD, which could cause issues, but you should be
+  // calling luamake in the same directory with the luamake.lua file in it
+  lua_pushstring(state, fs::current_path().c_str());
+  lua_seti(state, -2, 1);
+
+  // TODO: add the functions install_dynamic
 }
 
 LakeModules::LakeModules() noexcept
