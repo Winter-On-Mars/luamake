@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <numeric>
 #include <string_view>
 #include <type_traits>
 
@@ -78,6 +79,7 @@ static auto help() noexcept -> exit_t;
 
 static auto build(user_func_config const &) noexcept -> exit_t;
 static auto clean(user_func_config const &) noexcept -> exit_t;
+static auto compile_commands_json(user_func_config const &) noexcept -> exit_t;
 static auto run(user_func_config const &) noexcept -> exit_t;
 static auto test(user_func_config const &) noexcept -> exit_t;
 
@@ -85,7 +87,7 @@ struct Type final {
   // TODO: add command for generating compile_commands.json to the project
   // add optional argument for running in verbose mode to output more
   // information like the specific thread things are being run on
-  enum {
+  enum class Command : int {
     UNKNOWN_ARG,
     BUILD,
     NEW,
@@ -94,7 +96,9 @@ struct Type final {
     TEST,
     RUN,
     HELP,
+    CC_JSON,
   } type_t;
+  using enum Command;
 
   int argc;
   char **argv;
@@ -104,6 +108,8 @@ struct Type final {
   auto do_command() const noexcept -> exit_t;
 };
 
+// TODO: just pass argc and argv to the functions directly, there's no reason to
+// be attaching them to the objects like this ?
 auto Type::make(int argc, char **argv) noexcept -> Type {
   if (argc == 1) {
     return {Type::RUN, 0, nullptr};
@@ -129,6 +135,9 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
     return {Type::HELP, 0, nullptr};
   } else if (strcmp(argv[1], "i") == 0 || strcmp(argv[1], "init") == 0) {
     return {Type::INIT, argc, argv};
+  } else if (strcmp(argv[1], "cc") == 0 ||
+             strcmp(argv[1], "compile_commands") == 0) {
+    return {Type::CC_JSON, 0, nullptr};
   } else {
     fwarning_message("Unknown argument [%s]" NL
                      "\tDisplaying help for list of accepted arguments",
@@ -200,6 +209,8 @@ auto Type::do_command() const noexcept -> exit_t {
     return help();
   case CLEAN:
     [[fallthrough]];
+  case CC_JSON:
+    [[fallthrough]];
   case BUILD:
     [[fallthrough]];
   case TEST:
@@ -266,7 +277,9 @@ auto Type::do_command() const noexcept -> exit_t {
   case CLEAN:
     res = clean(cfg);
     break;
-    [[fallthrough]];
+  case CC_JSON:
+    res = compile_commands_json(cfg);
+    break;
   case UNKNOWN_ARG:
     [[fallthrough]];
   case NEW:
@@ -721,6 +734,141 @@ static auto clean(user_func_config const &c) noexcept -> exit_t {
     auto const cache_path = fs::path(
         std::format("{}/__luamake_cache/{}.cache", mod.install_dir, mod.name));
     (void)fs::remove(cache_path);
+  }
+  return exit_t::ok;
+}
+
+static auto compile_commands_json(user_func_config const &c) noexcept
+    -> exit_t {
+  auto const build_fn_t = lua_getglobal(c.state, "Build");
+  switch (build_fn_t) {
+  case LUA_TFUNCTION:
+    break;
+  case LUA_TNIL:
+    error_message(
+        "Unable to find function `Build` in discovered `luamake.lua`." NL
+        "\tSee README/wiki for more info");
+    return exit_t::config_error;
+  default:
+    error_message("`Build` value found in `luamake.lua`, but is not a "
+                  "function (might be callable [why would you do that?])." NL
+                  "\tSee README/wiki for more info, and if is a callable, feel "
+                  "free to open a gh issue to fix this problem (and maybe "
+                  "explain why the code's formatted this way lol)");
+    return exit_t::config_error;
+  }
+
+  // normally we need to get the builder object from the global, but in this
+  // case there's no other point that can call this function, so we just need to
+  // make a builder object
+  builtins::make_builder_thunk(c.state);
+  if (lua_pcall(c.state, 1, 1, 0) != LUA_OK) {
+    auto const err_message = lua_tolstring(c.state, -1, nullptr);
+    ferror_message("While in the lua vm, Build function" NL "\t[%s]",
+                   err_message);
+    return exit_t::lua_vm_error; // ?
+  }
+
+  for (auto &&mod : builtins::mods) {
+    auto const &directory = mod.install_dir;
+    auto const arguments = [&]() -> string {
+      auto res = string();
+      auto prev = size_t{};
+      auto i = size_t{};
+      for (; i < mod.compiler.size(); ++i) {
+        if (mod.compiler[i] == ' ') {
+          res.append(1, '"');
+          res.append(mod.compiler.substr(prev, i - prev));
+          res.append(1, '"');
+          res.append(1, ',');
+          prev = i + 1;
+        }
+      }
+      res.append(1, '"');
+      res.append(mod.compiler.substr(prev, i - prev));
+      res.append(1, '"');
+      res.append(1, ',');
+      return res;
+    }();
+
+    auto const includes =
+        std::accumulate(mod.includes.cbegin(), mod.includes.cend(),
+                        std::string(), [](auto &&a, auto &&next) {
+                          return std::format("{}\"-I{}\",", a, next.string());
+                        });
+    auto const sys_includes = std::accumulate(
+        mod.sys_includes.cbegin(), mod.sys_includes.cend(), std::string(),
+        [](auto &&a, auto &&next) {
+          return std::format("{}\"-isystem\",\"{}\",", a, next.string());
+        });
+    auto const dep_includes =
+        std::accumulate(mod.dep_includes.cbegin(), mod.dep_includes.cend(),
+                        std::string(), [](auto &&a, auto &&next) {
+                          return std::format("{}\"-iquote\",\"{}\",", a,
+                                             next.parent_path().string());
+                        });
+
+    auto cc_json_string = std::string(1, '[');
+    for (auto i = size_t{}; i < mod.tree.size() - 1; ++i) {
+      cc_json_string.append("{");
+      cc_json_string.append(std::format("\"directory\":\"{}\",", directory));
+
+      cc_json_string.append("\"arguments\":[");
+      cc_json_string.append(arguments);
+
+      cc_json_string.append(includes);
+      cc_json_string.append(sys_includes);
+      cc_json_string.append(dep_includes);
+
+      cc_json_string.append("\"-c\",\"-o\",");
+      auto const fname = mod.tree.get_path(i).stem().string();
+      auto const obj_path =
+          std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
+      auto const fpath = mod.tree.get_path(i);
+      cc_json_string.append(
+          std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
+      cc_json_string.append("],");
+
+      // for some reason we can't use the .string method on the file path,
+      // because it includes the null terminator
+      cc_json_string.append(
+          std::format("\"file\":\"{}\"", mod.tree.get_path(i).c_str()));
+      cc_json_string.append("},");
+    }
+    // generate the last module
+    cc_json_string.append("{");
+    cc_json_string.append(std::format("\"directory\":\"{}\",", directory));
+
+    cc_json_string.append("\"arguments\":[");
+    cc_json_string.append(arguments);
+    cc_json_string.append(includes);
+    cc_json_string.append(sys_includes);
+    cc_json_string.append(dep_includes);
+
+    cc_json_string.append("\"-c\",\"-o\",");
+    auto const fname = mod.tree.get_path(mod.tree.size() - 1).stem().string();
+    auto const obj_path =
+        std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
+    auto const fpath = mod.tree.get_path(mod.tree.size() - 1);
+    cc_json_string.append(
+        std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
+    cc_json_string.append("],");
+
+    cc_json_string.append(std::format(
+        "\"file\":\"{}\"", mod.tree.get_path(mod.tree.size() - 1).c_str()));
+    cc_json_string.append("}");
+
+    cc_json_string += ']';
+
+    fs::create_directory(mod.install_dir);
+    auto const cc_json_path =
+        mod.install_dir / fs::path("compile_commands.json");
+    auto cc_json = File(cc_json_path, File::WRITE | File::CREATE);
+    if (!cc_json) {
+      ferror_message("Unable to make file %s", cc_json_path.c_str());
+      return exit_t::internal_error;
+    }
+    cc_json.write(cc_json_string.c_str(), cc_json_string.size(), 1);
   }
   return exit_t::ok;
 }
