@@ -2251,7 +2251,6 @@ auto Builder::require(lua_State *state) noexcept -> int {
       lua_pushstring(state, ec.message().c_str());
       return lua_error(state);
     }
-    ec.clear();
 
     (void)lua_pushinteger(state, mods.new_module(std::move(fpath)));
     return 1;
@@ -2301,138 +2300,6 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
   } catch (...) {
     (void)lua_pushstring(
         state, "An unknown exception was encountered in the requires function");
-    return lua_error(state);
-  }
-}
-
-// TODO: add caching, because this definately does not need to be run
-// every single time, and it would take up a lot of time to generate every
-// single time, we might be able to add a run once step that could generate
-// this, but i think just having good caching would mitigate a lot of the issues
-auto Builder::compile_commands_json(lua_State *state) noexcept -> int {
-  LUA_EXPECTED_ARGUMENTS(state, 1, cc_json);
-  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TNUMBER,
-                    "Expected integer to `cc_json` function, found [%s]",
-                    lua_typename(arg_t));
-
-  try {
-    auto const idx = lua_tointeger(state, -1);
-    lua_pop(state, 1);
-
-    auto const &mod = mods.module_at(idx);
-
-    auto const &directory = mod.install_dir;
-    auto const arguments = [&]() -> string {
-      auto res = string();
-      auto prev = size_t{};
-      auto i = size_t{};
-      for (; i < mod.compiler.size(); ++i) {
-        if (mod.compiler[i] == ' ') {
-          res.append(1, '"');
-          res.append(mod.compiler.substr(prev, i - prev));
-          res.append(1, '"');
-          res.append(1, ',');
-          prev = i + 1;
-        }
-      }
-      res.append(1, '"');
-      res.append(mod.compiler.substr(prev, i - prev));
-      res.append(1, '"');
-      res.append(1, ',');
-      return res;
-    }();
-
-    auto const includes =
-        std::accumulate(mod.includes.cbegin(), mod.includes.cend(),
-                        std::string(), [](auto &&a, auto &&next) {
-                          return std::format("{}\"-I{}\",", a, next.string());
-                        });
-    auto const sys_includes = std::accumulate(
-        mod.sys_includes.cbegin(), mod.sys_includes.cend(), std::string(),
-        [](auto &&a, auto &&next) {
-          return std::format("{}\"-isystem\",\"{}\",", a, next.string());
-        });
-    auto const dep_includes =
-        std::accumulate(mod.dep_includes.cbegin(), mod.dep_includes.cend(),
-                        std::string(), [](auto &&a, auto &&next) {
-                          return std::format("{}\"-iquote\",\"{}\",", a,
-                                             next.parent_path().string());
-                        });
-
-    auto cc_json_string = std::string(1, '[');
-    for (auto i = size_t{}; i < mod.tree.num_files - 1; ++i) {
-      cc_json_string.append("{");
-      cc_json_string.append(std::format("\"directory\":\"{}\",", directory));
-
-      cc_json_string.append("\"arguments\":[");
-      cc_json_string.append(arguments);
-
-      cc_json_string.append(includes);
-      cc_json_string.append(sys_includes);
-      cc_json_string.append(dep_includes);
-
-      cc_json_string.append("\"-c\",\"-o\",");
-      auto const fname = mod.tree.get_path(i).stem().string();
-      auto const obj_path =
-          std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
-      auto const fpath = mod.tree.get_path(i);
-      cc_json_string.append(
-          std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
-      cc_json_string.append("],");
-
-      // for some reason we can't use the .string method on the file path,
-      // because it includes the null terminator
-      cc_json_string.append(
-          std::format("\"file\":\"{}\"", mod.tree.get_path(i).c_str()));
-      cc_json_string.append("},");
-    }
-    // generate the last module
-    cc_json_string.append("{");
-    cc_json_string.append(std::format("\"directory\":\"{}\",", directory));
-
-    cc_json_string.append("\"arguments\":[");
-    cc_json_string.append(arguments);
-    cc_json_string.append(includes);
-    cc_json_string.append(sys_includes);
-    cc_json_string.append(dep_includes);
-
-    cc_json_string.append("\"-c\",\"-o\",");
-    auto const fname =
-        mod.tree.get_path(mod.tree.num_files - 1).stem().string();
-    auto const obj_path =
-        std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
-    auto const fpath = mod.tree.get_path(mod.tree.num_files - 1);
-    cc_json_string.append(
-        std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
-    cc_json_string.append("],");
-
-    cc_json_string.append(std::format(
-        "\"file\":\"{}\"", mod.tree.get_path(mod.tree.num_files - 1).c_str()));
-    cc_json_string.append("}");
-
-    cc_json_string += ']';
-
-    fs::create_directory(mod.install_dir);
-    auto const cc_json_path =
-        mod.install_dir / fs::path("compile_commands.json");
-    auto cc_json = File(cc_json_path, File::WRITE | File::CREATE);
-    if (!cc_json) {
-      throw std::runtime_error(
-          std::format("Unable to make file {}", cc_json_path.string()));
-    }
-    cc_json.write(cc_json_string.c_str(), cc_json_string.size(), 1);
-
-    return 0;
-  } catch (std::exception const &e) {
-    lua_pushstring(
-        state,
-        std::format("An exception was thrown in the cc_json function, [{}]",
-                    e.what())
-            .c_str());
-    return lua_error(state);
-  } catch (...) {
-    lua_pushstring(state,
-                   "An unknown exception has occured in cc_json function");
     return lua_error(state);
   }
 }
@@ -2520,6 +2387,65 @@ auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
   }
 }
 
+// NOTE: this function pushes a new builder object onto the stack, which means
+// that if you want to test subprojects you can't really (because the
+// LUAMAKE_TEST#n macro won't be included in the compilation)
+auto Builder::build_dep_thunk(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, build_dep);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected type of argument to function "
+                    "`build_dep` to be number, found [%s]",
+                    lua_typename(ret_t));
+
+  try {
+    auto const luamake_path = mods.get_module_path(lua_tointeger(state, -1));
+    lua_pop(state, 1);
+
+    if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
+      (void)lua_pushfstring(
+          state,
+          "Unable to run the `luamake.lua` file required, in directory [%s]",
+          luamake_path.parent_path().c_str());
+      return lua_error(state);
+    }
+
+    LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                      "Expected table, found [%s]", lua_typename(ret_t));
+
+    if (auto const build_func_t = lua_getfield(state, -1, "Build");
+        build_func_t != LUA_TFUNCTION) {
+      (void)lua_pushfstring(
+          state,
+          "Expected `Build` to have type function when "
+          "returned in a table from the `luamake.lua` script at [%s]",
+          luamake_path.c_str());
+      return lua_error(state);
+    }
+
+    builtins::make_builder_thunk(state);
+    lua_pushstring(state, luamake_path.parent_path().c_str());
+    lua_seti(state, -2, lua_Integer{1});
+    if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
+      return lua_error(state);
+    }
+    return 0;
+  } catch (std::exception const &e) {
+    lua_pushfstring(state, "%s", e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error has occured");
+    return lua_error(state);
+  }
+
+  lua_pushstring(
+      state,
+      std::format(
+          "Unreachable point reached :), please report this. Function [{}]",
+          __FUNCTION__)
+          .c_str());
+  return lua_error(state);
+}
+
 auto Runner::run(lua_State *L) noexcept -> int {
   auto const num_args = lua_gettop(L);
   if (num_args != 1) {
@@ -2584,7 +2510,7 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 9);
+  lua_createtable(state, 1, 8);
 
   lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
@@ -2610,9 +2536,6 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::link_lib);
   lua_setfield(state, -2, "link_lib");
 
-  lua_pushcfunction(state, &Builder::compile_commands_json);
-  lua_setfield(state, -2, "cc_json");
-
   // this will set Lake[1] = $CWD, which could cause issues, but you should be
   // calling luamake in the same directory with the luamake.lua file in it
   lua_pushstring(state, fs::current_path().c_str());
@@ -2629,7 +2552,7 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 }
 
 auto make_builder_thunk(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 9);
+  lua_createtable(state, 1, 8);
 
   lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
@@ -2646,7 +2569,7 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::install_static_thunk);
   lua_setfield(state, -2, "install_static");
 
-  lua_pushcfunction(state, &Builder::build_dep);
+  lua_pushcfunction(state, &Builder::build_dep_thunk);
   lua_setfield(state, -2, "build_dep");
 
   lua_pushcfunction(state, &Builder::require);
@@ -2654,9 +2577,6 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, &Builder::link_lib);
   lua_setfield(state, -2, "link_lib");
-
-  lua_pushcfunction(state, &Builder::compile_commands_json);
-  lua_setfield(state, -2, "cc_json");
 
   // this will set Lake[1] = $CWD, which could cause issues, but you should be
   // calling luamake in the same directory with the luamake.lua file in it

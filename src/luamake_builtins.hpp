@@ -35,12 +35,12 @@ class Builder final {
   static auto clang(lua_State *) noexcept -> int;
   static auto require(lua_State *) noexcept -> int;
   static auto link_lib(lua_State *) noexcept -> int;
-  static auto compile_commands_json(lua_State *) noexcept -> int;
 
   // used with some of the build commands that want to turn off actually running
   // the compiler
   static auto install_exe_thunk(lua_State *) noexcept -> int;
   static auto install_static_thunk(lua_State *) noexcept -> int;
+  static auto build_dep_thunk(lua_State *) noexcept -> int;
 
   friend auto make_builder_obj(lua_State *) noexcept -> void;
   friend auto make_builder_thunk(lua_State *) noexcept -> void;
@@ -138,6 +138,20 @@ struct Module final {
       return SourceFile_t::MISC;
     }
 
+    [[nodiscard]]
+    auto append_path(std::filesystem::path const &)
+        -> std::pair<bool, StringViews>;
+    [[nodiscard]]
+    auto get_path(size_t const) const noexcept -> std::filesystem::path;
+    [[nodiscard]]
+    auto find(std::string_view const) const noexcept
+        -> std::pair<bool, StringViews>;
+
+    [[nodiscard]]
+    constexpr auto size() const noexcept -> size_t {
+      return num_files;
+    }
+
   private:
     // a parallel array for all of the source files
     // NOTE: this could be pushed further, and we could have a
@@ -153,14 +167,6 @@ struct Module final {
     std::unique_ptr<std::vector<unsigned int>[]> deps;
     std::unique_ptr<size_t[]> hashes;
 
-    [[nodiscard]]
-    auto append_path(std::filesystem::path const &)
-        -> std::pair<bool, StringViews>;
-    [[nodiscard]]
-    auto get_path(size_t const) const noexcept -> std::filesystem::path;
-    [[nodiscard]]
-    auto find(std::string_view const) const noexcept
-        -> std::pair<bool, StringViews>;
     /**
      * @throws std::bad_alloc
      */
