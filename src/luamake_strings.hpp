@@ -51,7 +51,6 @@ constexpr OwnedString::OwnedString(char *&buffer, len_t size) noexcept
   buffer = nullptr;
 }
 
-// TODO: have this alloc
 constexpr OwnedString::OwnedString() noexcept
     : buffer(nullptr), size(len_t{0}), capacity(len_t{0}) {}
 

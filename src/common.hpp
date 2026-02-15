@@ -1,6 +1,9 @@
 #ifndef __LUAMAKE_COMMON_HPP
 #define __LUAMAKE_COMMON_HPP
 
+// TODO: add fmt as a subproject, that way we can used their color system to
+// have color in the terminal for displaying errors on all platforms
+
 #if defined(_WIN32)
 #define NL "\r\n"
 #elif defined(__unix__)
@@ -13,18 +16,23 @@
 #endif
 
 // color things for error messages/ warnings
-// TODO: extract these into a platform independent thing so this'll actually
-// work on windows and shit
 #ifdef NO_TERM_COLOR
 #define ERROR
 #define WARNING
 #define DBG
 #define NORMAL
 #else
+#if defined(__unix__) || defined(__MACH__)
 #define ERROR "\033[0;31m"
 #define WARNING "\033[0;33m"
 #define DBG "\033[0;32m"
 #define NORMAL "\033[0;0m"
+#else
+#define ERROR
+#define WARNING
+#define DBG
+#define NORMAL
+#endif
 #endif
 
 #define error_message(msg)                                                     \
