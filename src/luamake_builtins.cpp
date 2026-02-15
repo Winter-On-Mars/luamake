@@ -1767,6 +1767,10 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     }
 
     // TODO: update these functions to throw exceptions
+    // TODO: see if there is a performance increase by checking if the directory
+    // is made and not making it if it is most of the time the directory will be
+    // there, it's just annoying because we have to check every time in case
+    // somebody changes the install_dir variable
     auto const install_dir =
         parent_path /
         fs::path(std::format("{}/{}.o", exe_mod.install_dir, exe_mod.name));
