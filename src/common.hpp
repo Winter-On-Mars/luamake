@@ -52,10 +52,19 @@
 
 #ifdef DEBUG
 #define fn_print()                                                             \
-  fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
-
-#define exit_fn_print()                                                        \
-  fprintf(stderr, "\t\t" DBG "exiting" NORMAL " [%s]" NL, __PRETTY_FUNCTION__)
+  struct __print final {                                                       \
+    __print() noexcept {                                                       \
+      fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL,                    \
+              __PRETTY_FUNCTION__);                                            \
+      fflush(stderr);                                                          \
+    }                                                                          \
+    ~__print() noexcept {                                                      \
+      fprintf(stderr, "\t\t" DBG "exiting" NORMAL " [%s]" NL,                  \
+              __PRETTY_FUNCTION__);                                            \
+      fflush(stderr);                                                          \
+    }                                                                          \
+  } ____ {                                                                     \
+  }
 
 #define expr_dbg(expr)                                                         \
   do {                                                                         \
