@@ -85,7 +85,7 @@ using std::pair, std::array, std::string, std::string_view, std::vector,
     std::unordered_map, std::unordered_set;
 
 auto constexpr lua_typename(int const type) -> char const * {
-  if (type <= 0 || LUA_NUMTYPES <= type) {
+  if (type < 0 || LUA_NUMTYPES <= type) {
     throw std::runtime_error("type is out of range to be a lua type");
   }
 
@@ -1190,6 +1190,11 @@ auto Module::append_predefined_macros(string_view const compiler)
   unreachable();
 }
 
+// TODO: change this to just keep track of the index for the table, we don't
+// need to worry about popping the values from the stack necessarily as this
+// function is (mostly) called from lua itself and so we have a new stack to
+// work with, see [[https://www.lua.org/manual/5.4/manual.html]] section 4 for
+// more info
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     : type(type), tree(), roots(), headers(), includes(), sys_includes(),
       linking(), interpreter({}, {}), compiler(), name(), install_dir() {
@@ -1231,6 +1236,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
         }
         roots.push_back(
             fs::canonical(root / fs::path(lua_tolstring(state, -1, nullptr))));
+        --roots_tbl;
       }
       lua_pop(state, static_cast<int>(num_roots) + 1);
     } break;
@@ -1369,7 +1375,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     default:
       throw UnexpectedType("headers", LUA_TTABLE, header_t);
     }
-
+    lua_pop(state, 1);
   } break;
   case Module_t::DYNAMIC:
     break;
@@ -1381,31 +1387,28 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     auto const len = lua_rawlen(state, -1);
     auto macros = -1;
     for (auto i = 1; i <= len; ++i) {
-      switch (auto const value_t = lua_geti(state, macros, i)) {
-      case LUA_TSTRING: {
-        auto mac = string(lua_tolstring(state, -1, nullptr));
-        if (mac.find('=') != mac.npos) {
-          // TODO: parse macro being set to value
-        } else {
-          def_macros.insert(std::move(mac));
-        }
-      } break;
-      default:
+      auto const value_t = lua_geti(state, macros, i);
+      if (value_t != LUA_TSTRING) {
         throw UnexpectedType("macros[i]", LUA_TSTRING, value_t);
+      }
+      auto mac = string(lua_tolstring(state, -1, nullptr));
+      if (mac.find('=') != mac.npos) {
+        // TODO: parse macro being set to value
+      } else {
+        def_macros.insert(std::move(mac));
       }
       --macros;
     }
-    lua_pop(state, static_cast<int>(len));
+    lua_pop(state, static_cast<int>(len) + 1);
   } break;
   case LUA_TNIL:
     break;
   default:
     throw UnexpectedType("macros", LUA_TTABLE, macro_t);
   }
-  lua_pop(state, 1);
 
-  res.get();
   interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
+  res.get();
 }
 
 auto Module::gen_dep_tree() -> void {
