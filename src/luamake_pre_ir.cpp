@@ -960,27 +960,31 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
                                                   ir_t::ELSE)),
               "");
 
-// TODO: remove any '\\' and '\n' chars from the string
 auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
-  auto const start = i;
+  auto macro = std::string();
+  auto start = i;
   auto looping = true;
   while (i < buf.size() && looping) {
     auto const ch = buf[i];
     switch (ch) {
     case '\\':
+      macro.append(std::string_view{buf.begin() + start, buf.begin() + i - 1});
       ++i;
       if (i < buf.size() && buf[i] == '\n')
         ++i;
+      start = i;
       break;
     case '\n':
+      macro.append(std::string_view{buf.begin() + start, buf.begin() + i});
       looping = false;
       break;
     default:
-      ++i;
+      i = luamake::skip_until(std::string_view{"\\\n"}, buf, i);
       break;
     }
   }
-  push_macro(buf.data() + start, buf.data() + i);
+  expr_dbg(macro);
+  push_macro(macro);
   // the only way to break out of the loop is to hit a '\n' char, but we don't
   // want to include that in the string, we do want to skip over it though so we
   // add 1 here
