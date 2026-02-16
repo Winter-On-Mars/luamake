@@ -963,6 +963,8 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
                                                   ir_t::ELSE)),
               "");
 
+// TODO: the function is currently also including comments at the end of lines,
+// make it not do that some other time, idk i'm going to go play games now
 auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
   auto macro = std::string();
   auto start = i;
