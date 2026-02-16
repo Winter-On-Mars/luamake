@@ -89,6 +89,35 @@ constexpr auto skip_until(auto &&delims, std::span<char_t> const buf,
   return i;
 }
 
+template <typename int_t, typename char_t>
+constexpr auto skip_while(std::basic_string_view<char_t> const delims,
+                          std::basic_string_view<char_t> const buf,
+                          int_t i) noexcept -> int_t {
+  for (; i < buf.size(); ++i) {
+    if (delims.find(buf[i]) == delims.npos) {
+      return i;
+    }
+  }
+  return i;
+}
+
+static_assert([]() {
+  auto constexpr hello = std::string_view(" \t hello world");
+  static_assert(hello[3] == 'h');
+  return skip_while(std::string_view(" \t"), hello, size_t{}) == 3;
+}());
+
+static_assert([]() {
+  auto constexpr macro = std::string_view(" (a)");
+  static_assert(macro[2] == 'a');
+  return skip_while(std::string_view(" \t"), macro, size_t{}) == 1;
+}());
+
+static_assert([]() {
+  auto constexpr macro = std::string_view("\n");
+  return skip_while(std::string_view(" \t"), macro, size_t{}) == 0;
+}());
+
 template <typename char_t>
 constexpr auto is_any_of(std::basic_string_view<char_t> const delims,
                          char_t ch) noexcept -> bool {

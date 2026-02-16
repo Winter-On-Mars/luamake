@@ -853,15 +853,18 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         switch (fcontent[i]) {
         case '(': {
           lex.types.push_back(ir_t::LPAREN);
-          i = skip_ws(fcontent, i) + 1;
+          // we don't need to skip any ws, because otherwise the macro wouldn't
+          // be a function like macro
           i = lex.parse_define_args(fcontent, i + 1);
           if (fcontent[i] != ')') {
             throw Exception(std::format("Expected closing ')' when parsing "
                                         "function macro arguments"));
           }
           lex.types.push_back(ir_t::RPAREN);
-          throw Exception(std::format("Parsing function macro bodies is not "
-                                      "currently implimented"));
+          // this isn't technically needed, but every example (including those
+          // from the official gnu documentation) skip any preceeding ws
+          i = luamake::skip_while(std::string_view{" \t"}, fcontent, i + 1);
+          lex.produce_macro(fcontent, i);
         } break;
           // this is a bandaid solution, we need to do something to determine if
           // this is just defining a macro, or if we're actually defining a
@@ -983,7 +986,6 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
       break;
     }
   }
-  expr_dbg(macro);
   push_macro(macro);
   // the only way to break out of the loop is to hit a '\n' char, but we don't
   // want to include that in the string, we do want to skip over it though so we
