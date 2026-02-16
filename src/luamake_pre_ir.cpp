@@ -853,7 +853,8 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         switch (fcontent[i]) {
         case '(': {
           lex.types.push_back(ir_t::LPAREN);
-          i = lex.parse_define_args(fcontent, i);
+          i = skip_ws(fcontent, i) + 1;
+          i = lex.parse_define_args(fcontent, i + 1);
           if (fcontent[i] != ')') {
             throw Exception(std::format("Expected closing ')' when parsing "
                                         "function macro arguments"));
@@ -987,31 +988,32 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
 }
 
 auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
-  // TODO: there's an infinite loop here caused by reading the end ptr, but only
-  // updating the i ptr :)
-  auto end = i + 1;
-  auto looping = true;
-  while (looping) {
-    switch (fcontent[end]) {
-    case ')': {
-      if (end != i + 1) {
-        push_lexeme(fcontent.data() + i,
-                    fcontent.data() + end - 1); // fcontent[end] == ')'
-      }
-      looping = false;
-    } break;
-    case '.': {
+  while (true) {
+    switch (fcontent[i]) {
+    case ')':
+      return i;
+    case '.':
       throw std::runtime_error("Variatic macros are not currently supported");
-    } break;
-    case ',': {
-      push_lexeme(fcontent.data() + i,
-                  fcontent.data() + end - 1); // fcontent[end] == ','
-      i = skip_ws(fcontent, end + 1) + 1;
-      end = i;
-    } break;
-    default:
-      ++i;
+    case ',':
+      i = skip_ws(fcontent, i + 1) + 1;
       break;
+    case ' ':
+      [[fallthrough]];
+    case '\t':
+      [[fallthrough]];
+    case '\n':
+      [[fallthrough]];
+    case '\r':
+      throw std::runtime_error(
+          "Unexpected character while parsing function like macro. Invalid "
+          "spacing between parameters.");
+    default: {
+      auto const end =
+          luamake::skip_until(std::string_view{"),. \t\r\n"}, fcontent, i + 1);
+      push_lexeme(fcontent.data() + i, fcontent.data() + end - 1);
+      i = end;
+      break;
+    }
     }
   }
   return i;
@@ -2240,9 +2242,9 @@ auto AstIncluder::visit_undef(UndefNode &u) -> void {
   } else if (def_macros.contains(u.name)) {
     def_macros.erase(u.name);
   } else {
-    //  apparently it's perfectly fine to #undef a non-existant macro, at least
-    //  according to clang i should check what the docs have to say about this
-    //  case
+    //  apparently it's perfectly fine to #undef a non-existant macro, at
+    //  least according to clang i should check what the docs have to say
+    //  about this case
   }
 }
 
