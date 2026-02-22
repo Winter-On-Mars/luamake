@@ -1,39 +1,38 @@
 #pragma once
 
+#include <algorithm>
 #include <span>
 #include <string_view>
 
 namespace luamake {
 template <typename int_t, typename char_t>
-constexpr auto skip_ws(std::span<char_t> const buf, int_t i) noexcept -> int_t {
-  auto constexpr ws = std::array<char_t const, 4>({' ', '\t', '\n', '\r'});
-  for (; i < buf.size(); ++i) {
-    for (auto &&w : ws) {
-      if (buf[i] == w) {
-        return i;
-      }
-    }
-  }
-  return i;
-}
-
-template <typename int_t, typename char_t>
 constexpr auto skip_ws(std::basic_string_view<char_t> const buf,
                        int_t i) noexcept -> int_t {
   auto constexpr ws = std::span<char_t const>(" \t\n\r");
-  for (; i < buf.size(); ++i) {
-    for (auto &&w : ws) {
-      if (buf[i] == w) {
-        return i;
-      }
+  while (i < buf.size()) {
+    auto const found = std::find(ws.begin(), ws.end(), buf[i]);
+    if (found != ws.end()) {
+      ++i;
+    } else {
+      return i;
     }
   }
-  return i;
+  return buf.npos;
 }
 
 static_assert([]() {
   auto constexpr hello = std::string_view("hello world");
-  return skip_ws(hello, size_t{}) == 5;
+  auto constexpr skipped_index = skip_ws(hello, size_t{});
+  if (skipped_index != 0) {
+    throw skipped_index;
+  }
+  return true;
+  // return skip_ws(hello, size_t{}) == 0;
+}());
+
+static_assert([]() {
+  auto constexpr hello = std::string_view("  hello");
+  return skip_ws(hello, size_t{}) == 2;
 }());
 
 template <typename int_t, typename char_t>

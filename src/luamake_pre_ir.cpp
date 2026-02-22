@@ -792,7 +792,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         if (i >= file.size())
           throw Exception(string("Unable to parse include parameter"));
 
-        i = skip_ws(fcontent, i) + 1;
+        i = skip_ws(fcontent, i);
 
         if (i >= file.size())
           throw Exception(string("Unable to parse include parameter"));
@@ -833,22 +833,24 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       } break;
       case ir_t::IFDEF: {
         lex.types.push_back(ir_t::IFDEF);
-        i = skip_ws(fcontent, i) + 1;
+        i = skip_ws(fcontent, i);
         end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
       case ir_t::IFNDEF: {
         lex.types.push_back(ir_t::IFNDEF);
-        i = skip_ws(fcontent, i) + 1;
+        i = skip_ws(fcontent, i);
         end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
       case ir_t::DEFINE: {
         lex.types.push_back(ir_t::DEFINE);
-        i = skip_ws(fcontent, i) + 1;
+        i = skip_ws(fcontent, i);
         end =
             luamake::skip_until(std::string_view(" (\t\n\r"), fcontent, i + 1);
         lex.push_lexeme(string(start + i, start + end));
+        expr_dbg(fcontent[i]);
+        expr_dbg(i);
         i = end;
         switch (fcontent[i]) {
         case '(': {
@@ -872,27 +874,35 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         case '\t':
           [[fallthrough]];
         case ' ': {
-          i = lex.produce_macro(fcontent, i + 1);
+          expr_dbg(fcontent[i]);
+          expr_dbg(i);
+          i = skip_ws(fcontent, i);
+          expr_dbg(fcontent[i]);
+          expr_dbg(i);
+          i = lex.produce_macro(fcontent, i);
+          expr_dbg(fcontent[i]);
+          expr_dbg(i);
         } break;
         default: {
+          i = skip_ws(fcontent, i);
           i = lex.produce_macro(fcontent, i);
         } break;
         }
       } break;
       case ir_t::UNDEF: {
         lex.types.push_back(ir_t::UNDEF);
-        i = skip_ws(fcontent, i) + 1;
+        i = skip_ws(fcontent, i);
         end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
       case ir_t::IF:
         lex.types.push_back(ir_t::IF);
-        i = skip_ws(fcontent, i) + 1;
+        i = skip_ws(fcontent, i);
         i = lex.produce_macro(fcontent, i);
         break;
       case ir_t::PRAGMA: {
         lex.types.push_back(ir_t::PRAGMA);
-        i = skip_ws(fcontent, i) + 1;
+        i = skip_ws(fcontent, i);
         end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
       } break;
