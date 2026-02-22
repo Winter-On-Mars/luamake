@@ -849,8 +849,6 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         end =
             luamake::skip_until(std::string_view(" (\t\n\r"), fcontent, i + 1);
         lex.push_lexeme(string(start + i, start + end));
-        expr_dbg(fcontent[i]);
-        expr_dbg(i);
         i = end;
         switch (fcontent[i]) {
         case '(': {
@@ -866,7 +864,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           // this isn't technically needed, but every example (including those
           // from the official gnu documentation) skip any preceeding ws
           i = luamake::skip_while(std::string_view{" \t"}, fcontent, i + 1);
-          lex.produce_macro(fcontent, i);
+          i = lex.produce_macro(fcontent, i);
         } break;
           // this is a bandaid solution, we need to do something to determine if
           // this is just defining a macro, or if we're actually defining a
@@ -874,14 +872,8 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         case '\t':
           [[fallthrough]];
         case ' ': {
-          expr_dbg(fcontent[i]);
-          expr_dbg(i);
           i = skip_ws(fcontent, i);
-          expr_dbg(fcontent[i]);
-          expr_dbg(i);
           i = lex.produce_macro(fcontent, i);
-          expr_dbg(fcontent[i]);
-          expr_dbg(i);
         } break;
         default: {
           i = skip_ws(fcontent, i);
@@ -976,6 +968,21 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
 // TODO: the function is currently also including comments at the end of lines,
 // make it not do that some other time, idk i'm going to go play games now
 auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
+  auto constexpr is_ws = [](char const ch) -> bool {
+    switch (ch) {
+    case ' ':
+      [[fallthrough]];
+    case '\t':
+      [[fallthrough]];
+    case '\r':
+      [[fallthrough]];
+    case '\n':
+      return true;
+    default:
+      return false;
+    }
+  };
+  auto constexpr switch_chars = std::string_view{"\\\n/"};
   auto macro = std::string();
   auto start = i;
   auto looping = true;
@@ -989,12 +996,25 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
         ++i;
       start = i;
       break;
+    case '/':
+      if (i + 1 < buf.size() && buf[i + 1] == '/') {
+        auto end = i - 1;
+        while (is_ws(buf[end])) {
+          --end;
+        }
+        macro.append(
+            std::string_view{buf.begin() + start, buf.begin() + end + 1});
+        looping = false;
+      } else {
+        i = luamake::skip_until(switch_chars, buf, i + 1);
+      }
+      break;
     case '\n':
       macro.append(std::string_view{buf.begin() + start, buf.begin() + i});
       looping = false;
       break;
     default:
-      i = luamake::skip_until(std::string_view{"\\\n"}, buf, i);
+      i = luamake::skip_until(switch_chars, buf, i);
       break;
     }
   }
