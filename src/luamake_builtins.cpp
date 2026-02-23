@@ -928,21 +928,6 @@ auto Module::display(std::ostream &out) const noexcept -> void {
   std::for_each(linking.begin(), linking.end(), _display);
   out << "]\n";
 
-#if 0
-  out << "macros = {\n";
-  for (auto &&[name, value] : macros) {
-    out << name << "=" << value << ",\n";
-  }
-  out << "}\n";
-
-  out << "defined_macros = ";
-  out << "[" << def_macros.size() << "]{\n";
-  for (auto const &name : def_macros) {
-    out << name << ",\n";
-  }
-  out << "}\n";
-#endif
-
   out << "compiler = " << compiler << '\n';
   out << "name = " << name << '\n';
   out << "install_dir = " << install_dir << '\n';
@@ -1060,6 +1045,8 @@ auto Module::append_include_paths(string_view const compiler) -> void {
   }
 }
 
+// TODO: add another field for function macros, so that they can be added more
+// easily, and (if needed) evaluated easier
 static auto predefined_macros_cache =
     std::unordered_map<std::string_view,
                        std::pair<std::unordered_map<std::string, pp::Macro>,

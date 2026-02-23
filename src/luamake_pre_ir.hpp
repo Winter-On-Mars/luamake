@@ -2,6 +2,7 @@
 #define __LUAMAKE_PRE_IR_HPP
 
 #include <filesystem>
+#include <ostream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -37,6 +38,11 @@ struct Interpreter final {
    */
   [[nodiscard]]
   auto interpret(std::string_view const) -> std::vector<std::filesystem::path>;
+
+#ifdef DEBUG
+  auto dump_macros(std::ostream &) noexcept -> void;
+
+#endif // DEBUG
 
 private:
   std::unordered_map<std::string, Macro> macros;

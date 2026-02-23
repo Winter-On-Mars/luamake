@@ -11,6 +11,7 @@
 #include <initializer_list>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -390,6 +391,9 @@ struct DefineNode final : AstNode {
 };
 
 struct DefineFuncNode final : AstNode {
+  DefineFuncNode(string &&name, vector<string> &&parameters,
+                 string &&body) noexcept
+      : name(name), parameters(parameters), body(body) {}
   ~DefineFuncNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
@@ -1413,8 +1417,20 @@ auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
 
   switch (types[cur_t]) {
   case ir_t::LPAREN: {
-    throw std::runtime_error(std::format(
-        "Making #define function nodes is not currently implimented"));
+    // TODO: get all of the parameters
+    auto parameters = vector<string>();
+    ++cur_t;
+    if (types[cur_t] != ir_t::RPAREN) {
+      throw std::runtime_error("Was not expecting multiple arguments");
+    }
+    ++cur_t;
+    if (types[cur_t] != ir_t::MACRO) {
+      throw std::runtime_error("Expecting macro, for the function body");
+    }
+    ++cur_t;
+    auto body = lexemes[cur_lex++];
+    return std::make_unique<DefineFuncNode>(
+        std::move(lex), std::move(parameters), std::move(body));
   } break;
   case ir_t::MACRO: {
     auto macro = lexemes[cur_lex++];
@@ -2176,8 +2192,13 @@ auto AstPrinter::visit_define(DefineNode &d) -> void {
   out << "))\n";
 }
 
-auto AstPrinter::visit_define_func(DefineFuncNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto AstPrinter::visit_define_func(DefineFuncNode &f) -> void {
+  out << get_indents() << "(define (" << f.name << "(";
+  for (auto &&param : f.parameters) {
+    out << param << ",";
+  }
+  out << ")";
+  out << "{" << f.body << "}))\n";
 }
 
 auto AstPrinter::visit_undef(UndefNode &u) -> void {
@@ -2270,8 +2291,20 @@ auto AstIncluder::visit_define(DefineNode &d) -> void {
   }
 }
 
-auto AstIncluder::visit_define_func(DefineFuncNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto AstIncluder::visit_define_func(DefineFuncNode &f) -> void {
+  // when we fix how function macros are stored, we'll need to update this
+  auto cur_format = [&f]() -> string {
+    auto res = f.name;
+    res.append("(");
+    for (auto i = size_t{}; i < f.parameters.size(); ++i) {
+      res.append(f.parameters[i]);
+      if (i != f.parameters.size() - 1)
+        res.append(",");
+    }
+    res.append(")");
+    return res;
+  }();
+  macros[cur_format] = f.body;
 }
 
 auto AstIncluder::visit_undef(UndefNode &u) -> void {
@@ -2305,5 +2338,22 @@ auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {
   includer.get_includes(ast);
   return vec;
 }
+
+#ifdef DEBUG
+auto Interpreter::dump_macros(std::ostream &out) noexcept -> void {
+  out << "macros = {\n";
+  for (auto &&[name, value] : macros) {
+    out << name << "=" << value << ",\n";
+  }
+  out << "}\n";
+
+  out << "defined_macros = ";
+  out << "[" << def_macros.size() << "]{\n";
+  for (auto const &name : def_macros) {
+    out << name << ",\n";
+  }
+  out << "}\n";
+}
+#endif // DEBUG
 } // namespace pp
 } // namespace luamake
