@@ -892,7 +892,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         lex.types.push_back(ir_t::UNDEF);
         i = skip_ws(fcontent, i);
         end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
-        lex.push_lexeme(start + i, start + end);
+        lex.push_macro(start + i, start + end);
       } break;
       case ir_t::IF:
         lex.types.push_back(ir_t::IF);
@@ -1469,6 +1469,7 @@ auto Lexer::handle_undef(size_t &cur_t, size_t &cur_lex)
     throw Exception(
         std::format("Expected macro in #undef preprocessor directive"));
   }
+  ++cur_t;
   return std::make_unique<UndefNode>(lexemes[cur_lex++]);
 }
 
@@ -2294,7 +2295,7 @@ auto AstPrinter::visit_define_func(DefineFuncNode &f) -> void {
 }
 
 auto AstPrinter::visit_undef(UndefNode &u) -> void {
-  out << get_indents() << "(define (" << u.name;
+  out << get_indents() << "(undef (" << u.name;
   out << "))\n";
 }
 
