@@ -661,6 +661,8 @@ struct AstPrinter final : AstVisitor {
 };
 #endif
 
+// TODO: rewrite this implimentation so that the vector of paths is just
+// returned instead of being a part of this struct
 struct AstIncluder final : AstVisitor {
   vector<fs::path> &paths;
   std::unordered_map<std::string, Macro> &macros;
@@ -1896,7 +1898,14 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
   auto tkns = vector<expr_t>();
   auto macros = vector<string>();
   for (auto i = size_t{}; i < str.size();) {
+    // TODO: probably add a macro for these basic types so that we don't have to
+    // write out a bunch of things every time, and so that this function can be
+    // smaller
     switch (auto ch = str[i]) {
+    case '+':
+      tkns.push_back(PLUS);
+      ++i;
+      break;
     case '(':
       tkns.push_back(LPAREN);
       ++i;
@@ -1985,6 +1994,12 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
         macros.push_back(string(str.data() + start, str.data() + i));
       }
     } break;
+    case ' ':
+      [[fallthrough]];
+    case '\t':
+      // idk should probably add a thing for this
+      ++i;
+      break;
     default: {
       if (is_digit(ch)) {
         lex_integer(str, i, tkns, macros);
@@ -2006,6 +2021,7 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
 #endif // DEBUG
 }
 
+// TODO: support integer suffixes
 auto Expressions::lex_integer(string_view const str, size_t &i,
                               vector<expr_t> &tkns, vector<string> &macros)
     -> void {
@@ -2469,6 +2485,13 @@ auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {
 #endif // DEBUG
   auto includer = AstIncluder(vec, macros, def_macros);
   includer.get_includes(ast);
+#ifdef DEBUG
+  std::cout << "including:\n";
+  for (auto &&include : vec) {
+    std::cout << "\t[" << include << "]\n";
+  }
+  std::cout.flush();
+#endif // DEBUG
   return vec;
 }
 
