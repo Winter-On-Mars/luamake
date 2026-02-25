@@ -213,6 +213,16 @@ struct Lexer final {
 // TODO: optimize this struct, you can probably combine the Expr_t variable with
 // the binary/unary operator in some bit field being or'd, but for now i'm just
 // trying to get this working
+// TODO: look into integer overflow, it seems like if integer overflow happens,
+// everything is ignored this is based on the example
+// ```
+// #if 1 << 64 // integer overflow occurs
+// this is never run(?)
+// #endif
+// ```
+// TODO: also might be fucked with how we store integers, because we'll also
+// have to work with negative numbers, even though i feel like i don't really
+// see many negative numbers in macros
 struct ExprNode final {
   struct Integer final {
     size_t i;
@@ -2021,15 +2031,21 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
 #endif // DEBUG
 }
 
-// TODO: support integer suffixes
+// for now we just throw out any integer suffix, we'll have to actually add
+// support for that
 auto Expressions::lex_integer(string_view const str, size_t &i,
                               vector<expr_t> &tkns, vector<string> &macros)
     -> void {
+  auto constexpr integer_suffix = std::string_view{"ulzULZ"};
   if (str[i] != '0') {
     auto const start = i;
     i = luamake::skip_while(delims_at(delims::ALLOWED_DECIMAL), str, i);
     tkns.push_back(LIT_DEC);
     macros.push_back(string(str.data() + start, str.data() + i));
+    // NOTE: we technically need to worry about the order of things, for
+    // instance, we allow code that looks like zlu, which isn't an allowed
+    // integer suffix, but i don't care about fixing that right now
+    i = skip_while(integer_suffix, str, i);
     return;
   }
   // str[i] == 0
@@ -2042,8 +2058,6 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
 
   // TODO: check if we're on c++14>=, bc otherwise this is supposed to
   // be an error, the same goes with "'" character
-  // TODO: this is really poorly written i should really just extract
-  // this out into it's own function
   enum class int_type {
     DECIMAL,
     BINARY,
@@ -2055,6 +2069,9 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
       return int_type::HEX;
     case 'b':
       return int_type::BINARY;
+    // NOTE: apparently this only works with clang compilers, idk if its a non
+    // standard extension, but for now we'll keep it, and if it causes issues
+    // later we can fix it
     case 'o':
       return int_type::OCTAL;
     default:
@@ -2062,20 +2079,23 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
         throw Exception(std::format(
             "Found char [{}], while attempting to parse an integer", ch));
       } else {
-        return int_type::DECIMAL;
+        return int_type::OCTAL;
       }
     }
   }();
+  ++i;
+
+  // spacing to work with the format strings
   auto constexpr to_string = [](int_type int_t) -> string_view {
     switch (int_t) {
     case int_type::DECIMAL:
-      return string_view{"DECIMAL"};
+      return string_view{" decimal"};
     case int_type::BINARY:
-      return string_view{"BINARY"};
+      return string_view{" binary"};
     case int_type::HEX:
-      return string_view{"HEX"};
+      return string_view{" hexadecimal"};
     case int_type::OCTAL:
-      return string_view{"OCTAL"};
+      return string_view{"n octal"};
     }
   };
 
@@ -2092,11 +2112,12 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
     }
   };
   auto allow_quote = true;
+  auto const start = i;
   while (i < str.size()) {
     if (str[i] == '\'') {
       if (!allow_quote) {
         throw Exception(
-            std::format("When parsing a {} number, found two ' characters "
+            std::format("When parsing a{} integer, found two ' characters "
                         "back to back, these are treated as identifiers for a "
                         "char literal, and thus a formatting error.",
                         to_string(int_t)));
@@ -2106,13 +2127,32 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
       }
     }
     if (!is_allowed_char(int_t, str[i])) {
-      throw Exception(std::format("While parsing a [{}] integer, found "
+      break;
+    }
+    /*
+    if (!is_allowed_char(int_t, str[i])) {
+      throw Exception(std::format("While parsing a{} integer, found "
                                   "[{}], a not supported character",
                                   to_string(int_t), str[i]));
     }
+    */
     ++i;
     allow_quote = true;
   }
+  tkns.push_back([](int_type int_t) {
+    switch (int_t) {
+    case int_type::DECIMAL:
+      return LIT_DEC;
+    case int_type::BINARY:
+      return LIT_BIN;
+    case int_type::OCTAL:
+      return LIT_OCT;
+    case int_type::HEX:
+      return LIT_HEX;
+    }
+  }(int_t));
+  macros.push_back(string(str.data() + start, str.data() + i));
+  i = skip_while(integer_suffix, str, i);
 }
 
 auto Expressions::eval_impl(
