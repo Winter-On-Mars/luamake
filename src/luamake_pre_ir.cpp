@@ -859,7 +859,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           lex.types.push_back(ir_t::LPAREN);
           // we don't need to skip any ws, because otherwise the macro wouldn't
           // be a function like macro
-          i = lex.parse_define_args(fcontent, i + 1);
+          i = lex.parse_define_args(fcontent, skip_ws(fcontent, i + 1));
           if (fcontent[i] != ')') {
             throw Exception(std::format("Expected closing ')' when parsing "
                                         "function macro arguments"));
@@ -881,7 +881,6 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         } break;
         default: {
           i = skip_ws(fcontent, i);
-          i = lex.produce_macro(fcontent, i);
         } break;
         }
       } break;
@@ -969,8 +968,6 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
                                                   ir_t::ELSE)),
               "");
 
-// TODO: the function is currently also including comments at the end of lines,
-// make it not do that some other time, idk i'm going to go play games now
 auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
   auto constexpr is_ws = [](char const ch) -> bool {
     switch (ch) {
@@ -1029,7 +1026,9 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
   return i + 1;
 }
 
+// TODO: add bounds checking
 auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
+  auto constexpr switch_chars = std::string_view{"),. \t\r\n"};
   while (true) {
     switch (fcontent[i]) {
     case ')':
@@ -1037,7 +1036,7 @@ auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
     case '.':
       throw std::runtime_error("Variatic macros are not currently supported");
     case ',':
-      i = skip_ws(fcontent, i + 1) + 1;
+      i = skip_ws(fcontent, i + 1);
       break;
     case ' ':
       [[fallthrough]];
@@ -1050,15 +1049,14 @@ auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
           "Unexpected character while parsing function like macro. Invalid "
           "spacing between parameters.");
     default: {
-      auto const end =
-          luamake::skip_until(std::string_view{"),. \t\r\n"}, fcontent, i + 1);
-      push_lexeme(fcontent.data() + i, fcontent.data() + end - 1);
+      auto const end = luamake::skip_until(switch_chars, fcontent, i + 1);
+      push_lexeme(fcontent.data() + i, fcontent.data() + end);
       i = end;
       break;
     }
     }
   }
-  return i;
+  unreachable();
 }
 
 auto Lexer::declaration(size_t &cur_t, size_t &cur_lex)
@@ -1417,12 +1415,13 @@ auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
 
   switch (types[cur_t]) {
   case ir_t::LPAREN: {
-    // TODO: get all of the parameters
     auto parameters = vector<string>();
     ++cur_t;
-    if (types[cur_t] != ir_t::RPAREN) {
-      throw std::runtime_error("Was not expecting multiple arguments");
+    while (types[cur_t] == ir_t::LEXEME) {
+      parameters.push_back(lexemes[cur_lex++]);
+      ++cur_t;
     }
+    expect(cur_t, ir_t::RPAREN);
     ++cur_t;
     if (types[cur_t] != ir_t::MACRO) {
       throw std::runtime_error("Expecting macro, for the function body");
@@ -1438,12 +1437,8 @@ auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
     return std::make_unique<DefineNode>(std::move(lex), std::move(macro));
   } break;
   default:
-    throw Exception(std::format("Unexpected token, found [{}], was expecting "
-                                "either a '(' character or a macro definition",
-                                to_string(types[cur_t])));
+    return std::make_unique<DefineNode>(std::move(lex));
   }
-
-  return std::make_unique<DefineNode>(std::move(lex));
 }
 
 auto Lexer::handle_undef(size_t &cur_t, size_t &cur_lex)
