@@ -65,6 +65,7 @@ auto constexpr skip_until(size_t i, std::span<T> const buf, T delim) -> size_t {
   return i;
 }
 
+// TODO: refactor this, omg who fucking wrote this shit
 enum class delims : size_t {
   LEXEME,
   BINARY_FAIL,
@@ -135,6 +136,9 @@ enum class ir_t : u8 {
 
 constexpr auto to_string(ir_t) -> std::string_view;
 
+// TODO: pack this even more, have something like #if node mean that there's
+// also a string in the lexemes array to be read that corresponds to that #if,
+// etc
 struct Lexer final {
   Lexer(Lexer const &) = delete;
   Lexer &operator=(Lexer const &) = delete;
@@ -184,7 +188,7 @@ struct Lexer final {
   /**
    * @throws
    */
-  auto expect(size_t, ir_t) -> void;
+  auto expect(size_t, ir_t, string_view = "") -> void;
 
   /**
    * @throws
@@ -895,13 +899,29 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         i = skip_ws(fcontent, i);
         i = lex.produce_macro(fcontent, i);
         break;
-      case ir_t::PRAGMA: {
+      case ir_t::PRAGMA:
         lex.types.push_back(ir_t::PRAGMA);
         i = skip_ws(fcontent, i);
         end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
         lex.push_lexeme(start + i, start + end);
-      } break;
+        break;
+      case ir_t::ENDIF:
+        lex.types.push_back(ir_t::ENDIF);
+        break;
+      case ir_t::ELIF:
+        lex.types.push_back(ir_t::ELIF);
+        i = skip_ws(fcontent, i);
+        i = lex.produce_macro(fcontent, i);
+        break;
+      case ir_t::ELSE:
+        lex.types.push_back(ir_t::ELSE);
+        i = skip_ws(fcontent, i);
+        break;
       default:
+#ifdef DEBUG
+        std::cerr << WARNING "Unknown ir_t preprocessor directive ["
+                  << to_string(keyword->second) << "]" NORMAL << '\n';
+#endif // DEBUG
         lex.types.push_back(keyword->second);
         break;
       }
@@ -1172,8 +1192,9 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
         throw Exception(std::format("Found #elif directive following #else "
                                     "directive in #ifdef directive"));
       }
-      while (cur_t < types.size() &&
-             (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
+      while (cur_t < types.size()) {
+        if (types[cur_t] == ir_t::ELSE || types[cur_t] == ir_t::ENDIF)
+          break;
         elif_branches.push_back(handle_elif(cur_t, cur_lex));
       }
       cur = determine_state(cur_t);
@@ -1489,8 +1510,56 @@ auto Lexer::handle_pragma(size_t &cur_t, size_t &cur_lex)
 }
 
 auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
-  throw Exception(
-      std::format("#elif statement parsing is not currently implimented"));
+  ++cur_t;
+  expect(cur_t, ir_t::MACRO);
+  auto condition = lexemes[cur_lex++];
+  ++cur_t;
+
+  auto then_branch = vector<ptr<AstNode>>();
+  while (cur_t < types.size()) {
+    if (types[cur_t] == ir_t::ELSE || types[cur_t] == ir_t::ELIF ||
+        types[cur_t] == ir_t::ENDIF)
+      break;
+    switch (types[cur_t]) {
+    case ir_t::IF:
+      then_branch.push_back(handle_if(cur_t, cur_lex));
+      break;
+    case ir_t::IFDEF:
+      then_branch.push_back(handle_ifdef(cur_t, cur_lex));
+      break;
+    case ir_t::IFNDEF:
+      then_branch.push_back(handle_ifndef(cur_t, cur_lex));
+      break;
+    case ir_t::DEFINE:
+      then_branch.push_back(handle_define(cur_t, cur_lex));
+      break;
+    case ir_t::UNDEF:
+      then_branch.push_back(handle_undef(cur_t, cur_lex));
+      break;
+    case ir_t::INCLUDE:
+      then_branch.push_back(handle_include(cur_t, cur_lex));
+      break;
+    case ir_t::PRAGMA: {
+      auto res = handle_pragma(cur_t, cur_lex);
+      if (res)
+        then_branch.push_back(std::move(res));
+    } break;
+    case ir_t::ELIF:
+      [[fallthrough]];
+    case ir_t::ENDIF:
+      [[fallthrough]];
+    case ir_t::ELSE:
+      unreachable();
+      break;
+    default:
+      throw Exception(
+          std::format("Unexpected token [{}] found in top level scope.",
+                      to_string(types[cur_t])));
+    }
+  }
+
+  return std::make_unique<ElifNode>(std::move(condition),
+                                    std::move(then_branch));
 }
 
 // it could be a good idea to have this #else consume the #endif(?)
@@ -1539,11 +1608,42 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
   return std::make_unique<ElseNode>(std::move(res));
 }
 
-// TODO: update this function to allow for optional string for extra info
-auto Lexer::expect(size_t cur_t, ir_t tkn) -> void {
-  if (types[cur_t] != tkn) {
-    throw Exception(std::format("Unexpected token, expected {}, found {}",
-                                to_string(tkn), to_string(types[cur_t])));
+auto Lexer::expect(size_t cur_t, ir_t tkn, string_view calling_func) -> void {
+  enum class FailReason {
+    OOB,
+    Unexpected,
+    ok
+  } reason = cur_t >= types.size() ? FailReason::OOB
+             : types[cur_t] != tkn ? FailReason::Unexpected
+                                   : FailReason::ok;
+  switch (reason) {
+  [[likely]]
+  case FailReason::ok:
+    return;
+  case FailReason::OOB:
+    if (calling_func != "") {
+      throw Exception(std::format(
+          "Attempting to index out of bounds of Lexer::types "
+          "array, looking for token [{}], from calling function = [{}]",
+          to_string(tkn), calling_func));
+    } else {
+      throw Exception(
+          std::format("Attempting to index out of bounds of Lexer::types "
+                      "array, looking for token [{}]",
+                      to_string(tkn)));
+    }
+    return;
+  case FailReason::Unexpected:
+    if (calling_func != "") {
+      throw Exception(std::format("Unexpected token, expected {}, found {}, "
+                                  "from calling function = [{}]",
+                                  to_string(tkn), to_string(types[cur_t]),
+                                  calling_func));
+    } else {
+      throw Exception(std::format("Unexpected token, expected {}, found {}",
+                                  to_string(tkn), to_string(types[cur_t])));
+    }
+    return;
   }
 }
 
@@ -1969,14 +2069,11 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
           tkns.push_back(LIT_DEC);
           macros.push_back(string(str.data() + start, str.data() + i));
         }
-      } else if (is_alpha(ch)) {
+      } else {
         auto const start = i;
         i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
         tkns.push_back(MACRO);
         macros.push_back(string(str.data() + start, str.data() + i));
-      } else {
-        throw Exception(std::format(
-            "Unknown char [{}], found while lexing expression.", ch));
       }
     }
     }
@@ -2260,8 +2357,10 @@ auto AstIncluder::visit_ifndef(IfNDefNode &i) -> void {
   }
 }
 
-auto AstIncluder::visit_elif(ElifNode &) -> void {
-  throw std::runtime_error(std::format("{} not impl", __PRETTY_FUNCTION__));
+auto AstIncluder::visit_elif(ElifNode &e) -> void {
+  for (auto &&branch : e.then_branch) {
+    branch->accept(*this);
+  }
 }
 
 auto AstIncluder::visit_else(ElseNode &e) -> void {
