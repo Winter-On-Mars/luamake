@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <format>
 #include <functional>
@@ -566,6 +567,8 @@ struct Expressions final {
   };
 
   static auto lex(string_view const) -> ExprLexer;
+  static auto lex_integer(string_view const, size_t &, vector<expr_t> &,
+                          vector<string> &) -> void;
   static auto eval_impl(ExprNode const &,
                         std::unordered_map<std::string, Macro> const &,
                         std::unordered_set<std::string> const &) -> int;
@@ -573,6 +576,7 @@ struct Expressions final {
   static auto make_binary(expr_t, ExprNode &&, ExprNode &&) noexcept
       -> ExprNode;
   static auto make_unary(expr_t, ExprNode &&) noexcept -> ExprNode;
+  static auto make_integer(expr_t, string_view) noexcept -> ExprNode;
 };
 
 // no need for a virtual dtor bc you shouldn't be dynamically allocating this
@@ -1821,13 +1825,14 @@ auto Expressions::ExprLexer::unary(size_t &cur_t, size_t &cur_lex) const
 
 auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
     -> ExprNode {
+  // TODO
   switch (tkns[cur_t]) {
   case MACRO:
     break;
   case LIT_CHAR:
     break;
   case LIT_DEC:
-    break;
+    return make_integer(expr_t::LIT_DEC, macros[cur_lex++]);
   case LIT_HEX:
     break;
   case LIT_OCT:
@@ -1982,94 +1987,7 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
     } break;
     default: {
       if (is_digit(ch)) {
-        if (ch == '0') {
-          ++i;
-          if (!(i < str.size())) {
-            tkns.push_back(LIT_DEC);
-            macros.push_back(string(1, '0'));
-            break; // break switch
-          }
-
-          // TODO: check if we're on c++14>=, bc otherwise this is supposed to
-          // be an error, the same goes with "'" character
-          // TODO: this is really poorly written i should really just extract
-          // this out into it's own function
-          enum class int_type {
-            DECIMAL,
-            BINARY,
-            HEX,
-            OCTAL
-          } int_t = [&]() {
-            switch (ch = str[i]) {
-            case 'x':
-              return int_type::HEX;
-            case 'b':
-              return int_type::BINARY;
-            case 'o':
-              return int_type::OCTAL;
-            default:
-              if (!is_digit(ch)) {
-                throw Exception(std::format(
-                    "Found char [{}], while attempting to parse an integer",
-                    ch));
-              } else {
-                return int_type::DECIMAL;
-              }
-            }
-          }();
-          auto constexpr to_string = [](int_type int_t) -> string_view {
-            switch (int_t) {
-            case int_type::DECIMAL:
-              return string_view{"DECIMAL"};
-            case int_type::BINARY:
-              return string_view{"BINARY"};
-            case int_type::HEX:
-              return string_view{"HEX"};
-            case int_type::OCTAL:
-              return string_view{"OCTAL"};
-            }
-          };
-
-          auto constexpr is_allowed_char = [](int_type int_t, char ch) -> bool {
-            switch (int_t) {
-            case int_type::DECIMAL:
-              return is_any_of(delims_at(delims::ALLOWED_DECIMAL), ch);
-            case int_type::BINARY:
-              return is_any_of(delims_at(delims::ALLOWED_BINARY), ch);
-            case int_type::HEX:
-              return is_any_of(delims_at(delims::ALLOWED_HEX), ch);
-            case int_type::OCTAL:
-              return is_any_of(delims_at(delims::ALLOWED_OCTAL), ch);
-            }
-          };
-          auto allow_quote = true;
-          while (i < str.size()) {
-            if (str[i] == '\'') {
-              if (!allow_quote) {
-                throw Exception(std::format(
-                    "When parsing a {} number, found two ' characters "
-                    "back to back, these are treated as identifiers for a "
-                    "char literal, and thus a formatting error.",
-                    to_string(int_t)));
-              } else {
-                allow_quote = false;
-                ++i;
-              }
-            }
-            if (!is_allowed_char(int_t, str[i])) {
-              throw Exception(std::format("While parsing a [{}] integer, found "
-                                          "[{}], a not supported character",
-                                          to_string(int_t), str[i]));
-            }
-            ++i;
-            allow_quote = true;
-          }
-        } else {
-          auto const start = i;
-          i = luamake::skip_until(delims_at(delims::ALLOWED_DECIMAL), str, i);
-          tkns.push_back(LIT_DEC);
-          macros.push_back(string(str.data() + start, str.data() + i));
-        }
+        lex_integer(str, i, tkns, macros);
       } else {
         auto const start = i;
         i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
@@ -2086,6 +2004,99 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
 #else
   return ExprLexer(tkns, macros);
 #endif // DEBUG
+}
+
+auto Expressions::lex_integer(string_view const str, size_t &i,
+                              vector<expr_t> &tkns, vector<string> &macros)
+    -> void {
+  if (str[i] != '0') {
+    auto const start = i;
+    i = luamake::skip_while(delims_at(delims::ALLOWED_DECIMAL), str, i);
+    tkns.push_back(LIT_DEC);
+    macros.push_back(string(str.data() + start, str.data() + i));
+    return;
+  }
+  // str[i] == 0
+  ++i;
+  if (!(i < str.size())) {
+    tkns.push_back(LIT_DEC);
+    macros.push_back(string(1, '0'));
+    return;
+  }
+
+  // TODO: check if we're on c++14>=, bc otherwise this is supposed to
+  // be an error, the same goes with "'" character
+  // TODO: this is really poorly written i should really just extract
+  // this out into it's own function
+  enum class int_type {
+    DECIMAL,
+    BINARY,
+    HEX,
+    OCTAL
+  } int_t = [&]() {
+    switch (auto ch = str[i]) {
+    case 'x':
+      return int_type::HEX;
+    case 'b':
+      return int_type::BINARY;
+    case 'o':
+      return int_type::OCTAL;
+    default:
+      if (!is_digit(ch)) {
+        throw Exception(std::format(
+            "Found char [{}], while attempting to parse an integer", ch));
+      } else {
+        return int_type::DECIMAL;
+      }
+    }
+  }();
+  auto constexpr to_string = [](int_type int_t) -> string_view {
+    switch (int_t) {
+    case int_type::DECIMAL:
+      return string_view{"DECIMAL"};
+    case int_type::BINARY:
+      return string_view{"BINARY"};
+    case int_type::HEX:
+      return string_view{"HEX"};
+    case int_type::OCTAL:
+      return string_view{"OCTAL"};
+    }
+  };
+
+  auto constexpr is_allowed_char = [](int_type int_t, char ch) -> bool {
+    switch (int_t) {
+    case int_type::DECIMAL:
+      return is_any_of(delims_at(delims::ALLOWED_DECIMAL), ch);
+    case int_type::BINARY:
+      return is_any_of(delims_at(delims::ALLOWED_BINARY), ch);
+    case int_type::HEX:
+      return is_any_of(delims_at(delims::ALLOWED_HEX), ch);
+    case int_type::OCTAL:
+      return is_any_of(delims_at(delims::ALLOWED_OCTAL), ch);
+    }
+  };
+  auto allow_quote = true;
+  while (i < str.size()) {
+    if (str[i] == '\'') {
+      if (!allow_quote) {
+        throw Exception(
+            std::format("When parsing a {} number, found two ' characters "
+                        "back to back, these are treated as identifiers for a "
+                        "char literal, and thus a formatting error.",
+                        to_string(int_t)));
+      } else {
+        allow_quote = false;
+        ++i;
+      }
+    }
+    if (!is_allowed_char(int_t, str[i])) {
+      throw Exception(std::format("While parsing a [{}] integer, found "
+                                  "[{}], a not supported character",
+                                  to_string(int_t), str[i]));
+    }
+    ++i;
+    allow_quote = true;
+  }
 }
 
 auto Expressions::eval_impl(
@@ -2196,6 +2207,33 @@ auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
   }(tkn);
   auto _un = ExprNode::Unary{std::make_unique<ExprNode>(std::move(un)), un_t};
   return ExprNode(ExprNode::UNARY, std::move(_un));
+}
+
+auto Expressions::make_integer(Expressions::expr_t tkn,
+                               string_view str) noexcept -> ExprNode {
+  auto i = [str](expr_t tkn) -> size_t {
+    switch (tkn) {
+    case LIT_DEC: {
+      // TODO: idk i feel like i could do better but this is fine
+      auto res = size_t{};
+      sscanf(str.data(), "%zu", &res);
+      return res;
+    } break;
+    case LIT_CHAR:
+      [[fallthrough]];
+    case LIT_HEX:
+      [[fallthrough]];
+    case LIT_OCT:
+      [[fallthrough]];
+    case LIT_BIN:
+      throw Exception(std::format(
+          "Parsing Expr_t [{}], is not currently implimented", to_string(tkn)));
+      break;
+    default:
+      unreachable();
+    }
+  }(tkn);
+  return ExprNode(ExprNode::INT, ExprNode::Integer{i});
 }
 
 #ifdef DEBUG
