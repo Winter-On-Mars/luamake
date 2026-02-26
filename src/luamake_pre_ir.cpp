@@ -28,6 +28,9 @@
 #include <iostream>
 #endif // DEBUG
 
+// TODO: fuck there's some kind of exception being throw because of
+// string::append, idk where :)
+
 namespace fs = std::filesystem;
 
 using std::string, std::string_view, std::vector, std::unordered_map;
@@ -237,6 +240,9 @@ struct ExprNode final {
   struct CharLit final {
     string str;
   };
+  struct Grouping final {
+    std::unique_ptr<ExprNode> expr;
+  };
   struct Binary final {
     enum class Binary_t {
       PLUS,
@@ -249,6 +255,8 @@ struct ExprNode final {
       LESS_EQ,
       NEQ,
       EQ,
+      AND,
+      OR
     };
     using enum Binary_t;
     std::unique_ptr<ExprNode> lhs;
@@ -266,13 +274,14 @@ struct ExprNode final {
     NUMBER,
     DEFINED,
     CHARLIT,
+    GROUPING,
     BINARY,
     UNARY,
     NONE,
   } t;
   using enum Expr_t;
-  using Value =
-      std::variant<Integer, Number, Defined, CharLit, Binary, Unary, void *>;
+  using Value = std::variant<Integer, Number, Defined, CharLit, Grouping,
+                             Binary, Unary, void *>;
   Value val;
   ExprNode() noexcept : t(NONE), val((void *)nullptr) {}
   ExprNode(Expr_t &&type, Value &&val) noexcept
@@ -559,6 +568,9 @@ struct Expressions final {
       return false;
     }
 
+    auto expression(size_t &, size_t &) const -> ExprNode;
+    auto _or(size_t &, size_t &) const -> ExprNode;
+    auto _and(size_t &, size_t &) const -> ExprNode;
     auto equality(size_t &, size_t &) const -> ExprNode;
     auto comparison(size_t &, size_t &) const -> ExprNode;
     auto term(size_t &, size_t &) const -> ExprNode;
@@ -764,6 +776,8 @@ auto constexpr ExprNode::readable_type(Expr_t t) noexcept -> std::string_view {
     return std::string_view{"DEFINED"};
   case CHARLIT:
     return std::string_view{"CHARLIT"};
+  case GROUPING:
+    return std::string_view{"GROUPING"};
   case BINARY:
     return std::string_view{"BINARY"};
   case UNARY:
@@ -1015,20 +1029,7 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
               "");
 
 auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
-  auto constexpr is_ws = [](char const ch) -> bool {
-    switch (ch) {
-    case ' ':
-      [[fallthrough]];
-    case '\t':
-      [[fallthrough]];
-    case '\r':
-      [[fallthrough]];
-    case '\n':
-      return true;
-    default:
-      return false;
-    }
-  };
+  auto constexpr ws = string_view{" \t\r\n"};
   auto constexpr switch_chars = std::string_view{"\\\n/"};
   auto macro = std::string();
   auto start = i;
@@ -1036,30 +1037,36 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
   while (i < buf.size() && looping) {
     auto const ch = buf[i];
     switch (ch) {
-    case '\\':
-      macro.append(std::string_view{buf.begin() + start, buf.begin() + i - 1});
+    case '\\': {
+      if (i - 1 > start) {
+        auto const mac =
+            std::string_view{buf.begin() + start, buf.begin() + i - 1};
+        macro.append(mac);
+      }
       ++i;
       if (i < buf.size() && buf[i] == '\n')
         ++i;
-      start = i;
-      break;
-    case '/':
+      start = i = luamake::skip_while(ws, buf, i);
+    } break;
+    case '/': {
       if (i + 1 < buf.size() && buf[i + 1] == '/') {
         auto end = i - 1;
-        while (is_ws(buf[end])) {
+        while (is_any_of(ws, buf[end])) {
           --end;
         }
-        macro.append(
-            std::string_view{buf.begin() + start, buf.begin() + end + 1});
+        auto const mac =
+            std::string_view{buf.begin() + start, buf.begin() + end + 1};
+        macro.append(mac);
         looping = false;
       } else {
         i = luamake::skip_until(switch_chars, buf, i + 1);
       }
-      break;
-    case '\n':
-      macro.append(std::string_view{buf.begin() + start, buf.begin() + i});
+    } break;
+    case '\n': {
+      auto const mac = std::string_view{buf.begin() + start, buf.begin() + i};
+      macro.append(mac);
       looping = false;
-      break;
+    } break;
     default:
       i = luamake::skip_until(switch_chars, buf, i);
       break;
@@ -1732,6 +1739,10 @@ auto operator<<(std::ostream &out, ExprNode const &en) noexcept
   case ExprNode::CHARLIT:
     out << std::get<ExprNode::CharLit>(en.val).str;
     break;
+  case ExprNode::GROUPING: {
+    auto const &group = std::get<ExprNode::Grouping>(en.val);
+    out << "(" << group.expr << ")";
+  } break;
   case ExprNode::BINARY: {
     auto &bin = std::get<ExprNode::Binary>(en.val);
     switch (bin.t) {
@@ -1765,6 +1776,12 @@ auto operator<<(std::ostream &out, ExprNode const &en) noexcept
     case ExprNode::Binary::EQ:
       out << '=' << '=';
       break;
+    case ExprNode::Binary::AND:
+      out << '&' << '&';
+      break;
+    case ExprNode::Binary::OR:
+      out << '|' << '|';
+      break;
     }
     out << *bin.lhs << ' ' << *bin.rhs;
   } break;
@@ -1791,7 +1808,36 @@ Ast::Ast() { nodes.reserve(20); }
 auto Expressions::ExprLexer::to_ast() const -> ExprNode {
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
-  return equality(cur_t, cur_lex);
+  return expression(cur_t, cur_lex);
+}
+
+auto Expressions::ExprLexer::expression(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  return _or(cur_t, cur_lex);
+}
+
+auto Expressions::ExprLexer::_or(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  auto lhs = _and(cur_t, cur_lex);
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {OR})) {
+    auto const tkn = tkns[cur_t++];
+    auto rhs = _and(cur_t, cur_lex);
+
+    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+  return lhs;
+}
+
+auto Expressions::ExprLexer::_and(size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
+  auto lhs = equality(cur_t, cur_lex);
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {AND})) {
+    auto const tkn = tkns[cur_t++];
+    auto rhs = equality(cur_t, cur_lex);
+
+    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+  }
+  return lhs;
 }
 
 auto Expressions::ExprLexer::equality(size_t &cur_t, size_t &cur_lex) const
@@ -1870,8 +1916,10 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
   case LIT_CHAR:
     break;
   case LIT_DEC:
+    ++cur_t;
     return make_integer(expr_t::LIT_DEC, macros[cur_lex++]);
   case LIT_HEX:
+    ++cur_t;
     return make_integer(expr_t::LIT_HEX, macros[cur_lex++]);
     break;
   case LIT_OCT:
@@ -1882,10 +1930,18 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
     break;
   case LPAREN: {
     ++cur_t;
+    auto res = expression(cur_t, cur_lex);
+#ifdef DEBUG
+    expr_dbg(to_string(tkns[cur_t]));
+#endif // DEBUG
     if (tkns[cur_t] != RPAREN) {
       throw Exception(std::format("While parsing a grouping expression, "
                                   "expected a ')' to wrap the expression"));
     }
+    ++cur_t;
+    return ExprNode(
+        ExprNode::GROUPING,
+        ExprNode::Grouping{std::make_unique<ExprNode>(std::move(res))});
   } break;
   case DEFINED: {
     ++cur_t;
@@ -2184,7 +2240,6 @@ auto Expressions::eval_impl(
   switch (e.t) {
   case ExprNode::INT:
     return static_cast<int>(std::get<ExprNode::Integer>(e.val).i);
-    break;
   case ExprNode::DEFINED:
     return is_defined(std::get<ExprNode::Defined>(e.val).str, macros,
                       def_macros)
@@ -2196,6 +2251,10 @@ auto Expressions::eval_impl(
   case ExprNode::CHARLIT:
     throw Exception(
         std::format("While evaluating if expression found a not integer."));
+  case ExprNode::GROUPING: {
+    auto const &group = std::get<ExprNode::Grouping>(e.val);
+    return eval_impl(*group.expr, macros, def_macros);
+  }
   case ExprNode::BINARY: {
     auto &bin = std::get<ExprNode::Binary>(e.val);
     auto const lhs = eval_impl(*bin.lhs, macros, def_macros);
@@ -2221,6 +2280,10 @@ auto Expressions::eval_impl(
       return lhs != rhs ? 1 : 0;
     case ExprNode::Binary::EQ:
       return lhs == rhs ? 1 : 0;
+    case ExprNode::Binary::AND:
+      return lhs && rhs ? 1 : 0;
+    case ExprNode::Binary::OR:
+      return lhs || rhs ? 1 : 0;
     }
   }
   case ExprNode::UNARY: {
@@ -2263,6 +2326,10 @@ auto Expressions::make_binary(Expressions::expr_t tkn, ExprNode &&lhs,
       return ExprNode::Binary::NEQ;
     case EQ_EQ:
       return ExprNode::Binary::EQ;
+    case AND:
+      return ExprNode::Binary::AND;
+    case OR:
+      return ExprNode::Binary::OR;
     default:
       unreachable();
     }
