@@ -20,6 +20,7 @@
 #include <type_traits>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -576,9 +577,18 @@ struct Expressions final {
 #endif // DEBUG
   };
 
+  // TODO: maybe compress these into one function(?)
   static auto lex(string_view const) -> ExprLexer;
   static auto lex_integer(string_view const, size_t &, vector<expr_t> &,
                           vector<string> &) -> void;
+  static auto expand(ExprLexer const &,
+                     std::unordered_map<std::string, Macro> const &,
+                     std::unordered_set<std::string> const &) -> ExprLexer;
+  static auto expand_macro(string const &,
+                           std::unordered_map<string, Macro> const &,
+                           std::unordered_set<string> const &) noexcept
+      -> ExprLexer;
+
   static auto eval_impl(ExprNode const &,
                         std::unordered_map<std::string, Macro> const &,
                         std::unordered_set<std::string> const &) -> int;
@@ -1687,8 +1697,24 @@ auto ExprNode::make_defined(string &&str) noexcept -> ExprNode {
 auto ExprNode::eval(string_view const expr,
                     std::unordered_map<std::string, Macro> const &macros,
                     std::unordered_set<std::string> const &def_macros) -> int {
-  auto const expr_ast = Expressions::lex(expr);
-  return Expressions::eval_impl(expr_ast.to_ast(), macros, def_macros);
+  auto const expr_lex = Expressions::lex(expr);
+#ifdef DEBUG
+  expr_dbg("expr_lex");
+  expr_lex.display(std::cout).flush();
+#endif // DEBUG
+  auto const expansion = Expressions::expand(expr_lex, macros, def_macros);
+  // TODO: report if the expansion is empty, i.e. if you have a case like
+  // ```
+  // #define MACRO
+  // #if MACRO
+  // #endif
+  // ```
+  // in that case, this becomes a malformed program
+#ifdef DEBUG
+  expr_dbg("expansion");
+  expansion.display(std::cout).flush();
+#endif // DEBUG
+  return Expressions::eval_impl(expansion.to_ast(), macros, def_macros);
 }
 
 auto operator<<(std::ostream &out, ExprNode const &en) noexcept
@@ -1846,6 +1872,7 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
   case LIT_DEC:
     return make_integer(expr_t::LIT_DEC, macros[cur_lex++]);
   case LIT_HEX:
+    return make_integer(expr_t::LIT_HEX, macros[cur_lex++]);
     break;
   case LIT_OCT:
     break;
@@ -1883,7 +1910,9 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
         std::format("Unexpected token [{}] found while parsing an expression",
                     to_string(tkns[cur_t])));
   }
-  throw Exception(std::format("{} not impl", __PRETTY_FUNCTION__));
+  throw Exception(std::format(
+      "In function {}, support for token [{}] is not currently implimented",
+      __FUNCTION__, to_string(tkns[cur_t])));
 }
 
 #ifdef DEBUG
@@ -2022,13 +2051,7 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
     }
     }
   }
-#ifdef DEBUG
-  auto const lexer = ExprLexer(tkns, macros);
-  lexer.display(std::cout).flush();
-  return lexer;
-#else
   return ExprLexer(tkns, macros);
-#endif // DEBUG
 }
 
 // for now we just throw out any integer suffix, we'll have to actually add
@@ -2167,6 +2190,7 @@ auto Expressions::eval_impl(
                       def_macros)
                ? 1
                : 0;
+  // TODO: report this kind of error earlier
   case ExprNode::NUMBER:
     [[fallthrough]];
   case ExprNode::CHARLIT:
@@ -2267,17 +2291,20 @@ auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
 
 auto Expressions::make_integer(Expressions::expr_t tkn,
                                string_view str) noexcept -> ExprNode {
+  // TODO: idk i feel like i could do better but this is fine
   auto i = [str](expr_t tkn) -> size_t {
     switch (tkn) {
     case LIT_DEC: {
-      // TODO: idk i feel like i could do better but this is fine
       auto res = size_t{};
       sscanf(str.data(), "%zu", &res);
       return res;
     } break;
+    case LIT_HEX: {
+      auto res = size_t{};
+      sscanf(str.data(), "%zx", &res);
+      return res;
+    } break;
     case LIT_CHAR:
-      [[fallthrough]];
-    case LIT_HEX:
       [[fallthrough]];
     case LIT_OCT:
       [[fallthrough]];
@@ -2290,6 +2317,103 @@ auto Expressions::make_integer(Expressions::expr_t tkn,
     }
   }(tkn);
   return ExprNode(ExprNode::INT, ExprNode::Integer{i});
+}
+
+auto Expressions::expand(Expressions::ExprLexer const &lexer,
+                         std::unordered_map<std::string, Macro> const &macros,
+                         std::unordered_set<std::string> const &def_macros)
+    -> ExprLexer {
+  auto tkns = vector<expr_t>();
+  auto lexes = vector<string>();
+  tkns.reserve(lexer.tkns.size());
+  lexes.reserve(lexer.macros.size());
+
+  auto tkn_i = size_t{};
+  auto macro_i = size_t{};
+
+  for (; tkn_i < lexer.tkns.size();) {
+    // TODO: figure out how to work with function calls
+    switch (lexer.tkns[tkn_i]) {
+    case expr_t::MACRO: {
+      ++tkn_i;
+      auto const macro_to_expand = lexer.macros[macro_i++];
+      auto const [expansion_tkns, expansion_lexes] =
+          expand_macro(macro_to_expand, macros, def_macros);
+
+      tkns.reserve(tkns.size() + expansion_tkns.size());
+      lexes.reserve(lexes.size() + expansion_lexes.size());
+      for (auto i = size_t{}; i < expansion_tkns.size(); ++i) {
+        tkns.push_back(expansion_tkns[i]);
+      }
+      for (auto i = size_t{}; i < expansion_lexes.size(); ++i) {
+        lexes.push_back(expansion_lexes[i]);
+      }
+    } break;
+    // TODO: we could just optimize this here and replace all instances of
+    // defined calls, but for now i'm just trying to get something to work
+    case expr_t::DEFINED: {
+      tkns.push_back(expr_t::DEFINED);
+      ++tkn_i;
+      // NOTE: we consume any parens, so that there are no parens, this is fine
+      // to do by the standard, and a small optimization(?)
+      if (lexer.tkns[tkn_i] == LPAREN) {
+        ++tkn_i; // LPAREN
+        tkns.push_back(MACRO);
+        ++tkn_i; // MACRO
+        ++tkn_i; // RPAREN
+      }
+      lexes.push_back(lexer.macros[macro_i++]);
+    } break;
+    case expr_t::LIT_CHAR:
+      [[fallthrough]];
+    case expr_t::LIT_DEC:
+      [[fallthrough]];
+    case expr_t::LIT_HEX:
+      [[fallthrough]];
+    case expr_t::LIT_OCT:
+      [[fallthrough]];
+    case expr_t::LIT_BIN:
+      [[fallthrough]];
+    case expr_t::LIT_FLOAT:
+      lexes.push_back(lexer.macros[macro_i++]);
+      tkns.push_back(lexer.tkns[tkn_i++]);
+      break;
+    default: {
+      tkns.push_back(lexer.tkns[tkn_i++]);
+    }
+    }
+  }
+  return ExprLexer{tkns, lexes};
+}
+
+auto Expressions::expand_macro(
+    string const &macro_to_expand,
+    std::unordered_map<std::string, Macro> const &macros,
+    std::unordered_set<std::string> const &def_macros) noexcept -> ExprLexer {
+  auto tkns = vector<expr_t>();
+  auto lexes = vector<string>();
+
+  // NOTE: check if we need to recursively call this function until there's no
+  // more macros, it might be done just in the expand function idk?
+  if (auto const val = macros.find(macro_to_expand); val != macros.end()) {
+    auto &&[expansion_tkns, expansion_lexes] = Expressions::lex(val->second);
+    tkns = std::move(expansion_tkns);
+    lexes = std::move(expansion_lexes);
+  } else if (auto const val = def_macros.find(macro_to_expand);
+             val != def_macros.end()) {
+    // nothing to do in this case
+  } else {
+    tkns.push_back(LIT_DEC);
+    lexes.push_back("0");
+  }
+#ifdef DEBUG
+  auto const tmp_lexer = ExprLexer{tkns, lexes};
+  expr_dbg("tmp_lexer");
+  tmp_lexer.display(std::cout).flush();
+  return tmp_lexer;
+#else
+  return ExprLexer{tkns, lexes};
+#endif // DEBUG
 }
 
 #ifdef DEBUG
