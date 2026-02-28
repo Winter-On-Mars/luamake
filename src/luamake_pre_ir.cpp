@@ -28,9 +28,6 @@
 #include <iostream>
 #endif // DEBUG
 
-// TODO: fuck there's some kind of exception being throw because of
-// string::append, idk where :)
-
 namespace fs = std::filesystem;
 
 using std::string, std::string_view, std::vector, std::unordered_map;
@@ -989,10 +986,17 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       }
     } break;
     case '"': {
-      i = luamake::skip_until('"', fcontent, i + 1) + 1;
-      if (!(i < file.size())) {
-        throw Exception(string("Non terminated string"));
-      }
+      do {
+        // +1 b/c fcontent[i] (should) == '"', and if not then we'll be out of
+        // bounds so it doesn't matter
+        i = luamake::skip_until('"', fcontent, i + 1);
+        // can always check this without needing to bounds check (probably)
+        if (!(i < file.size())) {
+          throw Exception(string("Non terminated string"));
+        }
+        // to fix when we're in a string that contains \" escape character
+      } while (fcontent[i - 1] == '\\');
+      ++i;
     } break;
     default:
       i = luamake::skip_until(std::string_view("#/\""), fcontent, i + 1);
@@ -1055,9 +1059,11 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
         while (is_any_of(ws, buf[end])) {
           --end;
         }
-        auto const mac =
-            std::string_view{buf.begin() + start, buf.begin() + end + 1};
-        macro.append(mac);
+        if (end + 1 > start) {
+          auto const mac =
+              std::string_view{buf.begin() + start, buf.begin() + end + 1};
+          macro.append(mac);
+        }
         looping = false;
       } else {
         i = luamake::skip_until(switch_chars, buf, i + 1);
@@ -1751,10 +1757,6 @@ auto ExprNode::eval(string_view const expr,
                     std::unordered_map<std::string, Macro> const &macros,
                     std::unordered_set<std::string> const &def_macros) -> int {
   auto const expr_lex = Expressions::lex(expr);
-#ifdef DEBUG
-  expr_dbg("expr_lex");
-  expr_lex.display(std::cout).flush();
-#endif // DEBUG
   auto const expansion = Expressions::expand(expr_lex, macros, def_macros);
   // TODO: report if the expansion is empty, i.e. if you have a case like
   // ```
@@ -1763,10 +1765,6 @@ auto ExprNode::eval(string_view const expr,
   // #endif
   // ```
   // in that case, this becomes a malformed program
-#ifdef DEBUG
-  expr_dbg("expansion");
-  expansion.display(std::cout).flush();
-#endif // DEBUG
   return Expressions::eval_impl(expansion.to_ast(), macros, def_macros);
 }
 
@@ -1977,9 +1975,6 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
   case LPAREN: {
     ++cur_t;
     auto res = expression(cur_t, cur_lex);
-#ifdef DEBUG
-    expr_dbg(to_string(tkns[cur_t]));
-#endif // DEBUG
     if (tkns[cur_t] != RPAREN) {
       throw Exception(std::format("While parsing a grouping expression, "
                                   "expected a ')' to wrap the expression"));
@@ -2519,14 +2514,7 @@ auto Expressions::expand_macro(
     tkns.push_back(LIT_DEC);
     lexes.push_back("0");
   }
-#ifdef DEBUG
-  auto const tmp_lexer = ExprLexer{tkns, lexes};
-  expr_dbg("tmp_lexer");
-  tmp_lexer.display(std::cout).flush();
-  return tmp_lexer;
-#else
   return ExprLexer{tkns, lexes};
-#endif // DEBUG
 }
 
 #ifdef DEBUG
@@ -2750,7 +2738,7 @@ auto AstIncluder::visit_pragma(PragmaNode &) -> void {
 }
 
 auto Exception::what() const noexcept -> string {
-  return std::format("[{}]", message);
+  return std::format("{}", message);
 }
 
 auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {
@@ -2762,13 +2750,6 @@ auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {
 #endif // DEBUG
   auto includer = AstIncluder(vec, macros, def_macros);
   includer.get_includes(ast);
-#ifdef DEBUG
-  std::cout << "including:\n";
-  for (auto &&include : vec) {
-    std::cout << "\t[" << include << "]\n";
-  }
-  std::cout.flush();
-#endif // DEBUG
   return vec;
 }
 
