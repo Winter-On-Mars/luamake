@@ -391,6 +391,15 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   auto const files_deps = interpreter.interpret(
       std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
 
+#ifdef DEBUG
+  std::cout << "Possible includes for " << dep.string() << ": {\n";
+  for (auto &&include : files_deps) {
+    std::cout << "\t" << include << "\n";
+  }
+  std::cout << "}\n";
+  std::cout.flush();
+#endif // DEBUG
+
   for (auto const &file : files_deps) {
     auto const maybe_file = [&]() -> std::optional<fs::path> {
       for (auto const &include : includes) {
@@ -1923,13 +1932,21 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     fs::create_directory(parent_path /
                          fs::path(std::format("{}/{}", static_mod.install_dir,
                                               static_mod.name)));
-    auto const copy_headers = std::format(
-        "cp --target-directory={} {}",
-        (parent_path / static_mod.install_dir / static_mod.name).string(),
+
+    auto const formatted_files =
         std::accumulate(static_mod.headers.begin(), static_mod.headers.end(),
                         std::string(), [](auto &&e, auto &&next) {
                           return std::format("{} {}", e, next.string());
-                        }));
+                        });
+
+#ifdef DEBUG
+    expr_dbg(formatted_files);
+#endif // DEBUG
+
+    auto const copy_headers = std::format(
+        "cp --target-directory={} {}",
+        (parent_path / static_mod.install_dir / static_mod.name).string(),
+        formatted_files);
     std::cout << '[' << copy_headers << "]\n";
     std::cout.flush();
     if (OS_CALL(copy_headers.c_str()) != 0) {
