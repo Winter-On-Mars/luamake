@@ -1939,9 +1939,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
                           return std::format("{} {}", e, next.string());
                         });
 
-#ifdef DEBUG
     expr_dbg(formatted_files);
-#endif // DEBUG
 
     auto const copy_headers = std::format(
         "cp --target-directory={} {}",
