@@ -2083,6 +2083,10 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
 
 // TODO: switch this to use userdata, which should make things faster to process
 // TODO: double check that this function isn't doing redundant type checks
+// TODO: change this to use normal clang, then if we're compiling c++ code we
+// need to make sure to link against stdc++, see
+// [[https://stackoverflow.com/questions/3178342/compiling-a-c-program-with-gcc]]
+// for more info
 auto Builder::clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
