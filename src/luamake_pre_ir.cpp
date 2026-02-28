@@ -190,6 +190,7 @@ struct Lexer final {
   auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
 
   auto produce_macro(string_view const, size_t) -> size_t;
+  auto produce_lexeme(string_view const, size_t) -> size_t;
   /**
    * @throws
    */
@@ -436,9 +437,11 @@ struct UndefNode final : AstNode {
 };
 
 struct PragmaNode final : AstNode {
-  PragmaNode() noexcept {}
+  PragmaNode(string const &value) noexcept : value(value) {}
   ~PragmaNode() final = default;
   auto accept(AstVisitor &visitor) -> void final;
+
+  string value;
 };
 
 struct Ast final {
@@ -941,9 +944,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         break;
       case ir_t::PRAGMA:
         lex.types.push_back(ir_t::PRAGMA);
-        i = skip_ws(fcontent, i);
-        end = luamake::skip_until(std::string_view(" \t\n\r"), fcontent, i + 1);
-        lex.push_lexeme(start + i, start + end);
+        i = lex.produce_lexeme(fcontent, skip_ws(fcontent, i));
         break;
       case ir_t::ENDIF:
         lex.types.push_back(ir_t::ENDIF);
@@ -1073,6 +1074,57 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
     }
   }
   push_macro(macro);
+  // the only way to break out of the loop is to hit a '\n' char, but we don't
+  // want to include that in the string, we do want to skip over it though so we
+  // add 1 here
+  return i + 1;
+}
+
+auto Lexer::produce_lexeme(string_view const buf, size_t i) -> size_t {
+  auto constexpr ws = string_view{" \t\r\n"};
+  auto constexpr switch_chars = std::string_view{"\\\n/"};
+  auto lexeme = std::string();
+  auto start = i;
+  auto looping = true;
+  while (i < buf.size() && looping) {
+    auto const ch = buf[i];
+    switch (ch) {
+    case '\\': {
+      if (i - 1 > start) {
+        auto const lex =
+            std::string_view{buf.begin() + start, buf.begin() + i - 1};
+        lexeme.append(lex);
+      }
+      ++i;
+      if (i < buf.size() && buf[i] == '\n')
+        ++i;
+      start = i = luamake::skip_while(ws, buf, i);
+    } break;
+    case '/': {
+      if (i + 1 < buf.size() && buf[i + 1] == '/') {
+        auto end = i - 1;
+        while (is_any_of(ws, buf[end])) {
+          --end;
+        }
+        auto const lex =
+            std::string_view{buf.begin() + start, buf.begin() + end + 1};
+        lexeme.append(lex);
+        looping = false;
+      } else {
+        i = luamake::skip_until(switch_chars, buf, i + 1);
+      }
+    } break;
+    case '\n': {
+      auto const lex = std::string_view{buf.begin() + start, buf.begin() + i};
+      lexeme.append(lex);
+      looping = false;
+    } break;
+    default:
+      i = luamake::skip_until(switch_chars, buf, i);
+      break;
+    }
+  }
+  push_lexeme(lexeme);
   // the only way to break out of the loop is to hit a '\n' char, but we don't
   // want to include that in the string, we do want to skip over it though so we
   // add 1 here
@@ -1533,14 +1585,8 @@ auto Lexer::handle_pragma(size_t &cur_t, size_t &cur_lex)
     throw Exception(
         std::format("Expected lexeme in #pragma preprocessor directive"));
   ++cur_t;
-  if (lexemes[cur_lex] != "once") {
-    // ignore all pragma statements that aren't #pragma once, might need to
-    // rethink this
-    ++cur_t;
-    ++cur_lex;
-    return nullptr;
-  }
-  return std::make_unique<PragmaNode>();
+  auto value = lexemes[cur_lex++];
+  return std::make_unique<PragmaNode>(value);
 }
 
 auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
@@ -2585,7 +2631,7 @@ auto AstPrinter::visit_undef(UndefNode &u) -> void {
 }
 
 auto AstPrinter::visit_pragma(PragmaNode &p) -> void {
-  out << get_indents() << "(pragma once)\n";
+  out << get_indents() << "(pragma {" << p.value << "})\n";
 }
 #endif // DEBUG
 
