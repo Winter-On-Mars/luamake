@@ -71,6 +71,9 @@
     auto const res = (expr);                                                   \
     std::cerr << DBG "[expr] " NORMAL #expr " = " << res << '\n';              \
   } while (false);
+#else
+#define fn_print()
+#define expr_dbg(expr)
 #endif // DEBUG
 
 [[noreturn]] auto unreachable() noexcept -> void;
