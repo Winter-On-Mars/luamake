@@ -1445,36 +1445,66 @@ auto Module::format_links() const -> std::string {
   return res;
 }
 
+// TODO: double check that it's actually fine to throw an exception here and
+// that this won't cause a memory leak, ig it's fine if it does cause a memory
+// leak because this errors out to the top, but it's still a concern
 auto Module::parse_compiler_table(lua_State *state) -> string {
   auto str = string();
 
   auto const compiler_idx = lua_absindex(state, -1);
 
-  lua_getfield(state, compiler_idx, "compiler");
-  str += lua_tolstring(state, -1, nullptr);
-
-  lua_getfield(state, compiler_idx, "optimize");
-  str += " -";
-  str += lua_tolstring(state, -1, nullptr);
-
-  lua_getfield(state, compiler_idx, "warnings");
-  auto const warnings_idx = lua_absindex(state, -1);
-
-  lua_pushnil(state);
-  while (lua_next(state, warnings_idx) != 0) {
-    if (lua_type(state, -1) != LUA_TSTRING) {
-      lua_pushstring(
-          state,
-          "Incorrect type in `warnings` table"); // TODO: update this to
-                                                 // include the found type
-      lua_error(state);
-      return "";
-    }
-    str += " -";
+  auto const compiler_t = lua_getfield(state, compiler_idx, "compiler");
+  switch (compiler_t) {
+  case LUA_TSTRING:
     str += lua_tolstring(state, -1, nullptr);
-    lua_pop(state, 1);
+    break;
+  case LUA_TNIL:
+    throw MissingField("compiler.compiler");
+  default:
+    throw UnexpectedType("compiler.compiler", LUA_TSTRING, compiler_t);
   }
 
+  // TODO: honestly probably write a macro to make parsing optional and required
+  // table entries easier
+  auto const optimize_t = lua_getfield(state, compiler_idx, "optimize");
+  switch (optimize_t) {
+  case LUA_TSTRING:
+    str += " -";
+    str += lua_tolstring(state, -1, nullptr);
+    break;
+  case LUA_TNIL:
+    break;
+  default:
+    throw UnexpectedType("compiler.optimize", LUA_TSTRING, optimize_t);
+  }
+
+  auto const warnings_t = lua_getfield(state, compiler_idx, "warnings");
+  switch (warnings_t) {
+  case LUA_TTABLE: {
+    auto const warnings_idx = lua_absindex(state, -1);
+
+    lua_pushnil(state);
+    while (lua_next(state, warnings_idx) != 0) {
+      if (lua_type(state, -1) != LUA_TSTRING) {
+        lua_pushstring(
+            state,
+            "Incorrect type in `warnings` table"); // TODO: update this to
+                                                   // include the found type
+        lua_error(state);
+        return "";
+      }
+      str += " -";
+      str += lua_tolstring(state, -1, nullptr);
+      lua_pop(state, 1);
+    }
+  } break;
+  case LUA_TNIL:
+    break;
+  default:
+    throw UnexpectedType("compiler.warnings", LUA_TTABLE, warnings_t);
+  }
+
+  // *should* always exist, we'll just assume it exists for now
   lua_getfield(state, compiler_idx, "opt_args");
   auto const opt_arg_idx = lua_absindex(state, -1);
 
@@ -2083,17 +2113,13 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
 
 // TODO: switch this to use userdata, which should make things faster to process
 // TODO: double check that this function isn't doing redundant type checks
-// TODO: change this to use normal clang, then if we're compiling c++ code we
-// need to make sure to link against stdc++, see
-// [[https://stackoverflow.com/questions/3178342/compiling-a-c-program-with-gcc]]
-// for more info
 auto Builder::clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
     lua_pushstring(state, "Expected one argument to the clang function");
     return lua_error(state);
   }
-  auto constexpr compiler_field = string_view{"clang++"};
+  auto constexpr compiler_field = string_view{"clang"};
   auto constexpr opt_level = string_view{"O2"};
   auto constexpr warnings = array<string_view, 3>{{
       string_view{"Wall"},
@@ -2175,6 +2201,16 @@ auto Builder::clang(lua_State *state) noexcept -> int {
 
   lua_createtable(state, 0, 0);
 
+  // TODO: allow for tables to be used so that instead of having to say
+  // -I.,
+  // -Isrc/external/...,
+  // etc,
+  // you could just do
+  // I = {
+  //  ".",
+  //  "src/external/...",
+  // }
+  // And the -I will be added to the front of each
   lua_pushnil(state);
   for (auto i = lua_Integer{1}; lua_next(state, arg_idx) != 0; ++i) {
     switch (lua_type(state, -2)) {
@@ -2212,7 +2248,123 @@ auto Builder::clang(lua_State *state) noexcept -> int {
   // this is a good thing i'm bad with async stuff
   auto const path_to_compiler = compiler_path_fut.get();
   if (path_to_compiler == fs::path()) {
-    lua_pushstring(state, "Unable to find clang++ binary.");
+    lua_pushstring(state, "Unable to find clang binary.");
+    return lua_error(state);
+  }
+  lua_pushstring(state, path_to_compiler.c_str());
+  // lua_pushstring(state, compiler_field.data());
+  lua_setfield(state, ret_tbl_idx, "compiler");
+
+  return 1;
+}
+
+auto Builder::gcc_bare(lua_State *state) noexcept -> int {
+  auto const num_args = lua_gettop(state);
+  if (num_args != 1) {
+    lua_pushstring(state, "Expected one argument to the gcc_bare function");
+    return lua_error(state);
+  }
+  auto constexpr compiler_field = string_view{"gcc"};
+
+  // check that the input argument is the right type
+  LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
+             "Expected type passed into clang function to be a table");
+
+  auto const arg_idx = lua_absindex(state, -1);
+
+  auto const path_var = std::getenv("PATH");
+  if (path_var == nullptr) {
+    lua_pushstring(state, "Envroinment variable PATH not found, you're on your "
+                          "own with this one :)");
+    return lua_error(state);
+  }
+
+  // this seems slow, should benchmark it to see if it's causing the massive
+  // slow down i'm noticing
+  auto compiler_path_fut =
+      std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
+#if defined(_WIN32)
+        auto constexpr path_sep = ';';
+#else
+        auto constexpr path_sep = ':';
+#endif
+
+        auto const *start = path_var;
+        auto const *end = start;
+
+        auto ec = std::error_code{};
+        while (true) {
+          while (*end != 0 && *end != path_sep) {
+            ++end;
+          }
+          switch (*end) {
+          case 0: {
+            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
+              return fs::path(start, end) / compiler_field;
+            } else {
+              // unable to find binary
+              return fs::path();
+            }
+          } break;
+          case path_sep: {
+            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
+              return fs::path(start, end) / compiler_field;
+            } else {
+              // binary is not is this directory
+              start = end + 1; // skip the part_sep
+              ++end;
+            }
+          } break;
+          default: {
+            return fs::path();
+          }
+          }
+        }
+      });
+
+  lua_createtable(state, 0, 1); // tbl
+  auto const ret_tbl_idx = lua_absindex(state, -1);
+
+  lua_createtable(state, 0, 0);
+
+  lua_pushnil(state);
+  for (auto i = lua_Integer{1}; lua_next(state, arg_idx) != 0; ++i) {
+    switch (lua_type(state, -2)) {
+    case LUA_TNUMBER: {
+      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
+                 "Expected value type to be a string, found something else in "
+                 "the clang argument");
+      lua_seti(state, -3,
+               i); // treat the value as just being passed to the function
+    } break;
+    case LUA_TSTRING: {
+      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
+                 "Expected value type to be a string, found something else in "
+                 "the clang argument");
+      // combine both the key and value into the argument
+      lua_pushfstring(state, "-%s=%s", lua_tolstring(state, -2, nullptr),
+                      lua_tolstring(state, -1, nullptr));
+      lua_seti(state, -4, i);
+      lua_pop(state, 1); // pop the value from the stack
+    } break;
+    default:
+      lua_pushstring(
+          state,
+          "While *yes* key's into a table can have any type, please refrain "
+          "from using anything other than a number (i.e. passing an array), "
+          "or "
+          "a string for a key+value pair item, or a combination of the two");
+      return lua_error(state);
+    }
+  }
+
+  lua_setfield(state, ret_tbl_idx, "opt_args");
+
+  // wait until the very end to let the async function run the longest, idk if
+  // this is a good thing i'm bad with async stuff
+  auto const path_to_compiler = compiler_path_fut.get();
+  if (path_to_compiler == fs::path()) {
+    lua_pushstring(state, "Unable to find gcc binary.");
     return lua_error(state);
   }
   lua_pushstring(state, path_to_compiler.c_str());
@@ -2523,10 +2675,13 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 8);
+  lua_createtable(state, 1, 9);
 
   lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
+
+  lua_pushcfunction(state, &Builder::gcc_bare);
+  lua_setfield(state, -2, "gcc_bare");
 
   lua_pushcfunction(state, &Builder::new_exe);
   lua_setfield(state, -2, "new_exe");
@@ -2565,10 +2720,13 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 }
 
 auto make_builder_thunk(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 8);
+  lua_createtable(state, 1, 9);
 
   lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
+
+  lua_pushcfunction(state, &Builder::gcc_bare);
+  lua_setfield(state, -2, "gcc_bare");
 
   lua_pushcfunction(state, &Builder::new_exe);
   lua_setfield(state, -2, "new_exe");
