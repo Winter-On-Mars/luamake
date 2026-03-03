@@ -1349,6 +1349,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   switch (type) {
   case Module_t::EXE:
     break;
+  // this needs to not be nullable
   case Module_t::STATIC: {
     switch (auto const header_t = lua_getfield(state, -1, "headers")) {
     case LUA_TTABLE: {
