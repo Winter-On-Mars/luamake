@@ -38,8 +38,11 @@ class Builder final {
   static auto build_dep(lua_State *) noexcept -> int;
   static auto clang(lua_State *) noexcept -> int;
   static auto gcc_bare(lua_State *) noexcept -> int;
+  static auto clang_bare(lua_State *) noexcept -> int;
   static auto require(lua_State *) noexcept -> int;
   static auto link_lib(lua_State *) noexcept -> int;
+
+  static auto get_os(lua_State *) noexcept -> int;
 
   // used with some of the build commands that want to turn off actually running
   // the compiler

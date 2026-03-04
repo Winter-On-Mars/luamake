@@ -2269,6 +2269,122 @@ auto Builder::gcc_bare(lua_State *state) noexcept -> int {
 
   // check that the input argument is the right type
   LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
+             "Expected type passed into gcc function to be a table");
+
+  auto const arg_idx = lua_absindex(state, -1);
+
+  auto const path_var = std::getenv("PATH");
+  if (path_var == nullptr) {
+    lua_pushstring(state, "Envroinment variable PATH not found, you're on your "
+                          "own with this one :)");
+    return lua_error(state);
+  }
+
+  // this seems slow, should benchmark it to see if it's causing the massive
+  // slow down i'm noticing
+  auto compiler_path_fut =
+      std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
+#if defined(_WIN32)
+        auto constexpr path_sep = ';';
+#else
+        auto constexpr path_sep = ':';
+#endif
+
+        auto const *start = path_var;
+        auto const *end = start;
+
+        auto ec = std::error_code{};
+        while (true) {
+          while (*end != 0 && *end != path_sep) {
+            ++end;
+          }
+          switch (*end) {
+          case 0: {
+            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
+              return fs::path(start, end) / compiler_field;
+            } else {
+              // unable to find binary
+              return fs::path();
+            }
+          } break;
+          case path_sep: {
+            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
+              return fs::path(start, end) / compiler_field;
+            } else {
+              // binary is not is this directory
+              start = end + 1; // skip the part_sep
+              ++end;
+            }
+          } break;
+          default: {
+            return fs::path();
+          }
+          }
+        }
+      });
+
+  lua_createtable(state, 0, 1); // tbl
+  auto const ret_tbl_idx = lua_absindex(state, -1);
+
+  lua_createtable(state, 0, 0);
+
+  lua_pushnil(state);
+  for (auto i = lua_Integer{1}; lua_next(state, arg_idx) != 0; ++i) {
+    switch (lua_type(state, -2)) {
+    case LUA_TNUMBER: {
+      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
+                 "Expected value type to be a string, found something else in "
+                 "the gcc argument");
+      lua_seti(state, -3,
+               i); // treat the value as just being passed to the function
+    } break;
+    case LUA_TSTRING: {
+      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
+                 "Expected value type to be a string, found something else in "
+                 "the gcc argument");
+      // combine both the key and value into the argument
+      lua_pushfstring(state, "-%s=%s", lua_tolstring(state, -2, nullptr),
+                      lua_tolstring(state, -1, nullptr));
+      lua_seti(state, -4, i);
+      lua_pop(state, 1); // pop the value from the stack
+    } break;
+    default:
+      lua_pushstring(
+          state,
+          "While *yes* key's into a table can have any type, please refrain "
+          "from using anything other than a number (i.e. passing an array), "
+          "or "
+          "a string for a key+value pair item, or a combination of the two");
+      return lua_error(state);
+    }
+  }
+
+  lua_setfield(state, ret_tbl_idx, "opt_args");
+
+  // wait until the very end to let the async function run the longest, idk if
+  // this is a good thing i'm bad with async stuff
+  auto const path_to_compiler = compiler_path_fut.get();
+  if (path_to_compiler == fs::path()) {
+    lua_pushstring(state, "Unable to find gcc binary.");
+    return lua_error(state);
+  }
+  lua_pushstring(state, path_to_compiler.c_str());
+  // lua_pushstring(state, compiler_field.data());
+  lua_setfield(state, ret_tbl_idx, "compiler");
+
+  return 1;
+}
+
+auto Builder::clang_bare(lua_State *state) noexcept -> int {
+  auto const num_args = lua_gettop(state);
+  if (num_args != 1) {
+    lua_pushstring(state, "Expected one argument to the clang_bare function");
+    return lua_error(state);
+  }
+  auto constexpr compiler_field = string_view{"clang"};
+
+  // check that the input argument is the right type
+  LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
              "Expected type passed into clang function to be a table");
 
   auto const arg_idx = lua_absindex(state, -1);
@@ -2282,6 +2398,8 @@ auto Builder::gcc_bare(lua_State *state) noexcept -> int {
 
   // this seems slow, should benchmark it to see if it's causing the massive
   // slow down i'm noticing
+  // TODO: extract this function into its own thing because it's used in quite a
+  // few places
   auto compiler_path_fut =
       std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
 #if defined(_WIN32)
@@ -2365,7 +2483,7 @@ auto Builder::gcc_bare(lua_State *state) noexcept -> int {
   // this is a good thing i'm bad with async stuff
   auto const path_to_compiler = compiler_path_fut.get();
   if (path_to_compiler == fs::path()) {
-    lua_pushstring(state, "Unable to find gcc binary.");
+    lua_pushstring(state, "Unable to find clang binary.");
     return lua_error(state);
   }
   lua_pushstring(state, path_to_compiler.c_str());
@@ -2466,6 +2584,33 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
   } catch (...) {
     (void)lua_pushstring(
         state, "An unknown exception was encountered in the requires function");
+    return lua_error(state);
+  }
+}
+
+auto Builder::get_os(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 0, get_os);
+  try {
+    // for now we're going to be assuming that the host machine you're on is the
+    // one that you're building the libraries for, i do want to add a way to
+    // enable cross compilation out of the box, but i'm not sure how to do that
+    (void)lua_pushstring(state,
+#if defined(_WIN32)
+                         "windows"
+#elif defined(__linux__)
+                         "linux"
+#elif defined(__MACH__)
+                         "osx"
+#elif defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) ||   \
+    defined(__DragonFly__)
+                         "bsd"
+#endif
+    );
+    (void)lua_pushstring(state, "");
+    return 1;
+  } catch (...) {
+    (void)lua_pushstring(
+        state, "An unknown exception was encountered in the get_os function");
     return lua_error(state);
   }
 }
@@ -2684,6 +2829,9 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::gcc_bare);
   lua_setfield(state, -2, "gcc_bare");
 
+  lua_pushcfunction(state, &Builder::clang_bare);
+  lua_setfield(state, -2, "clang_bare");
+
   lua_pushcfunction(state, &Builder::new_exe);
   lua_setfield(state, -2, "new_exe");
 
@@ -2704,6 +2852,9 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, &Builder::link_lib);
   lua_setfield(state, -2, "link_lib");
+
+  lua_pushcfunction(state, &Builder::get_os);
+  lua_setfield(state, -2, "get_os");
 
   // this will set Lake[1] = $CWD, which could cause issues, but you should be
   // calling luamake in the same directory with the luamake.lua file in it
@@ -2729,6 +2880,9 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::gcc_bare);
   lua_setfield(state, -2, "gcc_bare");
 
+  lua_pushcfunction(state, &Builder::clang_bare);
+  lua_setfield(state, -2, "clang_bare");
+
   lua_pushcfunction(state, &Builder::new_exe);
   lua_setfield(state, -2, "new_exe");
 
@@ -2749,6 +2903,9 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, &Builder::link_lib);
   lua_setfield(state, -2, "link_lib");
+
+  lua_pushcfunction(state, &Builder::get_os);
+  lua_setfield(state, -2, "get_os");
 
   // this will set Lake[1] = $CWD, which could cause issues, but you should be
   // calling luamake in the same directory with the luamake.lua file in it
