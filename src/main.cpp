@@ -3,6 +3,7 @@
 #include "luamake_file.hpp"
 
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -32,6 +33,82 @@ using std::array, std::pair, std::string, std::string_view;
 
 namespace luamake {
 namespace {
+enum class Value_t { NUMBER, STRING, BOOL_TRUE, BOOL_FALSE, NIL };
+auto constexpr determine_type(string_view const str) noexcept -> Value_t {
+  // TODO: handle \" (and other escape characters) appearing in the string
+  if (str.length() == 0 || str == string_view{"nil"}) {
+    return Value_t::NIL; // i don't know if this is actually what we want to do?
+  } else if (str == string_view{"true"}) {
+    return Value_t::BOOL_TRUE;
+  } else if (str == string_view{"false"}) {
+    return Value_t::BOOL_FALSE;
+  } else if (isalpha(str[0])) {
+    return Value_t::STRING;
+  } else if (isdigit(str[0])) {
+    return Value_t::NUMBER;
+  }
+  return Value_t::NIL;
+}
+
+auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
+  lua_createtable(state, 0, 0);
+  auto start_lua_args = 0;
+  for (; start_lua_args < argc; ++start_lua_args) {
+    if (argv[start_lua_args][0] == '-' && strlen(argv[start_lua_args]) == 2 &&
+        argv[start_lua_args][1] == '-') {
+      ++start_lua_args;
+      break;
+    }
+  }
+
+  // TODO: finish this, idk add a function that checks if a table value already
+  // exists, and appends to it if it does, otherwise creates the value; that way
+  // the function can be used to allow us to put subtables into the args table
+  for (; start_lua_args < argc; ++start_lua_args) {
+    // TODO: parse the args and put them in the table
+    auto arg = string(argv[start_lua_args]);
+    auto const eq_pos = arg.find('=');
+    if (eq_pos == arg.npos) {
+      // idk should report an error/warning here?
+      // all args passed to the script should be of the form
+      // <arg_name> = <literal value>
+      // where <literal value> is a lua literal
+      continue;
+    }
+    // NOTE: we have to set this bc lua_setfield just takes in a c_str, and
+    // (probably) looks for a '\0'
+    arg[eq_pos] = '\0';
+    auto const arg_name = std::string_view(arg.data(), arg.data() + eq_pos);
+    auto const value_str =
+        std::string_view(arg.data() + eq_pos + 1, arg.data() + arg.size());
+    switch (determine_type(value_str)) {
+    case Value_t::NUMBER: {
+      // the function handles both integers and floats depending on lua lex
+      // rules
+      auto val = lua_stringtonumber(state, value_str.data());
+      if (val == 0) {
+        // idk report an error
+        lua_pushnil(state);
+      }
+    } break;
+    case Value_t::STRING:
+      lua_pushlstring(state, value_str.data(), value_str.length());
+      break;
+    case Value_t::BOOL_TRUE:
+      lua_pushboolean(state, true);
+      break;
+    case Value_t::BOOL_FALSE:
+      lua_pushboolean(state, false);
+      break;
+    case Value_t::NIL:
+      lua_pushnil(state);
+      break;
+    }
+    lua_setfield(state, -2, arg_name.data());
+  }
+  lua_setglobal(state, "args");
+}
+
 enum class exit_t : unsigned char {
   ok,
   internal_error,
@@ -230,8 +307,6 @@ auto Type::do_command() const noexcept -> exit_t {
   }
   (void)lua_gc(state, LUA_GCSTOP);
 
-  luaL_openlibs(state);
-
   if (!file_exists(fs::current_path() / "luamake.lua")) {
     ferror_message("unable to discover `luamake.lua` in current dir at [%s]" NL
                    "\tRun "
@@ -240,6 +315,12 @@ auto Type::do_command() const noexcept -> exit_t {
                    fs::current_path().c_str());
     return exit_t::config_error;
   }
+
+  luaL_openlibs(state);
+  lua_register(state, "Dump", luamake::builtins::dump);
+
+  create_args(state, argc, argv);
+
   if (luaL_dofile(state, "luamake.lua") != LUA_OK) {
     ferror_message("unable to run the discovered `luamake.lua` file at "
                    "[%s]" NL "\tLua error message [%s]",
@@ -248,8 +329,6 @@ auto Type::do_command() const noexcept -> exit_t {
   }
 
   (void)lua_gc(state, LUA_GCSTOP);
-
-  lua_register(state, "Dump", luamake::builtins::dump);
 
   auto res = exit_t::ok;
   auto cfg = user_func_config{
