@@ -20,10 +20,10 @@ static_assert(LUA_VERSION_NUM == 504);
 
 namespace luamake {
 namespace builtins {
-auto dump(lua_State *state) noexcept -> int;
+auto dump(lua_State *) noexcept -> int;
 
-auto make_builder_obj(lua_State *state) noexcept -> void;
-auto make_runner_obj(lua_State *state) noexcept -> void;
+auto make_builder_obj(lua_State *) noexcept -> void;
+auto make_runner_obj(lua_State *) noexcept -> void;
 auto make_builder_thunk(lua_State *const) noexcept -> void;
 
 // TODO: add more functions like clang, one for gcc, and a default one that just

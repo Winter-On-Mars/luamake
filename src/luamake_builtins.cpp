@@ -2067,7 +2067,7 @@ auto Builder::build_dep(lua_State *state) noexcept -> int {
 }
 
 auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
-  auto const indents = string(depth, '\t');
+  auto const indents = [](auto depth) { return std::string(depth, '\t'); };
   switch (auto const type = lua_type(state, -1)) {
   case LUA_TNIL:
     std::cout << "nil";
@@ -2085,7 +2085,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << "{\n";
     auto const tbl_idx = lua_absindex(state, -1);
     for (lua_pushnil(state); lua_next(state, tbl_idx) != 0;) {
-      std::cout << indents;
+      std::cout << indents(depth);
       switch (auto const key_t = lua_type(state, -2)) {
       case LUA_TNUMBER:
         std::cout << '[' << lua_tointeger(state, -2) << ']';
@@ -2103,7 +2103,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
 
       lua_pop(state, 1);
     }
-    std::cout << indents << '}';
+    std::cout << indents(depth - 1) << '}';
   } break;
   default:
     std::cout << lua_typename(type);
