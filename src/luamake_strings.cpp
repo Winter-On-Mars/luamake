@@ -18,9 +18,6 @@ LM_CXPR_DEF_IMPL(OwnedString::OwnedString() noexcept : buffer(nullptr),
 LM_CXPR_DEF_IMPL(
     OwnedString::OwnedString(OwnedString &&that) noexcept : buffer(that.buffer),
     size(that.size), capacity(that.capacity) {
-      expr_dbg(__FUNCTION__);
-      expr_dbg(this);
-      expr_dbg(&that);
       that.buffer = nullptr;
       that.size = 0;
       that.capacity = 0;
@@ -28,19 +25,12 @@ LM_CXPR_DEF_IMPL(
 
 LM_CXPR_DEF_IMPL(auto OwnedString::operator=(OwnedString && that) noexcept
                  -> OwnedString & {
-                   expr_dbg(__FUNCTION__);
-                   expr_dbg(this);
-                   expr_dbg(&that);
                    if (this == &that) {
                      return *this;
                    }
-                   buffer = that.buffer;
-                   size = that.size;
-                   capacity = that.capacity;
-
-                   that.buffer = nullptr;
-                   that.size = 0;
-                   that.capacity = 0;
+                   std::swap(buffer, that.buffer);
+                   std::swap(size, that.size);
+                   std::swap(capacity, that.capacity);
                    return *this;
                  })
 
