@@ -1,5 +1,5 @@
 cc:=clang++
-cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -fno-rtti# -fsanitize=address
+cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -fno-rtti
 bin_name:=build/luamake_c# TODO: change this when the c rewrite is done
 linker:=lld # if someone has clang they should have lld, so this is better, even if mold is a better linker
 includes:=lua
@@ -12,7 +12,7 @@ lua_a:=lua/liblua.a
 all: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
-dbg: cc_flags+=-ggdb3 -DDEBUG -DPERF_TESTING
+dbg: cc_flags+=-ggdb3 -DDEBUG -DPERF_TESTING -fno-omit-frame-pointer -fsanitize=address
 dbg: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
