@@ -368,8 +368,8 @@ auto Type::do_command() const noexcept -> exit_t {
   case HELP:
     unreachable();
   }
-  lua_close(state);
   builtins::mods.deinit();
+  lua_close(state);
   return res;
 }
 
