@@ -76,6 +76,22 @@
 #define expr_dbg(expr)
 #endif // DEBUG
 
+// NOTE: this is a fucking horrible way of going about this, but it's the only
+// way i can think of using c++ :)
+#ifdef DEBUG
+#define LM_CXPR
+#define LM_CXPR_DEF(...)
+#define LM_CXPR_DEF_IMPL(...) __VA_ARGS__
+
+#define LM_DBG(...) __VA_ARGS__
+#else
+#define LM_CXPR constexpr
+#define LM_CXPR_DEF(...) constexpr __VA_ARGS__
+#define LM_CXPR_DEF_IMPL(...)
+
+#define LM_DBG(...)
+#endif // DEBUG
+
 [[noreturn]] auto unreachable() noexcept -> void;
 
 static_assert(sizeof(unsigned char) == 1);
