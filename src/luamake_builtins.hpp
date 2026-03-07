@@ -118,15 +118,15 @@ struct Module final {
      * @throws DepTreeErr | std::bad_alloc
      */
     [[nodiscard]]
-    DepTree(size_t const num_files = 8) noexcept(false);
+    DepTree(size_t const num_files) noexcept(false);
+    ~DepTree() noexcept = default;
 
+    DepTree() noexcept = default;
     DepTree(DepTree const &) = delete;
     DepTree &operator=(DepTree const &) = delete;
 
     DepTree(DepTree &&) = default;
     DepTree &operator=(DepTree &&) = default;
-
-    ~DepTree() noexcept = default;
 
 #ifdef DEBUG
     // displays the function in a pseudo json format

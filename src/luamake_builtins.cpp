@@ -5,6 +5,7 @@
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
 #include <numeric>
+#include <ostream>
 
 extern "C" {
 #include "lauxlib.h"
@@ -84,11 +85,9 @@ namespace {
 using std::pair, std::array, std::string, std::string_view, std::vector,
     std::unordered_map, std::unordered_set;
 
-auto constexpr lua_typename(int const type) -> char const * {
-  if (type < 0 || LUA_NUMTYPES <= type) {
-    throw std::runtime_error("type is out of range to be a lua type");
-  }
-
+// see the lua docs about lua_type for information about how this function works
+// with that
+auto constexpr lua_typename(int const type) noexcept -> char const * {
   switch (type) {
   case LUA_TNIL:
     return "LUA_TNIL";
@@ -108,8 +107,9 @@ auto constexpr lua_typename(int const type) -> char const * {
     return "LUA_TUSERDATA";
   case LUA_TTHREAD:
     return "LUA_TTHREAD";
+  default:
+    return "LUA_NONE";
   }
-  unreachable();
 }
 
 auto skip_ws(char const *ch) -> char const * {
@@ -301,6 +301,135 @@ struct MisformattedOutput final : public ModuleErr {
                        message);
   }
 };
+
+static auto compiler_impl(lua_State *state,
+                          string_view const compiler_name) noexcept -> int {
+  // idk get better error messages
+  LUA_EXPECTED_ARGUMENTS(state, 1, compiler_name);
+  LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
+             "Expected type passed to compiler function to be a table");
+  auto const cc_config_idx = lua_absindex(state, -1);
+
+  auto const path_var = std::getenv("PATH");
+  if (path_var == nullptr) {
+    lua_pushstring(
+        state, "Envroinment variable PATH not found, you're on your own :)");
+    return lua_error(state);
+  }
+
+  auto compiler_path_fut =
+      std::async(std::launch::async, [path_var, compiler_name]() -> fs::path {
+#if defined(_WIN32)
+        auto constexpr path_sep = ';';
+#else
+        auto constexpr path_sep = ':';
+#endif
+
+        auto const *start = path_var;
+        auto const *end = start;
+
+        auto ec = std::error_code{};
+        while (true) {
+          while (*end != 0 && *end != path_sep) {
+            ++end;
+          }
+          switch (*end) {
+          case 0: {
+            if (fs::exists(fs::path(start, end) / compiler_name, ec)) {
+              return fs::path(start, end) / compiler_name;
+            } else {
+              // unable to find binary
+              return fs::path();
+            }
+          } break;
+          case path_sep: {
+            if (fs::exists(fs::path(start, end) / compiler_name, ec)) {
+              return fs::path(start, end) / compiler_name;
+            } else {
+              // binary is not is this directory
+              start = end + 1; // skip the part_sep
+              ++end;
+            }
+          } break;
+          default: {
+            return fs::path();
+          }
+          }
+        }
+      });
+
+  lua_createtable(state, 0, 1);
+  auto const ret_tbl_idx = lua_absindex(state, -1);
+
+  // opt_args tbl
+  lua_createtable(state, 0, 0);
+
+  lua_pushnil(state);
+  for (auto i = lua_Integer{1}; lua_next(state, cc_config_idx) != 0;) {
+    switch (lua_type(state, -2)) {
+    case LUA_TNUMBER:
+      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
+                 "Expected value type in Compiler Config to be either string "
+                 "or table");
+      // array values are just passed straight to the config
+      lua_seti(state, ret_tbl_idx, i++);
+      break;
+    case LUA_TSTRING: {
+      auto const field_name = lua_tolstring(state, -2, nullptr);
+      switch (lua_type(state, -1)) {
+      case LUA_TSTRING:
+        lua_pushfstring(state, "-%s=%s", field_name,
+                        lua_tolstring(state, -1, nullptr));
+        lua_seti(state, ret_tbl_idx, i++);
+        lua_pop(state, 1);
+        break;
+      case LUA_TTABLE: {
+        auto const tbl_len = static_cast<lua_Integer>(lua_rawlen(state, -1));
+        for (auto j = lua_Integer{1}; j <= tbl_len; ++j) {
+          auto const tbl_val_t = lua_geti(state, -1, j);
+          LUA_ASSERT(
+              state, tbl_val_t, LUA_TSTRING,
+              "Expected string in subarray passed to ha%or0\thcrah,.c&h^@cu");
+          lua_pushfstring(state, "-%s%s", field_name,
+                          lua_tolstring(state, -1, nullptr));
+          lua_seti(state, ret_tbl_idx, i++);
+          lua_pop(state, 1);
+        }
+        lua_pop(state, 1);
+      } break;
+      default:
+        lua_pushfstring(state,
+                        "Unexpected value type in table to %s function. "
+                        "Expected either string or table value.",
+                        compiler_name.data());
+        return lua_error(state);
+      }
+    } break;
+    default:
+      lua_pushstring(
+          state,
+          "While *yes* key's into a table can have any type, please refrain "
+          "from using anything other than a number (i.e. passing an array), "
+          "or "
+          "a string for a key+value pair item, or a combination of the two");
+      return lua_error(state);
+    }
+  }
+
+  lua_setfield(state, ret_tbl_idx, "opt_args");
+
+  auto const path_to_compiler = compiler_path_fut.get();
+  if (path_to_compiler == fs::path()) {
+    lua_pushfstring(state, "Unable to find %s binary", compiler_name.data());
+    return lua_error(state);
+  }
+
+  lua_pushstring(state, path_to_compiler.c_str());
+
+  lua_setfield(state, ret_tbl_idx, "compiler");
+
+  return 1;
+}
 } // namespace
 
 namespace builtins {
@@ -773,6 +902,9 @@ auto Module::deserialize(fs::path const &path)
     mod.type = mem.read_Module_t();
 
 #pragma region DepTree
+    // NOTE: i'm not sure if this is worth it, but if you initialize mod.tree =
+    // DepTree(number), then it causes a memory leak, not fully sure where, but
+    // we can just ignore it by not initializing it with anything
     mod.tree = DepTree();
     mod.tree.all_paths = mem.read_OwnedString();
     mod.tree.num_files = mem.read_size_t();
@@ -953,6 +1085,10 @@ static auto include_path_cache =
 // help speed things up. We could rework the thread pool to allow for arbitrary
 // functions to be run(?)
 auto Module::append_include_paths(string_view const compiler) -> void {
+  // TODO: see if we need to cache the whole compiler string, or if it's enough
+  // to just cache the path to the binary, i.e. if we can get away with just
+  // caching /usr/bin/clang, then we can use the cache more, and don't have to
+  // actually go into the function that much
   if (auto includes = include_path_cache.find(compiler);
       includes != include_path_cache.end()) {
     sys_includes = includes->second;
@@ -973,14 +1109,10 @@ auto Module::append_include_paths(string_view const compiler) -> void {
   case 0: { // in child proc
     // close reader
     close(read_pipe);
-    // TODO: calling into std::format here seems to be causing a memory leak
-    // i think b/c we call into execl, which replaces this exe with the called
-    // one that it results in a memory leak, so we have to find a better way of
-    // handling the child proc
     auto const command_string =
         std::format("{} -v -c -xc++ /dev/null -o {}/luamake_null.o",
-                    string_view{compiler.data(), compiler.find(' ')},
-                    fs::temp_directory_path().c_str());
+                    /*string_view{compiler.data(), compiler_command_end},*/
+                    compiler, fs::temp_directory_path().c_str());
 
     dup2(write_pipe, STDERR_FILENO);
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
@@ -993,6 +1125,7 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     // there's probably a better way of doing this, but this is the most
     // straightforward way i can think of
     close(write_pipe);
+
     auto includes = vector<fs::path>();
     includes.reserve(10);
     auto constexpr buffer_size = sizeof(char) * size_t{2 << 8};
@@ -1010,11 +1143,19 @@ auto Module::append_include_paths(string_view const compiler) -> void {
       search_string.append(buffer, static_cast<size_t>(amount_read));
       amount_read = read(read_pipe, buffer, buffer_size);
     }
-    free(buffer);
-    close(read_pipe);
 
-    if (amount_read < 0)
-      throw CAPI(strerror(errno));
+    free(buffer);
+
+    if (amount_read < 0) {
+      auto const err = errno;
+      // this can change errno, so to get the error we're interested in we have
+      // to do this :)
+      // we might want to also check if this errors, but i'll leave that for
+      // someone else to do
+      close(read_pipe);
+      throw CAPI(strerror(err));
+    }
+    close(read_pipe);
 
     // reached EOF
 
@@ -1082,10 +1223,6 @@ auto Module::append_predefined_macros(string_view const compiler)
   case 0: { // in child proc
     // close reader
     close(read_pipe);
-    // TODO: calling into std::format here seems to be causing a memory leak
-    // i think b/c we call into execl, which replaces this exe with the called
-    // one that it results in a memory leak, so we have to find a better way of
-    // handling the child proc
     auto const command_string = std::format(
         "echo | {} -dM -E -", string_view{compiler.data(), compiler.find(' ')});
 
@@ -1192,7 +1329,7 @@ auto Module::append_predefined_macros(string_view const compiler)
 // work with, see [[https://www.lua.org/manual/5.4/manual.html]] section 4 for
 // more info
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
-    : type(type), tree(), roots(), headers(), includes(), sys_includes(),
+    : type(type), tree(8), roots(), headers(), includes(), sys_includes(),
       linking(), interpreter({}, {}), compiler(), name(), install_dir() {
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING:
@@ -1406,6 +1543,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
   res.get();
+  expr_dbg(&tree);
 }
 
 auto Module::gen_dep_tree() -> void {
@@ -1970,8 +2108,6 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
                           return std::format("{} {}", e, next.string());
                         });
 
-    expr_dbg(formatted_files);
-
     auto const copy_headers = std::format(
         "cp --target-directory={} {}",
         (parent_path / static_mod.install_dir / static_mod.name).string(),
@@ -2114,6 +2250,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
 
 // TODO: switch this to use userdata, which should make things faster to process
 // TODO: double check that this function isn't doing redundant type checks
+// TODO: change this function to use the compiler_impl function
 auto Builder::clang(lua_State *state) noexcept -> int {
   auto const num_args = lua_gettop(state);
   if (num_args != 1) {
@@ -2260,237 +2397,29 @@ auto Builder::clang(lua_State *state) noexcept -> int {
 }
 
 auto Builder::gcc_bare(lua_State *state) noexcept -> int {
-  auto const num_args = lua_gettop(state);
-  if (num_args != 1) {
-    lua_pushstring(state, "Expected one argument to the gcc_bare function");
+  try {
+    return compiler_impl(state, "gcc");
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state,
+                   "An unknown exception was throw in the gcc_bare function");
     return lua_error(state);
   }
-  auto constexpr compiler_field = string_view{"gcc"};
-
-  // check that the input argument is the right type
-  LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
-             "Expected type passed into gcc function to be a table");
-
-  auto const arg_idx = lua_absindex(state, -1);
-
-  auto const path_var = std::getenv("PATH");
-  if (path_var == nullptr) {
-    lua_pushstring(state, "Envroinment variable PATH not found, you're on your "
-                          "own with this one :)");
-    return lua_error(state);
-  }
-
-  // this seems slow, should benchmark it to see if it's causing the massive
-  // slow down i'm noticing
-  auto compiler_path_fut =
-      std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
-#if defined(_WIN32)
-        auto constexpr path_sep = ';';
-#else
-        auto constexpr path_sep = ':';
-#endif
-
-        auto const *start = path_var;
-        auto const *end = start;
-
-        auto ec = std::error_code{};
-        while (true) {
-          while (*end != 0 && *end != path_sep) {
-            ++end;
-          }
-          switch (*end) {
-          case 0: {
-            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
-              return fs::path(start, end) / compiler_field;
-            } else {
-              // unable to find binary
-              return fs::path();
-            }
-          } break;
-          case path_sep: {
-            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
-              return fs::path(start, end) / compiler_field;
-            } else {
-              // binary is not is this directory
-              start = end + 1; // skip the part_sep
-              ++end;
-            }
-          } break;
-          default: {
-            return fs::path();
-          }
-          }
-        }
-      });
-
-  lua_createtable(state, 0, 1); // tbl
-  auto const ret_tbl_idx = lua_absindex(state, -1);
-
-  lua_createtable(state, 0, 0);
-
-  lua_pushnil(state);
-  for (auto i = lua_Integer{1}; lua_next(state, arg_idx) != 0; ++i) {
-    switch (lua_type(state, -2)) {
-    case LUA_TNUMBER: {
-      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
-                 "Expected value type to be a string, found something else in "
-                 "the gcc argument");
-      lua_seti(state, -3,
-               i); // treat the value as just being passed to the function
-    } break;
-    case LUA_TSTRING: {
-      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
-                 "Expected value type to be a string, found something else in "
-                 "the gcc argument");
-      // combine both the key and value into the argument
-      lua_pushfstring(state, "-%s=%s", lua_tolstring(state, -2, nullptr),
-                      lua_tolstring(state, -1, nullptr));
-      lua_seti(state, -4, i);
-      lua_pop(state, 1); // pop the value from the stack
-    } break;
-    default:
-      lua_pushstring(
-          state,
-          "While *yes* key's into a table can have any type, please refrain "
-          "from using anything other than a number (i.e. passing an array), "
-          "or "
-          "a string for a key+value pair item, or a combination of the two");
-      return lua_error(state);
-    }
-  }
-
-  lua_setfield(state, ret_tbl_idx, "opt_args");
-
-  // wait until the very end to let the async function run the longest, idk if
-  // this is a good thing i'm bad with async stuff
-  auto const path_to_compiler = compiler_path_fut.get();
-  if (path_to_compiler == fs::path()) {
-    lua_pushstring(state, "Unable to find gcc binary.");
-    return lua_error(state);
-  }
-  lua_pushstring(state, path_to_compiler.c_str());
-  // lua_pushstring(state, compiler_field.data());
-  lua_setfield(state, ret_tbl_idx, "compiler");
-
-  return 1;
 }
 
 auto Builder::clang_bare(lua_State *state) noexcept -> int {
-  auto const num_args = lua_gettop(state);
-  if (num_args != 1) {
-    lua_pushstring(state, "Expected one argument to the clang_bare function");
+  try {
+    return compiler_impl(state, "clang");
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state,
+                   "An unknown exception was throw in the clang_bare function");
     return lua_error(state);
   }
-  auto constexpr compiler_field = string_view{"clang"};
-
-  // check that the input argument is the right type
-  LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
-             "Expected type passed into clang function to be a table");
-
-  auto const arg_idx = lua_absindex(state, -1);
-
-  auto const path_var = std::getenv("PATH");
-  if (path_var == nullptr) {
-    lua_pushstring(state, "Envroinment variable PATH not found, you're on your "
-                          "own with this one :)");
-    return lua_error(state);
-  }
-
-  // this seems slow, should benchmark it to see if it's causing the massive
-  // slow down i'm noticing
-  // TODO: extract this function into its own thing because it's used in quite a
-  // few places
-  auto compiler_path_fut =
-      std::async(std::launch::async, [path_var, compiler_field]() -> fs::path {
-#if defined(_WIN32)
-        auto constexpr path_sep = ';';
-#else
-        auto constexpr path_sep = ':';
-#endif
-
-        auto const *start = path_var;
-        auto const *end = start;
-
-        auto ec = std::error_code{};
-        while (true) {
-          while (*end != 0 && *end != path_sep) {
-            ++end;
-          }
-          switch (*end) {
-          case 0: {
-            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
-              return fs::path(start, end) / compiler_field;
-            } else {
-              // unable to find binary
-              return fs::path();
-            }
-          } break;
-          case path_sep: {
-            if (fs::exists(fs::path(start, end) / compiler_field, ec)) {
-              return fs::path(start, end) / compiler_field;
-            } else {
-              // binary is not is this directory
-              start = end + 1; // skip the part_sep
-              ++end;
-            }
-          } break;
-          default: {
-            return fs::path();
-          }
-          }
-        }
-      });
-
-  lua_createtable(state, 0, 1); // tbl
-  auto const ret_tbl_idx = lua_absindex(state, -1);
-
-  lua_createtable(state, 0, 0);
-
-  lua_pushnil(state);
-  for (auto i = lua_Integer{1}; lua_next(state, arg_idx) != 0; ++i) {
-    switch (lua_type(state, -2)) {
-    case LUA_TNUMBER: {
-      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
-                 "Expected value type to be a string, found something else in "
-                 "the clang argument");
-      lua_seti(state, -3,
-               i); // treat the value as just being passed to the function
-    } break;
-    case LUA_TSTRING: {
-      LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
-                 "Expected value type to be a string, found something else in "
-                 "the clang argument");
-      // combine both the key and value into the argument
-      lua_pushfstring(state, "-%s=%s", lua_tolstring(state, -2, nullptr),
-                      lua_tolstring(state, -1, nullptr));
-      lua_seti(state, -4, i);
-      lua_pop(state, 1); // pop the value from the stack
-    } break;
-    default:
-      lua_pushstring(
-          state,
-          "While *yes* key's into a table can have any type, please refrain "
-          "from using anything other than a number (i.e. passing an array), "
-          "or "
-          "a string for a key+value pair item, or a combination of the two");
-      return lua_error(state);
-    }
-  }
-
-  lua_setfield(state, ret_tbl_idx, "opt_args");
-
-  // wait until the very end to let the async function run the longest, idk if
-  // this is a good thing i'm bad with async stuff
-  auto const path_to_compiler = compiler_path_fut.get();
-  if (path_to_compiler == fs::path()) {
-    lua_pushstring(state, "Unable to find clang binary.");
-    return lua_error(state);
-  }
-  lua_pushstring(state, path_to_compiler.c_str());
-  // lua_pushstring(state, compiler_field.data());
-  lua_setfield(state, ret_tbl_idx, "compiler");
-
-  return 1;
 }
 
 auto Builder::require(lua_State *state) noexcept -> int {
