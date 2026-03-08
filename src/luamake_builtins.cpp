@@ -363,6 +363,7 @@ static auto compiler_impl(lua_State *state,
 
   // opt_args tbl
   lua_createtable(state, 0, 0);
+  auto const opt_args = lua_absindex(state, -1);
 
   lua_pushnil(state);
   for (auto i = lua_Integer{1}; lua_next(state, cc_config_idx) != 0;) {
@@ -372,7 +373,7 @@ static auto compiler_impl(lua_State *state,
                  "Expected value type in Compiler Config to be either string "
                  "or table");
       // array values are just passed straight to the config
-      lua_seti(state, ret_tbl_idx, i++);
+      lua_seti(state, opt_args, i++);
       break;
     case LUA_TSTRING: {
       auto const field_name = lua_tolstring(state, -2, nullptr);
@@ -380,7 +381,7 @@ static auto compiler_impl(lua_State *state,
       case LUA_TSTRING:
         lua_pushfstring(state, "-%s=%s", field_name,
                         lua_tolstring(state, -1, nullptr));
-        lua_seti(state, ret_tbl_idx, i++);
+        lua_seti(state, opt_args, i++);
         lua_pop(state, 1);
         break;
       case LUA_TTABLE: {
@@ -392,7 +393,7 @@ static auto compiler_impl(lua_State *state,
               "Expected string in subarray passed to ha%or0\thcrah,.c&h^@cu");
           lua_pushfstring(state, "-%s%s", field_name,
                           lua_tolstring(state, -1, nullptr));
-          lua_seti(state, ret_tbl_idx, i++);
+          lua_seti(state, opt_args, i++);
           lua_pop(state, 1);
         }
         lua_pop(state, 1);
@@ -1543,7 +1544,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
   res.get();
-  expr_dbg(&tree);
 }
 
 auto Module::gen_dep_tree() -> void {
@@ -1661,6 +1661,7 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
   }
 
   lua_pop(state, 4);
+  expr_dbg(str);
   return str;
 }
 
