@@ -435,6 +435,8 @@ static auto compiler_impl(lua_State *state,
 
 namespace builtins {
 LakeModules mods = LakeModules();
+CLOptions cl_options = CLOptions{};
+
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
   files = std::make_unique<StringViews[]>(num_files);
@@ -1721,6 +1723,11 @@ auto CompilationPool::busy() noexcept -> bool {
 
 auto CompilationPool::_thread_loop() noexcept -> void {
   try {
+    if (cl_options.verbose) {
+      std::cout << "Displaying things as being verbose" << std::endl;
+    } else {
+      std::cout << "Displaying things as NOT being verbose" << std::endl;
+    }
     while (true) {
       auto guard = std::unique_lock(task_mtx);
 

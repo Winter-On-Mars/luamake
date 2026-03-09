@@ -364,6 +364,11 @@ private:
   std::unique_ptr<Module[]> mods;
 };
 extern LakeModules mods;
+
+struct CLOptions final {
+  bool verbose;
+};
+extern CLOptions cl_options;
 } // namespace builtins
 } // namespace luamake
 
