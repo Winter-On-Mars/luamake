@@ -773,16 +773,13 @@ auto Module::deserialize(fs::path const &path)
   if (!file) {
     return std::format("unable to open serialization file [{}]", path.c_str());
   }
-  std::cout << "deserializing file " << path.string();
+  std::cout << "deserializing file [" << path.string() << "]\n";
   struct Deserializer final {
     constexpr Deserializer(File &file) noexcept
         : buf(nullptr), cur(0), size(0) {
       auto &&[fsize, fcontent] = file.dump_content();
       size = fsize;
       buf = std::move(fcontent);
-#ifdef DEBUG
-      std::cout << "with [" << fsize << "] bytes\n";
-#endif // DEBUG
     }
 
     auto check(size_t const amount, std::string_view const name) -> void {
@@ -1663,7 +1660,6 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
   }
 
   lua_pop(state, 4);
-  expr_dbg(str);
   return str;
 }
 

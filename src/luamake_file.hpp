@@ -66,17 +66,20 @@ struct File final {
 #endif
 #ifdef DEBUG
 #ifdef __unix__
-    std::cerr << "Opening [" << path << "] with options ["
-              << [](int perms) -> std::string {
-      auto res = std::string();
-      if (bitset(READ))
-        res += "r";
-      if (bitset(WRITE))
-        res += "w";
-      if (bitset(CREATE))
-        res += "c";
-      return res;
-    }(unix_perms) << "]\n";
+    char max_length_perms[] = {0, 0, 0, 0};
+    if (bitset(READ)) {
+      max_length_perms[0] = 'r';
+    }
+    if (bitset(WRITE)) {
+      max_length_perms[max_length_perms[0] != 0 ? 1 : 0] = 'w';
+    }
+    if (bitset(CREATE)) {
+      max_length_perms[max_length_perms[0] != 0
+                           ? max_length_perms[1] != 0 ? 2 : 1
+                           : 0] = 'c';
+    }
+    std::cerr << "Opening [" << path << "] with options [" << max_length_perms
+              << "]\n";
 #else
     std::cerr << "Opening [" << path << "] with options [" << max_length_perms
               << "]\n";
