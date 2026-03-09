@@ -14,7 +14,7 @@ all: $(files) $(lua_a)
 
 # it seems like directly using fork is causing issues with fsanitize=address(?), if somebody is able to debug the issue and make a change that would be nice
 # that or there is still a memory leak and i'm lying to myself, idk valgrind seems to just vomit whenever i run it, i assume partially because lua has a gc in it, valgrind reports that a lot of things in the lua vm are potentially lost
-dbg: cc_flags+=-ggdb3 -DDEBUG -DPERF_TESTING -fno-omit-frame-pointer
+dbg: cc_flags+=-ggdb3 -DDEBUG -fno-omit-frame-pointer #-DPERF_TESTING
 dbg: $(files) $(lua_a)
 	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
 
