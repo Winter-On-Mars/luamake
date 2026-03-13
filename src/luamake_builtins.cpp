@@ -162,9 +162,6 @@ auto display_string_view(string_view const str) noexcept -> void {
 }
 #endif
 
-struct Compiler;
-struct CompilationPool;
-
 // TODO: collapse all of these to just inherit from std::exception
 struct ModuleErr {
   constexpr ModuleErr(string &&message) noexcept : message(message) {}
@@ -436,6 +433,7 @@ static auto compiler_impl(lua_State *state,
 namespace builtins {
 LakeModules mods = LakeModules();
 CLOptions cl_options = CLOptions{};
+CompilationPool threads = CompilationPool();
 
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
@@ -1677,6 +1675,10 @@ CompilationPool::~CompilationPool() noexcept {
       thread.join();
   }
 }
+
+auto CompilationPool::init(size_t num_threads) noexcept -> void {}
+
+auto CompilationPool::deinit() noexcept -> void {}
 
 auto CompilationPool::init(Module const *const mod) noexcept -> void {
   this->mod = mod;

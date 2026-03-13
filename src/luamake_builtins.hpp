@@ -267,9 +267,14 @@ struct Module final {
 // TODO: rewrite the system so that this can run in the background while we
 // build the dep tree for other modules, and just queue jobs into this as needed
 struct CompilationPool final {
+  CompilationPool() = default;
+
   CompilationPool(size_t num_threads) noexcept;
 
   ~CompilationPool() noexcept;
+
+  auto init(size_t num_threads) noexcept -> void;
+  auto deinit() noexcept -> void;
 
   auto init(Module const *const mod) noexcept -> void;
 
@@ -280,7 +285,6 @@ private:
   auto get() -> std::string;
   auto constexpr done() const noexcept -> bool { return mod == nullptr; }
 
-  CompilationPool() = delete;
   CompilationPool(CompilationPool &&) = delete;
   CompilationPool &operator=(CompilationPool &&) = delete;
   CompilationPool(CompilationPool const &) = delete;
@@ -299,6 +303,7 @@ private:
 
   friend Compiler;
 };
+extern CompilationPool threads;
 
 // TODO: just turn this into a function ig
 struct Compiler final {
