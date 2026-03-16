@@ -1661,10 +1661,6 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
   return str;
 }
 
-CompilationPool::CompilationPool(size_t num_threads) noexcept {
-  workers.reserve(num_threads);
-}
-
 CompilationPool::~CompilationPool() noexcept {
   {
     auto lock = std::unique_lock(task_mtx);
@@ -1676,9 +1672,20 @@ CompilationPool::~CompilationPool() noexcept {
   }
 }
 
-auto CompilationPool::init(size_t num_threads) noexcept -> void {}
+auto CompilationPool::init(size_t num_threads) noexcept -> void {
+  workers.reserve(num_threads);
+}
 
-auto CompilationPool::deinit() noexcept -> void {}
+auto CompilationPool::deinit() noexcept -> void {
+  {
+    auto lock = std::unique_lock(task_mtx);
+    mod = nullptr;
+  }
+  for (auto &thread : workers) {
+    if (thread.joinable()) // ?
+      thread.join();
+  }
+}
 
 auto CompilationPool::init(Module const *const mod) noexcept -> void {
   this->mod = mod;

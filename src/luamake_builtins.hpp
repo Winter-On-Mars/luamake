@@ -269,7 +269,8 @@ struct Module final {
 struct CompilationPool final {
   CompilationPool() = default;
 
-  CompilationPool(size_t num_threads) noexcept;
+  // init the thread pool
+  CompilationPool(size_t num_threads) noexcept = delete;
 
   ~CompilationPool() noexcept;
 
