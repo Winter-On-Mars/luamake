@@ -8,7 +8,6 @@
 #include <filesystem>
 #include <memory>
 #include <ostream>
-#include <thread>
 #include <variant>
 #include <vector>
 
@@ -19,6 +18,9 @@ extern "C" {
 static_assert(LUA_VERSION_NUM == 504);
 
 namespace luamake {
+// defined in luamake_thread_pool
+struct CompilationPool;
+
 namespace builtins {
 auto dump(lua_State *) noexcept -> int;
 
@@ -58,9 +60,6 @@ class Runner final {
   static auto run(lua_State *) noexcept -> int;
   friend auto make_runner_obj(lua_State *) noexcept -> void;
 };
-
-struct CompilationPool;
-struct Compiler;
 
 // TODO: add exported header field, and probably refactor this to be a tagged
 // union to discriminate between exe and library type modules
@@ -199,7 +198,6 @@ struct Module final {
                       unsigned int const idx) const noexcept -> void;
 #endif // DEBUG
 
-    friend Compiler;
     friend CompilationPool;
     friend Module;
     friend Builder;
@@ -257,59 +255,7 @@ struct Module final {
   static auto parse_compiler_table(lua_State *state) -> std::string;
 
   friend CompilationPool;
-  friend Compiler;
   friend Builder;
-};
-
-// sort of a thread pool like structure that is just for compiling
-// TODO: update this to take advantage of the current layout for DepTree
-// i.e. relying on DepTree.types to determine what to compile
-// TODO: rewrite the system so that this can run in the background while we
-// build the dep tree for other modules, and just queue jobs into this as needed
-struct CompilationPool final {
-  CompilationPool() = default;
-
-  // init the thread pool
-  CompilationPool(size_t num_threads) noexcept = delete;
-
-  ~CompilationPool() noexcept;
-
-  auto init(size_t num_threads) noexcept -> void;
-  auto deinit() noexcept -> void;
-
-  auto init(Module const *const mod) noexcept -> void;
-
-private:
-  auto add_task(Module::DepTree const &) -> void;
-  auto run() -> void;
-  auto busy() noexcept -> bool;
-  auto get() -> std::string;
-  auto constexpr done() const noexcept -> bool { return mod == nullptr; }
-
-  CompilationPool(CompilationPool &&) = delete;
-  CompilationPool &operator=(CompilationPool &&) = delete;
-  CompilationPool(CompilationPool const &) = delete;
-  CompilationPool &operator=(CompilationPool const &) = delete;
-
-  auto _thread_loop() noexcept -> void;
-
-  std::vector<std::thread> workers;
-  std::vector<std::filesystem::path> remaining_tasks;
-  std::mutex task_mtx;
-
-  std::string result = std::string();
-  std::mutex result_mtx;
-
-  Module const *mod = nullptr;
-
-  friend Compiler;
-};
-extern CompilationPool threads;
-
-// TODO: just turn this into a function ig
-struct Compiler final {
-  [[nodiscard]]
-  static auto compile(Module const &mod) noexcept -> std::string;
 };
 
 // TODO: add an explicit init and deinit function to this so that we can have

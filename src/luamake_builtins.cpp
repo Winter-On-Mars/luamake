@@ -4,8 +4,7 @@
 #include "luamake_file.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
-#include <numeric>
-#include <ostream>
+#include "luamake_thread_pool.hpp"
 
 extern "C" {
 #include "lauxlib.h"
@@ -26,12 +25,13 @@ extern "C" {
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -433,7 +433,6 @@ static auto compiler_impl(lua_State *state,
 namespace builtins {
 LakeModules mods = LakeModules();
 CLOptions cl_options = CLOptions{};
-CompilationPool threads = CompilationPool();
 
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
@@ -1661,151 +1660,6 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
   return str;
 }
 
-CompilationPool::~CompilationPool() noexcept {
-  {
-    auto lock = std::unique_lock(task_mtx);
-    mod = nullptr;
-  }
-  for (auto &thread : workers) {
-    if (thread.joinable()) // ?
-      thread.join();
-  }
-}
-
-auto CompilationPool::init(size_t num_threads) noexcept -> void {
-  workers.reserve(num_threads);
-}
-
-auto CompilationPool::deinit() noexcept -> void {
-  {
-    auto lock = std::unique_lock(task_mtx);
-    mod = nullptr;
-  }
-  for (auto &thread : workers) {
-    if (thread.joinable()) // ?
-      thread.join();
-  }
-}
-
-auto CompilationPool::init(Module const *const mod) noexcept -> void {
-  this->mod = mod;
-}
-
-auto CompilationPool::run() -> void {
-  for (auto i = size_t{0}; i < workers.capacity(); ++i) {
-    workers.emplace_back([this]() { _thread_loop(); });
-  }
-  for (auto &worker : workers) {
-    worker.join();
-  }
-}
-
-auto CompilationPool::add_task(Module::DepTree const &sf) -> void {
-  auto lock = std::unique_lock(task_mtx);
-  // this is a really hacky solution to fix the issues of compiling the same
-  // source multiple times, this is probably where that hash set solution
-  // would probably make things faster :)
-  auto lowest = len_t{0};
-  remaining_tasks.reserve(sf.num_files);
-  for (auto i = size_t{}; i < sf.num_files; ++i) {
-    if (sf.types[i] == Module::DepTree::SourceFile_t::IMPL &&
-        sf.files[i].start >= lowest) {
-      remaining_tasks.push_back(sf.get_path(i));
-      lowest = sf.files[i].start + 1;
-    }
-  }
-}
-
-auto CompilationPool::busy() noexcept -> bool {
-  // std::this_thread::sleep_for(std::chrono::nanoseconds(100));
-  auto pool_busy = true;
-  {
-    auto lock = std::unique_lock(task_mtx);
-    pool_busy = !remaining_tasks.empty();
-  }
-  return pool_busy;
-}
-
-auto CompilationPool::_thread_loop() noexcept -> void {
-  try {
-    if (cl_options.verbose) {
-      std::cout << "Displaying things as being verbose" << std::endl;
-    } else {
-      std::cout << "Displaying things as NOT being verbose" << std::endl;
-    }
-    while (true) {
-      auto guard = std::unique_lock(task_mtx);
-
-      if (done() || remaining_tasks.empty())
-        return;
-
-      auto this_path = remaining_tasks.back();
-      remaining_tasks.pop_back();
-      guard.unlock();
-
-      // TODO: see if we can remove this, i think we're only pushing back the
-      // IMPL files anyways so there's no need to check this here
-      if (Module::DepTree::determine_file_type(this_path.extension()) ==
-          Module::DepTree::SourceFile_t::HEADER) {
-        continue;
-      }
-
-      auto const include_path = mod->format_includes();
-
-      auto const invoked_command =
-          std::format("{} {} -c {} -o {}/{}.o/{}.o", mod->compiler,
-                      include_path, this_path.c_str(), mod->install_dir,
-                      mod->name, this_path.stem().c_str());
-      std::cout << "[" << invoked_command << "]\n";
-      std::cout.flush();
-
-      auto const res = OS_CALL(invoked_command.c_str());
-      if (res == 0) {
-        auto res_lock = std::unique_lock(result_mtx);
-        result += std::format("{}/{}.o/{}.o ", mod->install_dir, mod->name,
-                              this_path.stem().c_str());
-      }
-    }
-  } catch (std::exception const &e) {
-    std::cerr << "caught exception [" << e.what()
-              << "] in _thread_loop on thread [" << std::this_thread::get_id()
-              << "]";
-    return;
-  }
-}
-
-auto CompilationPool::get() -> string {
-  while (busy()) {
-    /* wait */
-  }
-
-  // idk if this is needed?
-  for (auto &worker : workers) {
-    if (worker.joinable())
-      worker.join();
-  }
-
-  auto lock = std::unique_lock(result_mtx);
-
-  return result;
-}
-
-[[nodiscard]]
-auto Compiler::compile(Module const &mod) noexcept -> string {
-  auto res = string();
-  auto pool = CompilationPool(std::thread::hardware_concurrency() - 1);
-  // pass this value to the _thread_loop function so we don't have to call
-  // it in each thread (plus we can make it a string_view so it shouldn't
-  // have to worry too much about memory allocations) auto includes =
-  // mod.includes();
-
-  pool.init(&mod);
-  pool.add_task(mod.tree);
-  pool.run();
-  res = pool.get();
-  return res;
-}
-
 auto Builder::new_exe(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 2, new_exe);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
@@ -1995,22 +1849,40 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
       unreachable();
     }
 
-    auto const actually_compiled_files = builtins::Compiler::compile(exe_mod);
+    // this still means that we have to wait for these to finish before we can
+    // continue on, i.e. we have to hang, the issue then can probably be solved
+    // by moving these into static memory, along side the modules vector
+    struct {
+      std::mutex str_mtx;
+      std::string actually_compiled_files;
+    } res;
+    threads.add_dep_tree_tasks(exe_mod.tree);
 
-    auto const invoked_command = std::format(
-        "{} -o {}/{} {} {}", exe_mod.compiler, exe_mod.install_dir,
-        exe_mod.name, actually_compiled_files, exe_mod.format_links());
-
-    std::cout << "[" << invoked_command << "]\n";
-    std::cout.flush();
-
-    if (OS_CALL(invoked_command.c_str()) != 0) {
-      lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
-      return lua_error(state);
-    } else {
-      exe_mod.serialize(cache_path);
-      return 0;
-    }
+    // this takes a lot of parameters by ref, idk if that's something that we
+    // should be doing
+    // there *might* be some issues taking exe_mod, by ref, it will point to
+    // something in static memory, but there might be some issues with it
+    threads.add_task([&exe_mod, &res, &state, cache_path]() {
+      auto const invoked_command = std::format(
+          "{} -o {}/{} {} {}", exe_mod.compiler, exe_mod.install_dir,
+          exe_mod.name, res.actually_compiled_files, exe_mod.format_links());
+      std::cout << '[' << invoked_command << "]\n";
+      std::cout.flush();
+      // NOTE: figure out how to handle errors with the lua vm, if there's
+      // internal mutex's that will stop conflicting and corrupting the stack,
+      // or if we have to worry about a mutex around the lua vm ourselves
+      // we might have to move some of the error handling into the global scope,
+      // that way we can access it across threads and communicate with it
+      // through the lua vm
+      if (OS_CALL(invoked_command.c_str()) != 0) {
+        lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
+        return lua_error(state);
+      } else {
+        exe_mod.serialize(cache_path);
+        return 0;
+      }
+    });
+    return 0;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
@@ -2037,6 +1909,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
+#if 0
     auto const mod_idx = lua_tointeger(state, -1);
     lua_pop(state, 1);
 
@@ -2138,6 +2011,11 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     // install_exe for more details about improvements
     static_mod.serialize(cache_path);
     return 0;
+#endif
+    lua_pushstring(
+        state,
+        "install_static function is not currently working :), will fix later");
+    return lua_error(state);
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
