@@ -6,7 +6,7 @@ includes:=lua
 
 .PHONY: all, dbg, ncolor, release, clean_submod, perf_testing, perf_testing_release
 
-files:=build/common.o build/luamake_strings.o build/luamake_pre_ir.o build/luamake_file.o build/luamake_builtins.o build/luamake_string_manip.o build/main.o
+files:=build/common.o build/luamake_strings.o build/luamake_pre_ir.o build/luamake_file.o build/luamake_builtins.o build/luamake_string_manip.o build/luamake_thread_pool.o build/main.o
 lua_a:=lua/liblua.a
 
 all: $(files) $(lua_a)
