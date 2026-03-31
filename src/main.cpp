@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include "luamake_builtins.hpp"
 #include "luamake_file.hpp"
+#include "luamake_thread_pool.hpp"
 
 #include <array>
 #include <cctype>
@@ -10,6 +11,7 @@
 #include <format>
 #include <numeric>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 
 #ifdef __unix__
@@ -334,7 +336,7 @@ auto Type::do_command() const noexcept -> exit_t {
   builtins::mods.init();
   // this can arguably be moved into just the build function, because that's the
   // only one that really needs a thread pool, but for now we'll do it here
-  builtins::threads.init(std::thread::hardware_concurrency() - 1);
+  threads.init(std::thread::hardware_concurrency() - 1);
   switch (type_t) {
   case BUILD:
     res = build(state);
@@ -360,7 +362,7 @@ auto Type::do_command() const noexcept -> exit_t {
   case HELP:
     unreachable();
   }
-  builtins::threads.deinit();
+  threads.deinit();
   builtins::mods.deinit();
   lua_close(state);
   return res;
