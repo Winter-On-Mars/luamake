@@ -21,10 +21,18 @@ auto CompilationPool::init(size_t num_threads) noexcept -> void {
 }
 
 auto CompilationPool::deinit() noexcept -> void {
+  // idk if this is actually what we want to do, we should probably make sure
+  // there's no tasks left in the queue
+  {
+    auto lock = std::unique_lock(task_mtx);
+    should_terminate = true;
+  }
+  waiting.notify_all();
   for (auto &thread : workers) {
     if (thread.joinable()) // ?
       thread.join();
   }
+  workers.clear();
 }
 
 // TODO: update this function to just take a control of the mutex, then push
@@ -55,7 +63,7 @@ auto CompilationPool::add_dep_tree_tasks(
       // idk i tried using std::cout, but there was an error :)
       fprintf(stdout, "[%s]\n", invoked_command.c_str());
       if (OS_CALL(invoked_command.c_str()) == 0) {
-        builtins::mods.add_compiled_file(mod_idx, path.string());
+        builtins::mods.add_compiled_file(mod_idx, path.stem().string());
       } else {
         builtins::mods.set_state_at(mod_idx,
                                     builtins::LakeModules::ModState::error);
@@ -67,7 +75,7 @@ auto CompilationPool::add_dep_tree_tasks(
 auto CompilationPool::add_task(std::function<void()> &&func) noexcept -> void {
   {
     auto lock = std::unique_lock(task_mtx);
-    tasks.emplace_back(std::move(func));
+    tasks.push(std::move(func));
   }
   waiting.notify_one();
 }
@@ -80,5 +88,21 @@ auto CompilationPool::busy() noexcept -> bool {
     pool_busy = !tasks.empty();
   }
   return pool_busy;
+}
+
+auto CompilationPool::_loop() noexcept -> void {
+  while (true) {
+    auto job = std::function<void()>();
+    {
+      auto lock = std::unique_lock(task_mtx);
+      waiting.wait(lock, [this] { return !tasks.empty() || should_terminate; });
+      if (should_terminate) {
+        return;
+      }
+      job = tasks.front();
+      tasks.pop();
+    }
+    job();
+  }
 }
 } // namespace luamake

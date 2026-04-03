@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
+#include <queue>
 #include <thread>
 #include <vector>
 
@@ -37,15 +38,20 @@ struct CompilationPool final {
 private:
   auto busy() noexcept -> bool;
 
+  auto _loop() noexcept -> void;
+
   CompilationPool(CompilationPool &&) = delete;
   CompilationPool &operator=(CompilationPool &&) = delete;
   CompilationPool(CompilationPool const &) = delete;
   CompilationPool &operator=(CompilationPool const &) = delete;
 
   std::vector<std::thread> workers;
-  std::vector<std::function<void()>> tasks;
+  // if the queue becomes too slow, figure out how to switch to the vector
+  // std::vector<std::function<void()>> tasks;
+  std::queue<std::function<void()>> tasks;
   std::condition_variable waiting;
   std::mutex task_mtx;
+  bool should_terminate = false;
 };
 extern CompilationPool threads;
 } // namespace luamake
