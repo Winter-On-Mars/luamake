@@ -6,6 +6,7 @@
 #include "luamake_strings.hpp"
 
 #include <filesystem>
+#include <iterator>
 #include <memory>
 #include <ostream>
 #include <string>
@@ -284,6 +285,8 @@ struct LakeModules final {
   auto set_state_at(lua_Integer const, ModState) noexcept -> void;
 
   auto add_compiled_file(lua_Integer const, std::string &&) noexcept -> void;
+
+  auto get_all_compiled_files(lua_Integer const) noexcept -> std::string;
 
   // returns -1 on failure
   auto contains(std::filesystem::path const &) const noexcept -> int;
