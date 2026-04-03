@@ -265,7 +265,12 @@ struct Module final {
 // TODO: add an explicit init and deinit function to this so that we can have
 // better control over the lifetime of this object
 struct LakeModules final {
-  enum class ModState { uninitialized, compiled, error };
+  enum class ModState {
+    uninitialized,
+    compiled,
+    ready_for_final_compile,
+    error
+  };
 
   LakeModules() noexcept;
 
@@ -281,7 +286,7 @@ struct LakeModules final {
                            std::filesystem::path const &) -> void;
   auto module_at(lua_Integer const) noexcept -> Module &;
 
-  auto state_at(lua_Integer const) noexcept -> ModState;
+  auto state_at(lua_Integer const) const noexcept -> ModState;
   auto set_state_at(lua_Integer const, ModState) noexcept -> void;
 
   auto add_compiled_file(lua_Integer const, std::string &&) noexcept -> void;
@@ -328,9 +333,16 @@ private:
   size_t size;
   std::unique_ptr<ModState[]> states;
   std::unique_ptr<std::mutex[]> mtxs;
+  std::unique_ptr<std::atomic<size_t>[]> remaining_files;
   std::unique_ptr<std::vector<std::string>[]> compiled_files;
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
+  // TODO: have to probably make this a std::unique_ptr<std::vector<Module>[]>
+  // so that we can support having a single luamake file build multiple modules
+  // without things breaking like they were because the module was being
+  // overridden
   std::unique_ptr<Module[]> mods;
+
+  friend CompilationPool;
 };
 extern LakeModules mods;
 

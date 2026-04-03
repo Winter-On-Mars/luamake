@@ -5,6 +5,8 @@
 #include "luamake_pre_ir.hpp"
 #include "luamake_strings.hpp"
 #include "luamake_thread_pool.hpp"
+#include <atomic>
+#include <chrono>
 
 extern "C" {
 #include "lauxlib.h"
@@ -146,15 +148,14 @@ auto constexpr fnv1a(std::span<u8 const> const bytes) noexcept -> size_t {
   return hash;
 }
 
-#if false
 // helper function for displaying every byte of the string_view
+[[maybe_unused]]
 auto display_string_view(string_view const str) noexcept -> void {
   for (auto i = size_t{}; i != str.length(); ++i) {
     std::cout << str[i] << '-';
   }
-  std::cout.flush();
+  std::cout << std::endl;
 }
-#endif
 
 // TODO: collapse all of these to just inherit from std::exception
 struct ModuleErr {
@@ -552,7 +553,9 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   if (idx == ROOT_IDX)
     return fs::current_path();
   auto &&[start, end] = files[idx];
-  return fs::path(all_paths.buffer + start, all_paths.buffer + end);
+  // NOTE: -1 because otherwise it includes the null term, and that fucks with
+  // fs::path comparing to strings and checking the extension type
+  return fs::path(all_paths.buffer + start, all_paths.buffer + end - 1);
 }
 
 // this could (and probably should (if possible)) be rewritten to use the files
@@ -1852,17 +1855,26 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     // we should be doing there *might* be some issues taking exe_mod, by ref,
     // it will point to something in static memory, but there might be some
     // issues with it
-    threads.add_task([mod_idx, state, cache_path]() -> void {
-      auto const mod_state = mods.state_at(mod_idx);
-      switch (mod_state) {
-      case luamake::builtins::LakeModules::ModState::error:
-        // idk error, bad idea to try and compile the full module
-        return;
-      case luamake::builtins::LakeModules::ModState::compiled:
-        // idk maybe trying to compile the same module twice?
-        return;
-      case luamake::builtins::LakeModules::ModState::uninitialized:
-        break;
+    threads.add_task([mod_idx, cache_path]() -> void {
+      expr_dbg(mod_idx);
+      expr_dbg(cache_path);
+      for (auto mod_state = mods.state_at(mod_idx);
+           mod_state !=
+           builtins::LakeModules::ModState::ready_for_final_compile;
+           mod_state = mods.state_at(mod_idx)) {
+        switch (mod_state) {
+        case builtins::LakeModules::ModState::error:
+          // idk error, bad idea to try and compile the full module
+          return;
+        case builtins::LakeModules::ModState::compiled:
+          // idk maybe trying to compile the same module twice?
+          return;
+        case builtins::LakeModules::ModState::uninitialized:
+          std::this_thread::sleep_for(std::chrono::nanoseconds{1000});
+          break;
+        case builtins::LakeModules::ModState::ready_for_final_compile:
+          break;
+        }
       }
       auto const &mod = mods.module_at(mod_idx);
       auto const actually_compiled_files = mods.get_all_compiled_files(mod_idx);
@@ -1886,8 +1898,8 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
       // change how we store + handle errors :)
       if (OS_CALL(invoked_command.c_str()) != 0) {
         mods.set_state_at(mod_idx, LakeModules::ModState::error);
-        lua_pushfstring(state, "Error compiling [%s]", invoked_command.c_str());
-        (void)lua_error(state);
+        // lua_pushfstring(state, "Error compiling [%s]",
+        // invoked_command.c_str()); (void)lua_error(state);
       } else {
         mod.serialize(cache_path);
       }
@@ -2753,18 +2765,23 @@ auto LakeModules::init(size_t const cap) -> void {
   this->cap = cap;
   size = 0;
   states = std::make_unique<LakeModules::ModState[]>(cap);
+  mtxs = std::make_unique<std::mutex[]>(cap);
+  remaining_files = std::make_unique<std::atomic<size_t>[]>(cap);
   compiled_files = std::make_unique<std::vector<std::string>[]>(cap);
   luamake_paths = std::make_unique<fs::path[]>(cap);
   mods = std::make_unique<Module[]>(cap);
 
   luamake_paths[0] = fs::current_path() / "luamake.lua";
   states[0] = ModState::uninitialized;
+  remaining_files[0] = 0;
   ++size;
 }
 
 auto LakeModules::deinit() -> void {
   cap = size = 0;
   states = nullptr;
+  mtxs = nullptr;
+  remaining_files = nullptr;
   compiled_files = nullptr;
   luamake_paths = nullptr;
   mods = nullptr;
@@ -2794,13 +2811,17 @@ auto LakeModules::module_at(lua_Integer const idx) noexcept -> Module & {
   return mods[static_cast<size_t>(idx)];
 }
 
-auto LakeModules::state_at(lua_Integer const idx) noexcept -> ModState {
-  return states[static_cast<size_t>(idx)];
+auto LakeModules::state_at(lua_Integer const idx) const noexcept -> ModState {
+  auto const mod_idx = static_cast<size_t>(idx);
+  auto lock = std::unique_lock(mtxs[mod_idx]);
+  return states[mod_idx];
 }
 
 auto LakeModules::set_state_at(lua_Integer const idx, ModState n_state) noexcept
     -> void {
-  states[static_cast<size_t>(idx)] = n_state;
+  auto const mod_idx = static_cast<size_t>(idx);
+  auto lock = std::unique_lock(mtxs[mod_idx]);
+  states[mod_idx] = n_state;
 }
 
 auto LakeModules::add_compiled_file(lua_Integer const idx,
@@ -2809,8 +2830,23 @@ auto LakeModules::add_compiled_file(lua_Integer const idx,
   auto lock = std::unique_lock(mtxs[mod_idx]);
   auto &lof = compiled_files[mod_idx];
   auto const &mod = mods[mod_idx];
+#ifdef DEBUG
+  std::cout << DBG "pushing back" NORMAL
+            << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
+            << std::endl;
+#endif // DEBUG
   lof.emplace_back(
       std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
+  remaining_files[mod_idx]--;
+  // this should work(?), and should mean that this is the last file that was
+  // needed to be compiled(?)
+  // if this doesn't end up working, then we will need to probably have two
+  // numbers, one that keeps track of the number of files compiled, and the
+  // other that says how many files total we need to compile, then compare those
+  // two number(?)
+  if (remaining_files[mod_idx] == 0) {
+    states[mod_idx] = ModState::ready_for_final_compile;
+  }
 }
 
 auto LakeModules::get_all_compiled_files(lua_Integer const idx) noexcept
@@ -2835,12 +2871,20 @@ auto LakeModules::contains(fs::path const &module_name) const noexcept -> int {
 auto LakeModules::resize() -> void {
   auto const n_cap = 3 * cap / 2;
   auto n_states = std::make_unique<LakeModules::ModState[]>(n_cap);
+  auto n_mtxs = std::make_unique<std::mutex[]>(n_cap);
+  auto n_remaining_files = std::make_unique<std::atomic<size_t>[]>(n_cap);
   auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
   auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
   auto n_mods = std::make_unique<Module[]>(n_cap);
 
   std::memcpy(n_states.get(), states.get(), sizeof(bool) * cap);
 
+  // probably ub :)
+  std::memcpy(n_mtxs.get(), mtxs.get(),
+              sizeof(std::mutex::native_handle_type) * cap);
+
+  for (auto i = size_t{}; i < cap; ++i)
+    n_remaining_files[i] = std::move(static_cast<size_t>(remaining_files[i]));
   for (auto i = size_t{}; i < cap; ++i)
     n_compiled_files[i] = std::move(compiled_files[i]);
   for (auto i = size_t{}; i < cap; ++i)
@@ -2849,6 +2893,8 @@ auto LakeModules::resize() -> void {
     n_mods[i] = std::move(mods[i]);
 
   states = std::move(n_states);
+  mtxs = std::move(n_mtxs);
+  remaining_files = std::move(n_remaining_files);
   compiled_files = std::move(n_compiled_files);
   luamake_paths = std::move(n_luamake_paths);
   mods = std::move(n_mods);
