@@ -27,10 +27,11 @@ struct CompilationPool final {
   auto init(size_t num_threads) noexcept -> void;
   auto deinit() noexcept -> void;
 
-  auto add_dep_tree_tasks(luamake::builtins::Module::DepTree const &) noexcept
+  auto add_dep_tree_tasks(lua_Integer const,
+                          luamake::builtins::Module::DepTree const &) noexcept
       -> void;
 
-  // TODO: have this return the thread used
+  // TODO: try and template this, it might give better source code
   auto add_task(std::function<void()> &&) noexcept -> void;
 
 private:
@@ -43,7 +44,7 @@ private:
 
   std::vector<std::thread> workers;
   std::vector<std::function<void()>> tasks;
-  std::condition_variable condition;
+  std::condition_variable waiting;
   std::mutex task_mtx;
 };
 extern CompilationPool threads;

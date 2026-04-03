@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <memory>
 #include <ostream>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -219,6 +220,8 @@ struct Module final {
   std::vector<std::filesystem::path> dep_includes;
   std::vector<std::filesystem::path> sys_includes;
   std::vector<std::filesystem::path> linking;
+  // TODO: see about removing this, it might just take up space when we could
+  // move it onto the stack
   luamake::pp::Interpreter interpreter;
   // TODO: optimize this :)
   std::string compiler;
@@ -261,6 +264,8 @@ struct Module final {
 // TODO: add an explicit init and deinit function to this so that we can have
 // better control over the lifetime of this object
 struct LakeModules final {
+  enum class ModState { uninitialized, compiled, error };
+
   LakeModules() noexcept;
 
   auto init(size_t const cap = 4) -> void;
@@ -274,6 +279,11 @@ struct LakeModules final {
   auto construct_module_at(lua_Integer, Module::Module_t, lua_State *,
                            std::filesystem::path const &) -> void;
   auto module_at(lua_Integer const) noexcept -> Module &;
+
+  auto state_at(lua_Integer const) noexcept -> ModState;
+  auto set_state_at(lua_Integer const, ModState) noexcept -> void;
+
+  auto add_compiled_file(lua_Integer const, std::string &&) noexcept -> void;
 
   // returns -1 on failure
   auto contains(std::filesystem::path const &) const noexcept -> int;
@@ -306,12 +316,16 @@ struct LakeModules final {
 private:
   auto resize() -> void;
 
-  // maybe switch to these being ints, it's not "correct" to do, but it would
-  // make things faster
+  // NOTE: we might need to switch to having a state lock for this class for
+  // when we resize, as otherwise we might invalidate some references, we might
+  // be able to have cap + 1 mtxs, and then use mtxs[cap] == state mtx,
+  // something that could help, or it might be more performant to just have the
+  // state mtx inline
   size_t cap;
   size_t size;
-  std::unique_ptr<bool[]> is_compileds;
-  std::unique_ptr<std::vector<std::string>[]> compiled_files; // ?
+  std::unique_ptr<ModState[]> states;
+  std::unique_ptr<std::mutex[]> mtxs;
+  std::unique_ptr<std::vector<std::string>[]> compiled_files;
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
   std::unique_ptr<Module[]> mods;
 };
