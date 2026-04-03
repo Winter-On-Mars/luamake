@@ -97,4 +97,10 @@
 static_assert(sizeof(unsigned char) == 1);
 using u8 = unsigned char;
 
+#ifndef PERF_TESTING
+#define OS_CALL(str) system(str)
+#else
+#define OS_CALL(_) 0
+#endif // DEBUG
+
 #endif
