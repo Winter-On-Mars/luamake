@@ -1,10 +1,15 @@
 #include "luamake_thread_pool.hpp"
 
+#include "common.hpp"
 #include "luamake_builtins.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <iostream>
 #include <mutex>
+#include <thread>
 
 namespace luamake {
 CompilationPool threads = CompilationPool();
@@ -18,15 +23,22 @@ CompilationPool::~CompilationPool() noexcept {
 
 auto CompilationPool::init(size_t num_threads) noexcept -> void {
   workers.reserve(num_threads);
+  for (auto i = size_t{}; i < num_threads; ++i) {
+    workers.push_back(std::thread([this]() { _loop(); }));
+  }
 }
 
 auto CompilationPool::deinit() noexcept -> void {
   // idk if this is actually what we want to do, we should probably make sure
   // there's no tasks left in the queue
-  {
-    auto lock = std::unique_lock(task_mtx);
-    should_terminate = true;
+  auto lock = std::unique_lock(task_mtx);
+  while (!tasks.empty()) {
+    lock.unlock();
+    std::this_thread::sleep_for(std::chrono::nanoseconds{1000});
+    lock.lock();
   }
+  should_terminate = true;
+  lock.unlock();
   waiting.notify_all();
   for (auto &thread : workers) {
     if (thread.joinable()) // ?
@@ -40,19 +52,25 @@ auto CompilationPool::deinit() noexcept -> void {
 auto CompilationPool::add_dep_tree_tasks(
     lua_Integer const mod_idx, builtins::Module::DepTree const &tree) noexcept
     -> void {
-  fprintf(stdout, "%s\n", __PRETTY_FUNCTION__);
+  expr_dbg(mod_idx);
+  auto const idx = static_cast<size_t>(mod_idx);
   auto const &mod = builtins::mods.module_at(mod_idx);
   auto const include_path = mod.format_includes();
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     auto const fname = tree.get_path(i);
-    fprintf(stdout, "fname = [%s]\n", fname.c_str());
-    // TODO: there's some error causing nothing to happen because we're skipping
-    // over cpp and c files :), idk fix it somehow
+
     if (builtins::Module::DepTree::determine_file_type(fname.extension()) !=
         builtins::Module::DepTree::SourceFile_t::IMPL) {
       fprintf(stdout, "file [%s] is not an impl, skipping\n", fname.c_str());
       continue;
     }
+
+    {
+      // idk if we actually have to aquire the lock because they're atomic(?)
+      auto lock = std::unique_lock(builtins::mods.mtxs[idx]);
+      builtins::mods.remaining_files[idx]++;
+    }
+
     add_task([mod_idx, include_path, compiler = mod.compiler,
               install_dir = mod.install_dir, name = mod.name,
               path = fname]() -> void {
