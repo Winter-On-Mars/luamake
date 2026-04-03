@@ -774,6 +774,8 @@ static auto build(lua_State *const state) noexcept -> exit_t {
 // NOTE: this function just clears the cache, it leaves every other file as is,
 // we should add a command line arg to fully remove the files, something like
 // --everything
+// TODO: there's some error here where if you have multipe modules it will only
+// clean one of them(?), not sure how to fix it :)
 static auto clean(lua_State *const state) noexcept -> exit_t {
   auto const build_fn_t = lua_getglobal(state, "Build");
   switch (build_fn_t) {
