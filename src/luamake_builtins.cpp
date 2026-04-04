@@ -1669,6 +1669,9 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
+#ifdef DEBUG
+    mods.dump_modules(std::cout);
+#endif // DEBUG
     auto const root_t = lua_geti(state, -2, 1);
     if (root_t != LUA_TSTRING) {
       throw std::runtime_error(
@@ -1680,23 +1683,14 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
                        // taken over it, and so that the config obj is at the
                        // top of the stack for the Module function
 
-    auto index_fut = std::async(std::launch::async, [&root]() -> lua_Integer {
-      return static_cast<lua_Integer>(mods.contains(root));
-    });
-
+    // TODO: move the gen_dep_tree function to the install step(?), that
+    // way we can make use of async functions for deserialization
     auto exe_mod = builtins::Module(builtins::Module::EXE, state, root);
     exe_mod.gen_dep_tree();
 
-    auto const idx = index_fut.get();
-    if (idx == lua_Integer{-1}) {
-      std::cerr << "Module " << root.string()
-                << " does not exist in the lake modules currently known.\n";
-      std::terminate();
-    }
+    auto const index = mods.add_mod_to(root, std::move(exe_mod));
 
-    mods.emplace_at(idx, std::move(exe_mod));
-
-    lua_pushinteger(state, idx);
+    lua_pushinteger(state, static_cast<lua_Integer>(index));
 
     return 1;
   } catch (ModuleErr const &e) {
@@ -1720,6 +1714,8 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
 }
 
 auto Builder::new_static(lua_State *state) noexcept -> int {
+  lua_pushstring(state, "new_static function is not currently implimented");
+  return lua_error(state);
   LUA_EXPECTED_ARGUMENTS(state, 2, new_static);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
                     "Expected type of argument to `new_static` to be of type "
@@ -1731,6 +1727,7 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
+#if 0
     auto const root_t = lua_geti(state, -2, 1);
     if (root_t != LUA_TSTRING) {
       throw std::runtime_error(
@@ -1760,6 +1757,7 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
 
     lua_pushinteger(state, idx);
     return 1;
+#endif
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
@@ -1786,7 +1784,10 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const mod_idx = lua_tointeger(state, -1);
+#ifdef DEBUG
+    mods.dump_modules(std::cout);
+#endif // DEBUG
+    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
     lua_pop(state, 1);
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
@@ -2067,7 +2068,8 @@ auto Builder::build_dep(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const luamake_path = mods.get_module_path(lua_tointeger(state, -1));
+    auto const luamake_path =
+        mods.get_module_path(ModIndex(lua_tointeger(state, -1)));
     lua_pop(state, 1);
 
     if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
@@ -2401,8 +2403,8 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
                     "Expected integer to `link_lib` function, found [%s]",
                     lua_typename(arg_t));
   try {
-    auto const lib_to_be_linked = lua_tointeger(state, -2);
-    auto const lib_getting_diddled = lua_tointeger(state, -1);
+    auto const lib_to_be_linked = ModIndex(lua_tointeger(state, -2));
+    auto const lib_getting_diddled = ModIndex(lua_tointeger(state, -1));
 
     auto const &mod_linked = mods.module_at(lib_to_be_linked);
     auto &mod_d = mods.module_at(lib_getting_diddled);
@@ -2468,7 +2470,7 @@ auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const mod_idx = lua_tointeger(state, -1);
+    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
     lua_pop(state, 1);
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
@@ -2510,7 +2512,7 @@ auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
       lua_typename(ret_t));
 
   try {
-    auto const mod_idx = lua_tointeger(state, -1);
+    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
     lua_pop(state, 1);
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
@@ -2551,7 +2553,8 @@ auto Builder::build_dep_thunk(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const luamake_path = mods.get_module_path(lua_tointeger(state, -1));
+    auto const luamake_path =
+        mods.get_module_path(ModIndex(lua_tointeger(state, -1)));
     lua_pop(state, 1);
 
     if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
@@ -2757,6 +2760,12 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
   // TODO: add the functions install_dynamic
 }
 
+auto operator<<(std::ostream &out, ModIndex const idx) noexcept
+    -> std::ostream & {
+  out << idx.idx << ',' << idx.pos;
+  return out;
+}
+
 LakeModules::LakeModules() noexcept
     : cap(0), size(0), states(nullptr), compiled_files(nullptr),
       luamake_paths(nullptr), mods(nullptr) {}
@@ -2769,7 +2778,7 @@ auto LakeModules::init(size_t const cap) -> void {
   remaining_files = std::make_unique<std::atomic<size_t>[]>(cap);
   compiled_files = std::make_unique<std::vector<std::string>[]>(cap);
   luamake_paths = std::make_unique<fs::path[]>(cap);
-  mods = std::make_unique<Module[]>(cap);
+  mods = std::make_unique<std::vector<Module>[]>(cap);
 
   luamake_paths[0] = fs::current_path() / "luamake.lua";
   states[0] = ModState::uninitialized;
@@ -2798,38 +2807,35 @@ auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
   return ret_idx;
 }
 
-auto LakeModules::get_module_path(lua_Integer idx) const noexcept -> fs::path {
-  return luamake_paths[static_cast<size_t>(idx)];
+auto LakeModules::get_module_path(ModIndex const idx) const noexcept
+    -> fs::path {
+  return luamake_paths[idx.idx];
 }
 
-auto LakeModules::emplace_at(lua_Integer idx, Module &&mod) -> void {
-  auto const i = static_cast<size_t>(idx);
-  mods[i] = std::move(mod);
+auto LakeModules::emplace_at(ModIndex const idx, Module &&mod) -> void {
+  mods[idx.idx].emplace_back(std::move(mod));
 }
 
-auto LakeModules::module_at(lua_Integer const idx) noexcept -> Module & {
-  return mods[static_cast<size_t>(idx)];
+auto LakeModules::module_at(ModIndex const idx) noexcept -> Module & {
+  return mods[idx.idx][idx.pos];
 }
 
-auto LakeModules::state_at(lua_Integer const idx) const noexcept -> ModState {
-  auto const mod_idx = static_cast<size_t>(idx);
-  auto lock = std::unique_lock(mtxs[mod_idx]);
-  return states[mod_idx];
+auto LakeModules::state_at(ModIndex const idx) const noexcept -> ModState {
+  auto lock = std::unique_lock(mtxs[idx.idx]);
+  return states[idx.idx];
 }
 
-auto LakeModules::set_state_at(lua_Integer const idx, ModState n_state) noexcept
+auto LakeModules::set_state_at(ModIndex const idx, ModState n_state) noexcept
     -> void {
-  auto const mod_idx = static_cast<size_t>(idx);
-  auto lock = std::unique_lock(mtxs[mod_idx]);
-  states[mod_idx] = n_state;
+  auto lock = std::unique_lock(mtxs[idx.idx]);
+  states[idx.idx] = n_state;
 }
 
-auto LakeModules::add_compiled_file(lua_Integer const idx,
+auto LakeModules::add_compiled_file(ModIndex const idx,
                                     std::string &&str) noexcept -> void {
-  auto const mod_idx = static_cast<size_t>(idx);
-  auto lock = std::unique_lock(mtxs[mod_idx]);
-  auto &lof = compiled_files[mod_idx];
-  auto const &mod = mods[mod_idx];
+  auto lock = std::unique_lock(mtxs[idx.idx]);
+  auto &lof = compiled_files[idx.idx];
+  auto const &mod = mods[idx.idx][idx.pos];
 #ifdef DEBUG
   std::cout << DBG "pushing back" NORMAL
             << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
@@ -2837,35 +2843,40 @@ auto LakeModules::add_compiled_file(lua_Integer const idx,
 #endif // DEBUG
   lof.emplace_back(
       std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
-  remaining_files[mod_idx]--;
+  remaining_files[idx.idx]--;
   // this should work(?), and should mean that this is the last file that was
   // needed to be compiled(?)
   // if this doesn't end up working, then we will need to probably have two
   // numbers, one that keeps track of the number of files compiled, and the
   // other that says how many files total we need to compile, then compare those
   // two number(?)
-  if (remaining_files[mod_idx] == 0) {
-    states[mod_idx] = ModState::ready_for_final_compile;
+  if (remaining_files[idx.idx] == 0) {
+    states[idx.idx] = ModState::ready_for_final_compile;
   }
 }
 
-auto LakeModules::get_all_compiled_files(lua_Integer const idx) noexcept
+auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
     -> std::string {
-  auto const mod_idx = static_cast<size_t>(idx);
-  auto lock = std::unique_lock(mtxs[mod_idx]);
-  auto const &vec = compiled_files[mod_idx];
+  auto lock = std::unique_lock(mtxs[idx.idx]);
+  auto const &vec = compiled_files[idx.idx];
   return std::accumulate(
       vec.begin(), vec.end(), std::string(),
       [](auto &&a, auto &&next) { return std::format("{} {}", a, next); });
 }
 
-auto LakeModules::contains(fs::path const &module_name) const noexcept -> int {
-  for (auto i = size_t{0}; i < size; ++i) {
-    if (luamake_paths[i] == module_name / "luamake.lua") {
-      return static_cast<int>(i);
+auto LakeModules::add_mod_to(fs::path const &root, Module &&mod) noexcept(false)
+    -> ModIndex {
+  auto res = ModIndex();
+  for (auto i = uint{0}; i < size; ++i) {
+    if (luamake_paths[i] == root / "luamake.lua") {
+      res.idx = i;
+      res.pos = static_cast<uint>(mods[i].size());
+      mods[i].push_back(std::move(mod));
+      return res;
     }
   }
-  return -1;
+  res.idx = static_cast<uint>(-1);
+  return res;
 }
 
 auto LakeModules::resize() -> void {
@@ -2875,7 +2886,7 @@ auto LakeModules::resize() -> void {
   auto n_remaining_files = std::make_unique<std::atomic<size_t>[]>(n_cap);
   auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
   auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
-  auto n_mods = std::make_unique<Module[]>(n_cap);
+  auto n_mods = std::make_unique<std::vector<Module>[]>(n_cap);
 
   std::memcpy(n_states.get(), states.get(), sizeof(bool) * cap);
 
@@ -2914,7 +2925,11 @@ auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
   out << "modules.mods = {\n";
   for (auto i = size_t{}; i < size; ++i) {
     out << '[' << i << "] {";
-    mods[i].display(out);
+    for (auto &&mod : mods[i]) {
+      out << '{';
+      mod.display(out);
+      out << '}' << '\n';
+    }
     out << '}';
   }
   out << "}\n";

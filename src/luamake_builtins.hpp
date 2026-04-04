@@ -6,7 +6,6 @@
 #include "luamake_strings.hpp"
 
 #include <filesystem>
-#include <iterator>
 #include <memory>
 #include <ostream>
 #include <string>
@@ -262,6 +261,63 @@ struct Module final {
   friend Builder;
 };
 
+struct ModIndex final {
+  uint idx;
+  uint pos;
+
+  constexpr ModIndex() noexcept = default;
+  constexpr ModIndex(uint idx, uint pos) noexcept : idx(idx), pos(pos) {}
+
+  explicit constexpr ModIndex(lua_Integer const i) noexcept : idx(), pos() {
+    idx = static_cast<uint>(i >> 32);
+    pos = static_cast<uint>(i);
+  }
+
+  // idk this can almost certainly be improved, but because it's constexpr i
+  // assume the optimizer will just make this go away
+  explicit constexpr operator lua_Integer() const noexcept {
+    auto res = lua_Integer{0};
+    res |= idx;
+    res <<= 32;
+    res |= pos;
+    return res;
+  }
+
+  friend auto operator<<(std::ostream &, ModIndex const) noexcept
+      -> std::ostream &;
+};
+static_assert(sizeof(ModIndex) == sizeof(lua_Integer),
+              "really dumb, but we need to push this onto the lua stack as an "
+              "\"integer\"");
+
+static_assert([]() -> bool {
+  auto constexpr idx = ModIndex(0, 1);
+  auto constexpr lint = static_cast<lua_Integer>(idx);
+  static_assert(lint == lua_Integer{0x1});
+  return true;
+}());
+static_assert([]() -> bool {
+  auto constexpr idx = ModIndex(6, 1);
+  auto constexpr lint = static_cast<lua_Integer>(idx);
+  static_assert(lint == lua_Integer{0x0000000600000001});
+  return true;
+}());
+
+static_assert([]() -> bool {
+  auto constexpr idx = lua_Integer{1};
+  auto constexpr mod_idx = ModIndex(idx);
+  static_assert(mod_idx.idx == 0);
+  static_assert(mod_idx.pos == 1);
+  return true;
+}());
+static_assert([]() -> bool {
+  auto constexpr idx = lua_Integer{0x0000000200000004};
+  auto constexpr mod_idx = ModIndex(idx);
+  static_assert(mod_idx.idx == 2);
+  static_assert(mod_idx.pos == 4);
+  return true;
+}());
+
 // TODO: add an explicit init and deinit function to this so that we can have
 // better control over the lifetime of this object
 struct LakeModules final {
@@ -278,29 +334,28 @@ struct LakeModules final {
   auto deinit() -> void;
 
   auto new_module(std::filesystem::path &&) noexcept -> lua_Integer;
-  auto get_module_path(lua_Integer) const noexcept -> std::filesystem::path;
+  auto get_module_path(ModIndex const) const noexcept -> std::filesystem::path;
 
-  auto emplace_at(lua_Integer, Module &&) -> void;
+  auto emplace_at(ModIndex, Module &&) -> void;
 
-  auto construct_module_at(lua_Integer, Module::Module_t, lua_State *,
-                           std::filesystem::path const &) -> void;
-  auto module_at(lua_Integer const) noexcept -> Module &;
+  auto module_at(ModIndex const) noexcept -> Module &;
 
-  auto state_at(lua_Integer const) const noexcept -> ModState;
-  auto set_state_at(lua_Integer const, ModState) noexcept -> void;
+  auto state_at(ModIndex const) const noexcept -> ModState;
+  auto set_state_at(ModIndex const, ModState) noexcept -> void;
 
-  auto add_compiled_file(lua_Integer const, std::string &&) noexcept -> void;
+  auto add_compiled_file(ModIndex const, std::string &&) noexcept -> void;
 
-  auto get_all_compiled_files(lua_Integer const) noexcept -> std::string;
+  auto get_all_compiled_files(ModIndex const) noexcept -> std::string;
 
-  // returns -1 on failure
-  auto contains(std::filesystem::path const &) const noexcept -> int;
+  auto add_mod_to(std::filesystem::path const &, Module &&) noexcept(false)
+      -> ModIndex;
 
 #ifdef DEBUG
   auto dump_paths(std::ostream &) const noexcept -> void;
   auto dump_modules(std::ostream &) const noexcept -> void;
 #endif // DEBUG
 
+#if 0
   struct Iterator final {
     constexpr Iterator(size_t const at, Module const *const mods) noexcept
         : at(at), mods(mods) {}
@@ -320,6 +375,7 @@ struct LakeModules final {
 
   auto begin() const noexcept -> Iterator { return Iterator(0, mods.get()); }
   auto end() const noexcept -> Iterator { return Iterator(size, mods.get()); }
+#endif
 
 private:
   auto resize() -> void;
@@ -336,11 +392,9 @@ private:
   std::unique_ptr<std::atomic<size_t>[]> remaining_files;
   std::unique_ptr<std::vector<std::string>[]> compiled_files;
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
-  // TODO: have to probably make this a std::unique_ptr<std::vector<Module>[]>
-  // so that we can support having a single luamake file build multiple modules
-  // without things breaking like they were because the module was being
-  // overridden
-  std::unique_ptr<Module[]> mods;
+  // NOTE: we could switch this to a list<module>, then switch the new_exe
+  // function to return a lightuserdata
+  std::unique_ptr<std::vector<Module>[]> mods;
 
   friend CompilationPool;
 };

@@ -50,11 +50,10 @@ auto CompilationPool::deinit() noexcept -> void {
 // TODO: update this function to just take a control of the mutex, then push
 // back all of the functions like a vectorized version of add_task
 auto CompilationPool::add_dep_tree_tasks(
-    lua_Integer const mod_idx, builtins::Module::DepTree const &tree) noexcept
-    -> void {
-  expr_dbg(mod_idx);
-  auto const idx = static_cast<size_t>(mod_idx);
-  auto const &mod = builtins::mods.module_at(mod_idx);
+    builtins::ModIndex const idx,
+    builtins::Module::DepTree const &tree) noexcept -> void {
+  expr_dbg(idx);
+  auto const &mod = builtins::mods.module_at(idx);
   auto const include_path = mod.format_includes();
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     auto const fname = tree.get_path(i);
@@ -67,11 +66,11 @@ auto CompilationPool::add_dep_tree_tasks(
 
     {
       // idk if we actually have to aquire the lock because they're atomic(?)
-      auto lock = std::unique_lock(builtins::mods.mtxs[idx]);
-      builtins::mods.remaining_files[idx]++;
+      auto lock = std::unique_lock(builtins::mods.mtxs[idx.idx]);
+      builtins::mods.remaining_files[idx.idx]++;
     }
 
-    add_task([mod_idx, include_path, compiler = mod.compiler,
+    add_task([idx, include_path, compiler = mod.compiler,
               install_dir = mod.install_dir, name = mod.name,
               path = fname]() -> void {
       fprintf(stdout, "\tworking with path [%s]\n", path.c_str());
@@ -81,9 +80,9 @@ auto CompilationPool::add_dep_tree_tasks(
       // idk i tried using std::cout, but there was an error :)
       fprintf(stdout, "[%s]\n", invoked_command.c_str());
       if (OS_CALL(invoked_command.c_str()) == 0) {
-        builtins::mods.add_compiled_file(mod_idx, path.stem().string());
+        builtins::mods.add_compiled_file(idx, path.stem().string());
       } else {
-        builtins::mods.set_state_at(mod_idx,
+        builtins::mods.set_state_at(idx,
                                     builtins::LakeModules::ModState::error);
       }
     });
