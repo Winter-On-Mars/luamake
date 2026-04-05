@@ -355,27 +355,38 @@ struct LakeModules final {
   auto dump_modules(std::ostream &) const noexcept -> void;
 #endif // DEBUG
 
-#if 0
   struct Iterator final {
-    constexpr Iterator(size_t const at, Module const *const mods) noexcept
-        : at(at), mods(mods) {}
+    constexpr Iterator(ModIndex const idx, std::vector<Module> *mods) noexcept
+        : idx(idx), mods(mods) {}
     auto operator++() noexcept -> Iterator & {
-      ++at;
+      if (idx.pos == mods[idx.idx].size()) {
+        ++idx.idx;
+        idx.pos = 0;
+      } else {
+        ++idx.pos;
+      }
       return *this;
     }
-    auto operator*() noexcept -> Module const & { return mods[at]; }
+    auto operator*() noexcept -> Module const & {
+      return mods[idx.idx][idx.pos];
+    }
     auto constexpr operator==(Iterator const that) const noexcept -> bool {
-      return at == that.at;
+      return idx.idx == that.idx.idx && idx.pos == that.idx.pos;
     }
 
   private:
-    size_t at;
-    Module const *const mods;
+    ModIndex idx;
+    std::vector<Module> *mods;
   };
 
-  auto begin() const noexcept -> Iterator { return Iterator(0, mods.get()); }
-  auto end() const noexcept -> Iterator { return Iterator(size, mods.get()); }
-#endif
+  auto begin() const noexcept -> Iterator {
+    return Iterator(ModIndex(), mods.get());
+  }
+  auto end() const noexcept -> Iterator {
+    return Iterator(
+        ModIndex(static_cast<uint>(size), static_cast<uint>(mods[size].size())),
+        mods.get());
+  }
 
 private:
   auto resize() -> void;
