@@ -2834,12 +2834,14 @@ auto LakeModules::set_state_at(ModIndex const idx, ModState n_state) noexcept
 auto LakeModules::add_compiled_file(ModIndex const idx,
                                     std::string &&str) noexcept -> void {
   auto lock = std::unique_lock(mtxs[idx.idx]);
+  // TODO: this also needs to be moved somewhere to allow for different lists of
+  // compiled files for each module, fuckkkkk
   auto &lof = compiled_files[idx.idx];
   auto const &mod = mods[idx.idx][idx.pos];
 #ifdef DEBUG
   std::cout << DBG "pushing back" NORMAL
             << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
-            << std::endl;
+            << " to " << idx << std::endl;
 #endif // DEBUG
   lof.emplace_back(
       std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
