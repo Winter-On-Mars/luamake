@@ -66,8 +66,8 @@ auto CompilationPool::add_dep_tree_tasks(
 
     {
       // idk if we actually have to aquire the lock because they're atomic(?)
-      auto lock = std::unique_lock(builtins::mods.mtxs[idx.idx]);
-      builtins::mods.remaining_files[idx.idx]++;
+      auto lock = std::unique_lock(builtins::mods.mtxs[idx.mods]);
+      builtins::mods.remaining_files[idx.mods]++;
     }
 
     add_task([idx, include_path, compiler = mod.compiler,

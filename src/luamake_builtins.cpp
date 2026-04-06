@@ -1669,9 +1669,6 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-#ifdef DEBUG
-    mods.dump_modules(std::cout);
-#endif // DEBUG
     auto const root_t = lua_geti(state, -2, 1);
     if (root_t != LUA_TSTRING) {
       throw std::runtime_error(
@@ -1784,9 +1781,6 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-#ifdef DEBUG
-    mods.dump_modules(std::cout);
-#endif // DEBUG
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
     lua_pop(state, 1);
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
@@ -2762,7 +2756,7 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
 
 auto operator<<(std::ostream &out, ModIndex const idx) noexcept
     -> std::ostream & {
-  out << idx.idx << ',' << idx.pos;
+  out << idx.files << ',' << idx.mods;
   return out;
 }
 
@@ -2778,7 +2772,7 @@ auto LakeModules::init(size_t const cap) -> void {
   remaining_files = std::make_unique<std::atomic<size_t>[]>(cap);
   compiled_files = std::make_unique<std::vector<std::string>[]>(cap);
   luamake_paths = std::make_unique<fs::path[]>(cap);
-  mods = std::make_unique<std::vector<Module>[]>(cap);
+  mods = std::make_unique<Module[]>(cap);
 
   luamake_paths[0] = fs::current_path() / "luamake.lua";
   states[0] = ModState::uninitialized;
@@ -2796,6 +2790,7 @@ auto LakeModules::deinit() -> void {
   mods = nullptr;
 }
 
+// TODO: idk if this needs to be updated or not
 auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
   if (size == cap)
     resize();
@@ -2809,35 +2804,33 @@ auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
 
 auto LakeModules::get_module_path(ModIndex const idx) const noexcept
     -> fs::path {
-  return luamake_paths[idx.idx];
+  return luamake_paths[idx.files];
 }
 
 auto LakeModules::emplace_at(ModIndex const idx, Module &&mod) -> void {
-  mods[idx.idx].emplace_back(std::move(mod));
+  mods[idx.mods] = std::move(mod);
 }
 
 auto LakeModules::module_at(ModIndex const idx) noexcept -> Module & {
-  return mods[idx.idx][idx.pos];
+  return mods[idx.mods];
 }
 
 auto LakeModules::state_at(ModIndex const idx) const noexcept -> ModState {
-  auto lock = std::unique_lock(mtxs[idx.idx]);
-  return states[idx.idx];
+  auto lock = std::unique_lock(mtxs[idx.mods]);
+  return states[idx.mods];
 }
 
 auto LakeModules::set_state_at(ModIndex const idx, ModState n_state) noexcept
     -> void {
-  auto lock = std::unique_lock(mtxs[idx.idx]);
-  states[idx.idx] = n_state;
+  auto lock = std::unique_lock(mtxs[idx.mods]);
+  states[idx.mods] = n_state;
 }
 
 auto LakeModules::add_compiled_file(ModIndex const idx,
                                     std::string &&str) noexcept -> void {
-  auto lock = std::unique_lock(mtxs[idx.idx]);
-  // TODO: this also needs to be moved somewhere to allow for different lists of
-  // compiled files for each module, fuckkkkk
-  auto &lof = compiled_files[idx.idx];
-  auto const &mod = mods[idx.idx][idx.pos];
+  auto lock = std::unique_lock(mtxs[idx.mods]);
+  auto &lof = compiled_files[idx.mods];
+  auto const &mod = mods[idx.mods];
 #ifdef DEBUG
   std::cout << DBG "pushing back" NORMAL
             << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
@@ -2845,39 +2838,40 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
 #endif // DEBUG
   lof.emplace_back(
       std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
-  remaining_files[idx.idx]--;
+  remaining_files[idx.mods]--;
   // this should work(?), and should mean that this is the last file that was
   // needed to be compiled(?)
   // if this doesn't end up working, then we will need to probably have two
   // numbers, one that keeps track of the number of files compiled, and the
   // other that says how many files total we need to compile, then compare those
   // two number(?)
-  if (remaining_files[idx.idx] == 0) {
-    states[idx.idx] = ModState::ready_for_final_compile;
+  if (remaining_files[idx.mods] == 0) {
+    states[idx.mods] = ModState::ready_for_final_compile;
   }
 }
 
 auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
     -> std::string {
-  auto lock = std::unique_lock(mtxs[idx.idx]);
-  auto const &vec = compiled_files[idx.idx];
+  auto lock = std::unique_lock(mtxs[idx.mods]);
+  auto const &vec = compiled_files[idx.mods];
   return std::accumulate(
       vec.begin(), vec.end(), std::string(),
       [](auto &&a, auto &&next) { return std::format("{} {}", a, next); });
 }
 
+// TODO: probably no longer need this function
 auto LakeModules::add_mod_to(fs::path const &root, Module &&mod) noexcept(false)
     -> ModIndex {
   auto res = ModIndex();
   for (auto i = uint{0}; i < size; ++i) {
     if (luamake_paths[i] == root / "luamake.lua") {
-      res.idx = i;
-      res.pos = static_cast<uint>(mods[i].size());
-      mods[i].push_back(std::move(mod));
+      res.files = i;
+      res.mods = static_cast<uint>(size);
       return res;
     }
   }
-  res.idx = static_cast<uint>(-1);
+  res.mods = static_cast<uint>(-1);
+  res.files = static_cast<uint>(-1);
   return res;
 }
 
@@ -2888,7 +2882,7 @@ auto LakeModules::resize() -> void {
   auto n_remaining_files = std::make_unique<std::atomic<size_t>[]>(n_cap);
   auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
   auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
-  auto n_mods = std::make_unique<std::vector<Module>[]>(n_cap);
+  auto n_mods = std::make_unique<Module[]>(n_cap);
 
   std::memcpy(n_states.get(), states.get(), sizeof(bool) * cap);
 
@@ -2927,11 +2921,7 @@ auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
   out << "modules.mods = {\n";
   for (auto i = size_t{}; i < size; ++i) {
     out << '[' << i << "] {";
-    for (auto &&mod : mods[i]) {
-      out << '{';
-      mod.display(out);
-      out << '}' << '\n';
-    }
+    mods[i].display(out);
     out << '}';
   }
   out << "}\n";

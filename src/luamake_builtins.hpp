@@ -262,24 +262,23 @@ struct Module final {
 };
 
 struct ModIndex final {
-  uint idx;
-  uint pos;
+  uint files;
+  uint mods;
 
   constexpr ModIndex() noexcept = default;
-  constexpr ModIndex(uint idx, uint pos) noexcept : idx(idx), pos(pos) {}
+  constexpr ModIndex(uint files, uint mods) noexcept
+      : files(files), mods(mods) {}
 
-  explicit constexpr ModIndex(lua_Integer const i) noexcept : idx(), pos() {
-    idx = static_cast<uint>(i >> 32);
-    pos = static_cast<uint>(i);
-  }
+  explicit constexpr ModIndex(lua_Integer const i) noexcept
+      : files(static_cast<uint>(i >> 32)), mods(static_cast<uint>(i)) {}
 
   // idk this can almost certainly be improved, but because it's constexpr i
   // assume the optimizer will just make this go away
   explicit constexpr operator lua_Integer() const noexcept {
     auto res = lua_Integer{0};
-    res |= idx;
+    res |= files;
     res <<= 32;
-    res |= pos;
+    res |= mods;
     return res;
   }
 
@@ -306,20 +305,28 @@ static_assert([]() -> bool {
 static_assert([]() -> bool {
   auto constexpr idx = lua_Integer{1};
   auto constexpr mod_idx = ModIndex(idx);
-  static_assert(mod_idx.idx == 0);
-  static_assert(mod_idx.pos == 1);
+  static_assert(mod_idx.files == 0);
+  static_assert(mod_idx.mods == 1);
   return true;
 }());
 static_assert([]() -> bool {
   auto constexpr idx = lua_Integer{0x0000000200000004};
   auto constexpr mod_idx = ModIndex(idx);
-  static_assert(mod_idx.idx == 2);
-  static_assert(mod_idx.pos == 4);
+  static_assert(mod_idx.files == 2);
+  static_assert(mod_idx.mods == 4);
   return true;
 }());
 
-// TODO: add an explicit init and deinit function to this so that we can have
-// better control over the lifetime of this object
+// EXPL: the ModIndex struct is used to index into this, the top 32 bits index
+// into luamake_paths, while the bottom 32 bits index into everything else.
+// there will always be more mods/ everything else compared to the
+// luamake_paths, so the cap and size variables refer to the total number of
+// possible things that can be indexed into, we'll just not keep track of the
+// total number of luamake_paths, meaning that if something happens, the user
+// *could* index into uninitialized memory :), idk something we could fix but i
+// want to get this working first
+// this does lead to a fun issues where we have to worry about which mutex
+// refers to what, but for now we won'tworry about it
 struct LakeModules final {
   enum class ModState {
     uninitialized,
@@ -356,36 +363,27 @@ struct LakeModules final {
 #endif // DEBUG
 
   struct Iterator final {
-    constexpr Iterator(ModIndex const idx, std::vector<Module> *mods) noexcept
+    constexpr Iterator(ModIndex const idx, Module *mods) noexcept
         : idx(idx), mods(mods) {}
     auto operator++() noexcept -> Iterator & {
-      if (idx.pos == mods[idx.idx].size()) {
-        ++idx.idx;
-        idx.pos = 0;
-      } else {
-        ++idx.pos;
-      }
+      ++idx.mods;
       return *this;
     }
-    auto operator*() noexcept -> Module const & {
-      return mods[idx.idx][idx.pos];
-    }
+    auto operator*() noexcept -> Module const & { return mods[idx.mods]; }
     auto constexpr operator==(Iterator const that) const noexcept -> bool {
-      return idx.idx == that.idx.idx && idx.pos == that.idx.pos;
+      return idx.mods == that.idx.mods;
     }
 
   private:
     ModIndex idx;
-    std::vector<Module> *mods;
+    Module *mods;
   };
 
   auto begin() const noexcept -> Iterator {
     return Iterator(ModIndex(), mods.get());
   }
   auto end() const noexcept -> Iterator {
-    return Iterator(
-        ModIndex(static_cast<uint>(size), static_cast<uint>(mods[size].size())),
-        mods.get());
+    return Iterator(ModIndex(0, static_cast<uint>(size)), mods.get());
   }
 
 private:
@@ -398,6 +396,8 @@ private:
   // state mtx inline
   size_t cap;
   size_t size;
+  // TODO: test if it's better to just have all of these in an aos instead of
+  // this soa (multiarraylist) that it currently is
   std::unique_ptr<ModState[]> states;
   std::unique_ptr<std::mutex[]> mtxs;
   std::unique_ptr<std::atomic<size_t>[]> remaining_files;
@@ -405,7 +405,7 @@ private:
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
   // NOTE: we could switch this to a list<module>, then switch the new_exe
   // function to return a lightuserdata
-  std::unique_ptr<std::vector<Module>[]> mods;
+  std::unique_ptr<Module[]> mods;
 
   friend CompilationPool;
 };
