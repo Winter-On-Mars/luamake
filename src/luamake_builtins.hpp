@@ -284,6 +284,8 @@ struct ModIndex final {
 
   friend auto operator<<(std::ostream &, ModIndex const) noexcept
       -> std::ostream &;
+
+  static auto constexpr not_found = static_cast<uint>(-1);
 };
 static_assert(sizeof(ModIndex) == sizeof(lua_Integer),
               "really dumb, but we need to push this onto the lua stack as an "
@@ -340,7 +342,11 @@ struct LakeModules final {
   auto init(size_t const cap = 4) -> void;
   auto deinit() -> void;
 
-  auto new_module(std::filesystem::path &&) noexcept -> lua_Integer;
+  /*
+  auto new_module(std::filesystem::path &&) noexcept -> ModIndex;
+  auto add_mod_to(std::filesystem::path const &, Module &&) noexcept(false)
+      -> ModIndex;
+      */
   auto get_module_path(ModIndex const) const noexcept -> std::filesystem::path;
 
   auto emplace_at(ModIndex, Module &&) -> void;
@@ -354,8 +360,8 @@ struct LakeModules final {
 
   auto get_all_compiled_files(ModIndex const) noexcept -> std::string;
 
-  auto add_mod_to(std::filesystem::path const &, Module &&) noexcept(false)
-      -> ModIndex;
+  auto append_module_with_path(std::filesystem::path const &,
+                               Module &&) noexcept(false) -> ModIndex;
 
 #ifdef DEBUG
   auto dump_paths(std::ostream &) const noexcept -> void;
@@ -383,29 +389,35 @@ struct LakeModules final {
     return Iterator(ModIndex(), mods.get());
   }
   auto end() const noexcept -> Iterator {
-    return Iterator(ModIndex(0, static_cast<uint>(size)), mods.get());
+    return Iterator(ModIndex(0, num_mods), nullptr);
   }
 
 private:
-  auto resize() -> void;
+  auto resize_mods() -> void;
+  auto resize_paths() -> void;
 
   // NOTE: we might need to switch to having a state lock for this class for
   // when we resize, as otherwise we might invalidate some references, we might
   // be able to have cap + 1 mtxs, and then use mtxs[cap] == state mtx,
   // something that could help, or it might be more performant to just have the
   // state mtx inline
-  size_t cap;
-  size_t size;
+  uint mods_cap;
+  uint paths_cap;
+  // size_t cap;
+  // TODO: probably have 2 uints for the num_lake_paths, and for the modules
+  uint num_mods;
+  uint num_paths;
+  // size_t size;
   // TODO: test if it's better to just have all of these in an aos instead of
   // this soa (multiarraylist) that it currently is
   std::unique_ptr<ModState[]> states;
   std::unique_ptr<std::mutex[]> mtxs;
   std::unique_ptr<std::atomic<size_t>[]> remaining_files;
   std::unique_ptr<std::vector<std::string>[]> compiled_files;
-  std::unique_ptr<std::filesystem::path[]> luamake_paths;
   // NOTE: we could switch this to a list<module>, then switch the new_exe
   // function to return a lightuserdata
   std::unique_ptr<Module[]> mods;
+  std::unique_ptr<std::filesystem::path[]> luamake_paths;
 
   friend CompilationPool;
 };

@@ -7,6 +7,7 @@
 #include "luamake_thread_pool.hpp"
 #include <atomic>
 #include <chrono>
+#include <thread>
 
 extern "C" {
 #include "lauxlib.h"
@@ -1685,7 +1686,7 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
     auto exe_mod = builtins::Module(builtins::Module::EXE, state, root);
     exe_mod.gen_dep_tree();
 
-    auto const index = mods.add_mod_to(root, std::move(exe_mod));
+    auto const index = mods.append_module_with_path(root, std::move(exe_mod));
 
     lua_pushinteger(state, static_cast<lua_Integer>(index));
 
@@ -1782,16 +1783,27 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
 
   try {
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
+    expr_dbg(mod_idx);
     lua_pop(state, 1);
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
+    expr_dbg(parent_path);
 
-    auto const &exe_mod = mods.module_at(mod_idx);
+    auto &exe_mod = mods.module_at(mod_idx);
     if (exe_mod.type != builtins::Module::EXE) {
       throw std::runtime_error(std ::format(
           "module type is not exe, found [{}]",
           static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
               exe_mod.type)));
     }
+
+    // TODO: get this working
+    /*
+    auto done = false;
+    threads.add_task([&done, &exe_mod]() {
+      exe_mod.gen_dep_tree();
+      done = true;
+    });
+    */
 
     // TODO: update these functions to throw exceptions
     // TODO: see if there is a performance increase by checking if the directory
@@ -1804,7 +1816,8 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     auto ec = std::error_code{};
     if (fs::create_directories(install_dir, ec); ec) {
       std::cerr << ec.message() << '\n';
-      lua_pushstring(state, "Unable to create directory");
+      lua_pushfstring(state, "Unable to create directory [%s]",
+                      install_dir.c_str());
       return lua_error(state);
     }
 
@@ -1812,8 +1825,11 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
             fs::path(std::format("{}/__luamake_cache", exe_mod.install_dir)),
             ec);
         ec) {
+      auto const message =
+          std::format("{}/__luamake_cache", exe_mod.install_dir);
       std::cerr << ec.message() << '\n';
-      lua_pushstring(state, "Unable to create directory");
+      lua_pushfstring(state, "Unable to create directory [%s]",
+                      message.c_str());
       return lua_error(state);
     }
 
@@ -1829,6 +1845,13 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     switch (maybe_cached_mod.index()) {
     case 0: {
       auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
+      // TODO: get this to work
+      // idk seems like the easiest way to do this kind of synchronization
+      /*
+      while (!done) {
+        std::this_thread::sleep_for(std::chrono::nanoseconds{1000});
+      }
+      */
       if (exe_mod == cached_mod) {
         return 0;
       }
@@ -2332,6 +2355,8 @@ auto Builder::clang_bare(lua_State *state) noexcept -> int {
 }
 
 auto Builder::require(lua_State *state) noexcept -> int {
+  lua_pushstring(state, "requires function not currently implimented");
+  return lua_error(state);
   // because this is a function on an api boundary, we have to make sure that no
   // exceptions leak from it
   LUA_EXPECTED_ARGUMENTS(state, 2, require)
@@ -2341,6 +2366,7 @@ auto Builder::require(lua_State *state) noexcept -> int {
   LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TSTRING,
                     "Expected string to require function, found [%s]",
                     lua_typename(arg_t));
+#if 0
   try {
     auto fpath = [](lua_State *state) -> fs::path {
       auto const parent_path_t = lua_geti(state, -2, lua_Integer{1});
@@ -2374,7 +2400,8 @@ auto Builder::require(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
 
-    (void)lua_pushinteger(state, mods.new_module(std::move(fpath)));
+    (void)lua_pushinteger(
+        state, static_cast<lua_Integer>(mods.new_module(std::move(fpath))));
     return 1;
   } catch (std::exception const &e) {
     (void)lua_pushfstring(
@@ -2386,6 +2413,7 @@ auto Builder::require(lua_State *state) noexcept -> int {
         state, "An unknown exception was encountered in the requires function");
     return lua_error(state);
   }
+#endif
 }
 
 auto Builder::link_lib(lua_State *state) noexcept -> int {
@@ -2498,7 +2526,7 @@ auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
 // doesn't run any commands, nor make any directories, just varifies that there
 // is a module there, and that the module is a static mod
 auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
-  LUA_EXPECTED_ARGUMENTS(state, 1, install_exe)
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_static)
   LUA_ASSERT_FORMAT(
       state, ret_t, lua_type(state, -1), LUA_TNUMBER,
       "Expected type of argument to `install_static` to be of type "
@@ -2761,12 +2789,12 @@ auto operator<<(std::ostream &out, ModIndex const idx) noexcept
 }
 
 LakeModules::LakeModules() noexcept
-    : cap(0), size(0), states(nullptr), compiled_files(nullptr),
-      luamake_paths(nullptr), mods(nullptr) {}
+    : mods_cap(0), paths_cap(0), num_mods(0), num_paths(0), states(nullptr),
+      compiled_files(nullptr), mods(nullptr), luamake_paths(nullptr) {}
 
 auto LakeModules::init(size_t const cap) -> void {
-  this->cap = cap;
-  size = 0;
+  mods_cap = static_cast<uint>(cap);
+  paths_cap = static_cast<uint>(cap);
   states = std::make_unique<LakeModules::ModState[]>(cap);
   mtxs = std::make_unique<std::mutex[]>(cap);
   remaining_files = std::make_unique<std::atomic<size_t>[]>(cap);
@@ -2775,13 +2803,15 @@ auto LakeModules::init(size_t const cap) -> void {
   mods = std::make_unique<Module[]>(cap);
 
   luamake_paths[0] = fs::current_path() / "luamake.lua";
+  // TODO: move these
   states[0] = ModState::uninitialized;
   remaining_files[0] = 0;
-  ++size;
+  ++num_paths;
 }
 
 auto LakeModules::deinit() -> void {
-  cap = size = 0;
+  mods_cap = paths_cap = 0;
+  num_mods = num_paths = 0;
   states = nullptr;
   mtxs = nullptr;
   remaining_files = nullptr;
@@ -2790,17 +2820,18 @@ auto LakeModules::deinit() -> void {
   mods = nullptr;
 }
 
-// TODO: idk if this needs to be updated or not
-auto LakeModules::new_module(fs::path &&path) noexcept -> lua_Integer {
+#if 0
+// TODO: update this function, or remove it, it's only used in the require
+// function
+auto LakeModules::new_module(fs::path &&path) noexcept -> ModIndex {
   if (size == cap)
     resize();
   luamake_paths[size] = std::move(path);
   states[size] = ModState::uninitialized;
 
-  auto const ret_idx = static_cast<lua_Integer>(size);
-  ++size;
-  return ret_idx;
+  return ModIndex(ModIndex::not_found, ModIndex::not_found);
 }
+#endif
 
 auto LakeModules::get_module_path(ModIndex const idx) const noexcept
     -> fs::path {
@@ -2859,58 +2890,71 @@ auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
       [](auto &&a, auto &&next) { return std::format("{} {}", a, next); });
 }
 
-// TODO: probably no longer need this function
-auto LakeModules::add_mod_to(fs::path const &root, Module &&mod) noexcept(false)
+auto LakeModules::append_module_with_path(fs::path const &path,
+                                          Module &&mod) noexcept(false)
     -> ModIndex {
-  auto res = ModIndex();
-  for (auto i = uint{0}; i < size; ++i) {
-    if (luamake_paths[i] == root / "luamake.lua") {
-      res.files = i;
-      res.mods = static_cast<uint>(size);
-      return res;
+  if (num_mods >= mods_cap) {
+    resize_mods();
+  }
+  mods[num_mods] = std::move(mod);
+  auto const mods = num_mods;
+  ++num_mods;
+  auto files = ModIndex::not_found;
+  for (auto i = uint{}; i < num_paths; ++i) {
+    if (luamake_paths[i] == path / "luamake.lua") {
+      files = i;
     }
   }
-  res.mods = static_cast<uint>(-1);
-  res.files = static_cast<uint>(-1);
-  return res;
+  if (files == ModIndex::not_found) {
+    std::cerr << "idk some issue, module path not found in the lake modules\n";
+    std::terminate();
+  }
+  return ModIndex(files, mods);
 }
 
-auto LakeModules::resize() -> void {
-  auto const n_cap = 3 * cap / 2;
+auto LakeModules::resize_mods() -> void {
+  auto const n_cap = 3 * mods_cap / 2;
+
   auto n_states = std::make_unique<LakeModules::ModState[]>(n_cap);
   auto n_mtxs = std::make_unique<std::mutex[]>(n_cap);
   auto n_remaining_files = std::make_unique<std::atomic<size_t>[]>(n_cap);
   auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
-  auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
   auto n_mods = std::make_unique<Module[]>(n_cap);
 
-  std::memcpy(n_states.get(), states.get(), sizeof(bool) * cap);
+  std::memcpy(n_states.get(), states.get(), sizeof(bool) * mods_cap);
 
   // probably ub :)
   std::memcpy(n_mtxs.get(), mtxs.get(),
-              sizeof(std::mutex::native_handle_type) * cap);
+              sizeof(std::mutex::native_handle_type) * mods_cap);
 
-  for (auto i = size_t{}; i < cap; ++i)
+  for (auto i = size_t{}; i < mods_cap; ++i)
     n_remaining_files[i] = std::move(static_cast<size_t>(remaining_files[i]));
-  for (auto i = size_t{}; i < cap; ++i)
+  for (auto i = size_t{}; i < mods_cap; ++i)
     n_compiled_files[i] = std::move(compiled_files[i]);
-  for (auto i = size_t{}; i < cap; ++i)
-    n_luamake_paths[i] = std::move(luamake_paths[i]);
-  for (auto i = size_t{}; i < cap; ++i)
+  for (auto i = size_t{}; i < mods_cap; ++i)
     n_mods[i] = std::move(mods[i]);
 
   states = std::move(n_states);
   mtxs = std::move(n_mtxs);
   remaining_files = std::move(n_remaining_files);
   compiled_files = std::move(n_compiled_files);
-  luamake_paths = std::move(n_luamake_paths);
   mods = std::move(n_mods);
+}
+
+auto LakeModules::resize_paths() -> void {
+  auto const n_cap = 3 * paths_cap / 2;
+  auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
+
+  for (auto i = size_t{}; i < paths_cap; ++i)
+    n_luamake_paths[i] = std::move(luamake_paths[i]);
+
+  luamake_paths = std::move(n_luamake_paths);
 }
 
 #ifdef DEBUG
 auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
   out << "modules.paths = {\n";
-  for (auto i = size_t{0}; i < size; ++i) {
+  for (auto i = uint{0}; i < num_paths; ++i) {
     out << "\t[" << i << "][" << luamake_paths[i].string() << "]\n";
   }
   out << "}\n";
@@ -2919,7 +2963,7 @@ auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
 
 auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
   out << "modules.mods = {\n";
-  for (auto i = size_t{}; i < size; ++i) {
+  for (auto i = uint{}; i < num_mods; ++i) {
     out << '[' << i << "] {";
     mods[i].display(out);
     out << '}';
