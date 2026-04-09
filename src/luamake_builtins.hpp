@@ -342,8 +342,8 @@ struct LakeModules final {
   auto init(size_t const cap = 4) -> void;
   auto deinit() -> void;
 
-  /*
   auto new_module(std::filesystem::path &&) noexcept -> ModIndex;
+  /*
   auto add_mod_to(std::filesystem::path const &, Module &&) noexcept(false)
       -> ModIndex;
       */

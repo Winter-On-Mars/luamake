@@ -77,6 +77,9 @@ namespace fs = std::filesystem;
 
 // TODO: reorder things in this namespace bc things are kind of all over the
 // place
+// NOTE: when working with functions called directly from the lua script, we
+// don't need to necessarily worry about popping from the stack to keep the
+// stack clean, see the lua docs for more info
 namespace luamake {
 namespace {
 using std::pair, std::array, std::string, std::string_view, std::vector,
@@ -1712,8 +1715,6 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
 }
 
 auto Builder::new_static(lua_State *state) noexcept -> int {
-  lua_pushstring(state, "new_static function is not currently implimented");
-  return lua_error(state);
   LUA_EXPECTED_ARGUMENTS(state, 2, new_static);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
                     "Expected type of argument to `new_static` to be of type "
@@ -1725,7 +1726,6 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-#if 0
     auto const root_t = lua_geti(state, -2, 1);
     if (root_t != LUA_TSTRING) {
       throw std::runtime_error(
@@ -1737,25 +1737,13 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
                        // taken over it, and so that the config obj is at the
                        // top of the stack for the Module function
 
-    auto index_fut = std::async(std::launch::async, [&root]() -> lua_Integer {
-      return static_cast<lua_Integer>(mods.contains(root));
-    });
-
     auto static_mod = builtins::Module(builtins::Module::STATIC, state, root);
     static_mod.gen_dep_tree();
 
-    auto const idx = index_fut.get();
-    if (idx == lua_Integer{-1}) {
-      std::cerr << "Module " << root.string()
-                << " does not exist in the lake modules currently known.";
-      std::terminate();
-    }
-
-    mods.emplace_at(idx, std::move(static_mod));
-
-    lua_pushinteger(state, idx);
+    auto const index =
+        mods.append_module_with_path(root, std::move(static_mod));
+    lua_pushinteger(state, static_cast<lua_Integer>(index));
     return 1;
-#endif
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
@@ -1949,8 +1937,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-#if 0
-    auto const mod_idx = lua_tointeger(state, -1);
+    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
     lua_pop(state, 1);
 
     // i'm not sure if we actually need this variable now that we're using
@@ -2011,51 +1998,69 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
       unreachable();
     }
 
-    auto const compiled_files = builtins::Compiler::compile(static_mod);
-    auto const invoked_command =
-        std::format("ar crs {}/lib{}.a {}", static_mod.install_dir,
-                    static_mod.name, compiled_files);
+    threads.add_dep_tree_tasks(mod_idx, static_mod.tree);
+    threads.add_task([mod_idx, cache_path]() -> void {
+      expr_dbg(mod_idx);
+      expr_dbg(cache_path);
+      for (auto mod_state = mods.state_at(mod_idx);
+           mod_state !=
+           builtins::LakeModules::ModState::ready_for_final_compile;
+           mod_state = mods.state_at(mod_idx)) {
+        // NOTE: see install_exe for more info about these cases
+        switch (mod_state) {
+        case luamake::builtins::LakeModules::ModState::error:
+          return;
+        case luamake::builtins::LakeModules::ModState::ready_for_final_compile:
+          break;
+        case luamake::builtins::LakeModules::ModState::compiled:
+          return;
+        case luamake::builtins::LakeModules::ModState::uninitialized:
+          std::this_thread::sleep_for(std::chrono::nanoseconds{100});
+          break;
+        }
+      }
+      // idk maybe we could just capture parent_path(?)
+      auto const &parent_path = mods.get_module_path(mod_idx);
+      auto const &mod = mods.module_at(mod_idx);
+      auto const compiled_files = mods.get_all_compiled_files(mod_idx);
 
-    std::cout << '[' << invoked_command << "]\n";
-    std::cout.flush();
-    if (OS_CALL(invoked_command.c_str()) != 0) {
-      lua_pushstring(
-          state, std::format("Error compiling [{}]", invoked_command).c_str());
-      return lua_error(state);
-    }
+      auto const invoked_command = std::format(
+          "ar crs {}/lib{}.a {}", mod.install_dir, mod.name, compiled_files);
 
-    fs::create_directory(parent_path /
-                         fs::path(std::format("{}/{}", static_mod.install_dir,
-                                              static_mod.name)));
+      std::cout << '[' << invoked_command << "]\n";
+      std::cout.flush();
+      if (OS_CALL(invoked_command.c_str()) != 0) {
+        fprintf(stderr, "Error compiling [%s]\n", invoked_command.c_str());
+        mods.set_state_at(mod_idx, LakeModules::ModState::error);
+        return;
+      }
 
-    auto const formatted_files =
-        std::accumulate(static_mod.headers.begin(), static_mod.headers.end(),
-                        std::string(), [](auto &&e, auto &&next) {
-                          return std::format("{} {}", e, next.string());
-                        });
+      fs::create_directory(
+          parent_path /
+          fs::path(std::format("{}/{}", mod.install_dir, mod.name)));
 
-    auto const copy_headers = std::format(
-        "cp --target-directory={} {}",
-        (parent_path / static_mod.install_dir / static_mod.name).string(),
-        formatted_files);
-    std::cout << '[' << copy_headers << "]\n";
-    std::cout.flush();
-    if (OS_CALL(copy_headers.c_str()) != 0) {
-      lua_pushstring(
-          state,
-          std::format("Error moving headers [{}]", copy_headers).c_str());
-      return lua_error(state);
-    }
+      auto const formatted_files =
+          std::accumulate(mod.headers.begin(), mod.headers.end(), std::string(),
+                          [](auto &&e, auto &&next) {
+                            return std::format("{} {}", e, next.string());
+                          });
 
-    // if nothing goes wrong we can serialize the whole data, check the note in
-    // install_exe for more details about improvements
-    static_mod.serialize(cache_path);
+      auto const copy_headers = std::format(
+          "cp --target-directory={} {}",
+          (parent_path / mod.install_dir / mod.name).string(), formatted_files);
+      std::cout << '[' << copy_headers << "]\n";
+      std::cout.flush();
+      if (OS_CALL(copy_headers.c_str()) != 0) {
+        fprintf(stderr, "Error moving headers [%s]\n", copy_headers.c_str());
+        mods.set_state_at(mod_idx, LakeModules::ModState::error);
+        return;
+      }
+
+      // if nothing goes wrong we can serialize the whole data, check the note
+      // in install_exe for more details about improvements
+      mod.serialize(cache_path);
+    });
     return 0;
-#endif
-    lua_pushstring(
-        state,
-        "install_static function is not currently working :), will fix later");
-    return lua_error(state);
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
@@ -2355,8 +2360,6 @@ auto Builder::clang_bare(lua_State *state) noexcept -> int {
 }
 
 auto Builder::require(lua_State *state) noexcept -> int {
-  lua_pushstring(state, "requires function not currently implimented");
-  return lua_error(state);
   // because this is a function on an api boundary, we have to make sure that no
   // exceptions leak from it
   LUA_EXPECTED_ARGUMENTS(state, 2, require)
@@ -2366,7 +2369,6 @@ auto Builder::require(lua_State *state) noexcept -> int {
   LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TSTRING,
                     "Expected string to require function, found [%s]",
                     lua_typename(arg_t));
-#if 0
   try {
     auto fpath = [](lua_State *state) -> fs::path {
       auto const parent_path_t = lua_geti(state, -2, lua_Integer{1});
@@ -2389,8 +2391,6 @@ auto Builder::require(lua_State *state) noexcept -> int {
           fs::path(string(lua_tolstring(state, -2, nullptr)) + ".lua");
       return fs::canonical(fname);
     }(state);
-    // pop all arguments from the stack, and the b[1] that was pushed earlier
-    lua_pop(state, 3);
 
     auto ec = std::error_code{};
     if ((void)fs::exists(fpath, ec); ec) {
@@ -2413,7 +2413,6 @@ auto Builder::require(lua_State *state) noexcept -> int {
         state, "An unknown exception was encountered in the requires function");
     return lua_error(state);
   }
-#endif
 }
 
 auto Builder::link_lib(lua_State *state) noexcept -> int {
@@ -2820,18 +2819,13 @@ auto LakeModules::deinit() -> void {
   mods = nullptr;
 }
 
-#if 0
-// TODO: update this function, or remove it, it's only used in the require
-// function
 auto LakeModules::new_module(fs::path &&path) noexcept -> ModIndex {
-  if (size == cap)
-    resize();
-  luamake_paths[size] = std::move(path);
-  states[size] = ModState::uninitialized;
+  if (num_paths >= paths_cap)
+    resize_paths();
+  luamake_paths[num_paths] = std::move(path);
 
-  return ModIndex(ModIndex::not_found, ModIndex::not_found);
+  return ModIndex(num_paths++, ModIndex::not_found);
 }
-#endif
 
 auto LakeModules::get_module_path(ModIndex const idx) const noexcept
     -> fs::path {
