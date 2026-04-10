@@ -1,47 +1,51 @@
-cc:=clang++
-cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -fno-rtti
-bin_name:=build/luamake_c# TODO: change this when the c rewrite is done
-linker:=lld # if someone has clang they should have lld, so this is better, even if mold is a better linker
-includes:=lua
+# things that are allowed to be changed with some defaults
+LAKE_BUILD_DIR:=build
+LAKE_LINKER:=mold
+LAKE_BIN:=luamake_c#TODO: change this when the c rewrite is done
+LAKE_CC:=clang++
+# things that can be changed but probably shouldn't
+_cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -fno-rtti $(LAKE_CCFLAGS)
+_bin_name:=$(LAKE_BUILD_DIR)/$(LAKE_BIN)
+_includes:=lua
 
 .PHONY: all, dbg, ncolor, release, clean_submod, perf_testing, perf_testing_release
 
-files:=build/common.o build/luamake_strings.o build/luamake_pre_ir.o build/luamake_file.o build/luamake_builtins.o build/luamake_string_manip.o build/luamake_thread_pool.o build/main.o
-lua_a:=lua/liblua.a
+_files:=$(LAKE_BUILD_DIR)/common.o $(LAKE_BUILD_DIR)/luamake_strings.o $(LAKE_BUILD_DIR)/luamake_pre_ir.o $(LAKE_BUILD_DIR)/luamake_file.o $(LAKE_BUILD_DIR)/luamake_builtins.o $(LAKE_BUILD_DIR)/luamake_string_manip.o $(LAKE_BUILD_DIR)/luamake_thread_pool.o $(LAKE_BUILD_DIR)/main.o
+_lua_a:=lua/liblua.a
 
-all: $(files) $(lua_a)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+all: $(_files) $(_lua_a)
+	$(CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 # it seems like directly using fork is causing issues with fsanitize=address(?), if somebody is able to debug the issue and make a change that would be nice
 # that or there is still a memory leak and i'm lying to myself, idk valgrind seems to just vomit whenever i run it, i assume partially because lua has a gc in it, valgrind reports that a lot of things in the lua vm are potentially lost
-dbg: cc_flags+=-ggdb3 -DDEBUG -fno-omit-frame-pointer #-DPERF_TESTING
-dbg: $(files) $(lua_a)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+dbg: _cc_flags+=-ggdb3 -DDEBUG -fno-omit-frame-pointer
+dbg: $(_files) $(_lua_a)
+	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 ncolor: cc_flags+=-DNO_TERM_COLOR
-ncolor: $(files)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+ncolor: $(_files)
+	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 release: cc_flags+=-O3 -ffast-math -flto -march=native
-release: $(files)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+release: $(_files)
+	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 perf_testing: cc_flags+=-ggdb3 -DPERF_TESTING
-perf_testing: $(files) $(lua_a)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+perf_testing: $(_files) $(_lua_a)
+	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 perf_testing_release: cc_flags+=-DPERF_TESTING -O3 -ffast-math -flto -march=native
-perf_testing_release: $(files) $(lua_a)
-	$(cc) $(cc_flags) -o $(bin_name) $(files) -fuse-ld=$(linker) $(lua_a)
+perf_testing_release: $(_files) $(_lua_a)
+	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 build/%.o: src/%.cpp
-	$(cc) $(cc_flags) -o $@ -c $^ -I$(includes)
+	$(LAKE_CC) $(_cc_flags) -o $@ -c $^ -I$(_includes)
 
-$(lua_a):
+$(_lua_a):
 	$(MAKE) -C lua a -j4
 
 clean:
-	rm $(bin_name) build/*.o
+	rm $(_bin_name) build/*.o
 
 clean_submod:
-	rm $(lua_a) lua/*.o
+	rm $(_lua_a) lua/*.o
