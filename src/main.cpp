@@ -28,10 +28,6 @@ namespace fs = std::filesystem;
 
 using std::array, std::pair, std::string, std::string_view;
 
-#define BUILDER_OBJ "__luamake_builder"
-#define RUNNER_OBJ "__luamake_runner"
-#define TESTING_MACRO "__define_testing_macro"
-
 namespace luamake {
 namespace {
 enum class Value_t { NUMBER, STRING, BOOL_TRUE, BOOL_FALSE, NIL };
@@ -808,7 +804,6 @@ static auto clean(lua_State *const state) noexcept -> exit_t {
   for (auto &&mod : builtins::mods) {
     auto const cache_path = fs::path(
         std::format("{}/__luamake_cache/{}.cache", mod.install_dir, mod.name));
-    expr_dbg(cache_path);
     (void)fs::remove(cache_path);
   }
   return exit_t::ok;
