@@ -695,20 +695,21 @@ static auto help() noexcept -> exit_t {
   printf(
       "Usage: luamake [options]?" NL
       "options:" NL
-      "\t-h, help                          : Displays this help message." NL
-      "\tc, clean                          : Cleans the cache dir and removes the output." NL
-      "\tn, new <project-name>             : Creates a new subdir with name <project-name>, "
+      "\t-h, help                            : Displays this help message." NL
+      "\tc, clean                            : Cleans the cache dir and removes the output." NL
+      "\tcc, compile_commands                : Generates `compile_commands.json` file in `install_dir`, defined in the respective `luamake.lua` file." NL
+      "\tn, new <project-name> [project-args]: Creates a new subdir with name <project-name>, "
       "creating a default luamake build script." NL
-      "\ti, init <project-name> [init-args]:" NL
-      "\tb, build                          : Builds the project based on the `Build` function "
+      "\ti, init <project-name> [init-args]  :" NL
+      "\tb, build                            : Builds the project based on the `Build` function "
       "defined in the `luamake.lua` file in the current dir." NL
-      "\tt, test                           : Builds the project based on the `Build` function "
+      "\tt, test                             : Builds the project based on the `Build` function "
       "in the `luamake.lua` file in the current dir, with the additional macro "
       "`LUAMAKE_TESTS` defined. Then runs the tests defined in the `Test` "
       "function "
       "defined in the `luamake.lua` file in the current dir, displaying the "
       "number of tests that succeeded." NL
-      "\tr, run                            : Builds the project based on the `Build` function "
+      "\tr, run                              : Builds the project based on the `Build` function "
       "defined in the `luamake.lua` file in the current dir. Then runs the "
       "program, based on the `Run` function defined in the current dirs "
       "`luamake.lua` file." NL
