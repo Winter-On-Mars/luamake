@@ -22,6 +22,10 @@ namespace luamake {
 // defined in luamake_thread_pool
 struct CompilationPool;
 
+static auto constexpr BUILDER_OBJ = "__luamake_builder";
+static auto constexpr RUNNER_OBJ = "__luamake_runner";
+static auto constexpr TESTING_MACRO = "__define_testing_macro";
+
 namespace builtins {
 auto dump(lua_State *) noexcept -> int;
 
@@ -38,7 +42,7 @@ class Builder final {
   static auto new_static(lua_State *) noexcept -> int;
   static auto install_exe(lua_State *) noexcept -> int;
   static auto install_static(lua_State *) noexcept -> int;
-  static auto build_dep(lua_State *) noexcept -> int;
+
   static auto clang(lua_State *) noexcept -> int;
   static auto gcc_bare(lua_State *) noexcept -> int;
   static auto clang_bare(lua_State *) noexcept -> int;
@@ -51,7 +55,6 @@ class Builder final {
   // the compiler
   static auto install_exe_thunk(lua_State *) noexcept -> int;
   static auto install_static_thunk(lua_State *) noexcept -> int;
-  static auto build_dep_thunk(lua_State *) noexcept -> int;
 
   friend auto make_builder_obj(lua_State *) noexcept -> void;
   friend auto make_builder_thunk(lua_State *) noexcept -> void;
