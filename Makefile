@@ -22,19 +22,19 @@ dbg: _cc_flags+=-ggdb3 -DDEBUG -fno-omit-frame-pointer
 dbg: $(_files) $(_lua_a)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
-ncolor: cc_flags+=-DNO_TERM_COLOR
+ncolor: _cc_flags+=-DNO_TERM_COLOR
 ncolor: $(_files)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
-release: cc_flags+=-O3 -ffast-math -flto -march=native
+release: _cc_flags+=-O3 -ffast-math -flto -march=native
 release: $(_files)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
-perf_testing: cc_flags+=-ggdb3 -DPERF_TESTING
+perf_testing: _cc_flags+=-ggdb3 -DPERF_TESTING
 perf_testing: $(_files) $(_lua_a)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
-perf_testing_release: cc_flags+=-DPERF_TESTING -O3 -ffast-math -flto -march=native
+perf_testing_release: _cc_flags+=-DPERF_TESTING -O3 -ffast-math -flto -march=native
 perf_testing_release: $(_files) $(_lua_a)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
