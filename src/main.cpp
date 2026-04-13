@@ -844,6 +844,7 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     auto const &directory = mod.install_dir;
     auto const arguments = [&]() -> string {
       auto res = string();
+      res.reserve(1024);
       auto prev = size_t{};
       auto i = size_t{};
       for (; i < mod.compiler.size(); ++i) {
