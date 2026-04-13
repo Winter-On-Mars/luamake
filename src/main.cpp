@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <numeric>
 #include <string_view>
 #include <thread>
 #include <type_traits>
@@ -810,9 +811,6 @@ static auto clean(lua_State *const state) noexcept -> exit_t {
 }
 
 static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
-  error_message("Generating compile_command.json is not currently implimented, "
-                "fixing how modules are stored and accessed");
-  return exit_t::internal_error;
   auto const build_fn_t = lua_getglobal(state, "Build");
   switch (build_fn_t) {
   case LUA_TFUNCTION:
@@ -842,7 +840,6 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     return exit_t::lua_vm_error; // ?
   }
 
-#if 0
   for (auto &&mod : builtins::mods) {
     auto const &directory = mod.install_dir;
     auto const arguments = [&]() -> string {
@@ -944,7 +941,6 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     }
     cc_json.write(cc_json_string.c_str(), cc_json_string.size(), 1);
   }
-#endif
   return exit_t::ok;
 }
 
