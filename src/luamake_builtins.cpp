@@ -81,6 +81,12 @@ namespace fs = std::filesystem;
 // don't need to necessarily worry about popping from the stack to keep the
 // stack clean, see the lua docs for more info
 namespace luamake {
+// we use the call stack as a way to keep track of this variable
+// also it's not named the best(?), i can't think of a better name for it rn
+// though :)
+// NOTE: this variable *should* only be accessed through synchronous
+// code, so no need to mutex protect it(?)
+static auto previous_path = fs::path();
 namespace {
 using std::pair, std::array, std::string, std::string_view, std::vector,
     std::unordered_map, std::unordered_set;
@@ -1673,23 +1679,14 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const root_t = lua_geti(state, -2, 1);
-    if (root_t != LUA_TSTRING) {
-      throw std::runtime_error(
-          "idk what happened, but an internal error occured, where the type of "
-          "a value was modified when it shouldn't have.");
-    }
-    auto const root = fs::path(lua_tolstring(state, -1, nullptr));
-    lua_pop(state, 1); // need to pop the value off the stack now that we've
-                       // taken over it, and so that the config obj is at the
-                       // top of the stack for the Module function
-
     // TODO: move the gen_dep_tree function to the install step(?), that
     // way we can make use of async functions for deserialization
-    auto exe_mod = builtins::Module(builtins::Module::EXE, state, root);
+    auto exe_mod =
+        builtins::Module(builtins::Module::EXE, state, previous_path);
     exe_mod.gen_dep_tree();
 
-    auto const index = mods.append_module_with_path(root, std::move(exe_mod));
+    auto const index =
+        mods.append_module_with_path(previous_path, std::move(exe_mod));
 
     lua_pushinteger(state, static_cast<lua_Integer>(index));
 
@@ -1726,22 +1723,12 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const root_t = lua_geti(state, -2, 1);
-    if (root_t != LUA_TSTRING) {
-      throw std::runtime_error(
-          "idk what happened, but an internal error occured, where the type of "
-          "a value was modified when it shouldn't have.");
-    }
-    auto const root = fs::path(lua_tolstring(state, -1, nullptr));
-    lua_pop(state, 1); // need to pop the value off the stack now that we've
-                       // taken over it, and so that the config obj is at the
-                       // top of the stack for the Module function
-
-    auto static_mod = builtins::Module(builtins::Module::STATIC, state, root);
+    auto static_mod =
+        builtins::Module(builtins::Module::STATIC, state, previous_path);
     static_mod.gen_dep_tree();
 
     auto const index =
-        mods.append_module_with_path(root, std::move(static_mod));
+        mods.append_module_with_path(previous_path, std::move(static_mod));
     lua_pushinteger(state, static_cast<lua_Integer>(index));
     return 1;
   } catch (ModuleErr const &e) {
@@ -1771,9 +1758,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
 
   try {
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-    expr_dbg(mod_idx);
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
-    expr_dbg(parent_path);
 
     auto &exe_mod = mods.module_at(mod_idx);
     if (exe_mod.type != builtins::Module::EXE) {
@@ -1861,8 +1846,6 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     // it will point to something in static memory, but there might be some
     // issues with it
     threads.add_task([mod_idx, cache_path]() -> void {
-      expr_dbg(mod_idx);
-      expr_dbg(cache_path);
       for (auto mod_state = mods.state_at(mod_idx);
            mod_state !=
            builtins::LakeModules::ModState::ready_for_final_compile;
@@ -1929,7 +1912,6 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
 }
 
 auto Builder::install_static(lua_State *state) noexcept -> int {
-  fn_print();
   LUA_EXPECTED_ARGUMENTS(state, 1, install_static);
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to `install_static` "
@@ -1940,7 +1922,6 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     // mod_idx is at the top of the stack, and we'll just return it at the end,
     // assuming everything else has gone well
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-    expr_dbg(mod_idx);
 
     // i'm not sure if we actually need this variable now that we're using
     // everything as an absolute path but i'm not going to test that right now
@@ -2002,8 +1983,6 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
 
     threads.add_dep_tree_tasks(mod_idx, static_mod.tree);
     threads.add_task([mod_idx, cache_path]() -> void {
-      expr_dbg(mod_idx);
-      expr_dbg(cache_path);
       for (auto mod_state = mods.state_at(mod_idx);
            mod_state !=
            builtins::LakeModules::ModState::ready_for_final_compile;
@@ -2079,68 +2058,6 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     lua_pushstring(state, "Unfortunately an error occured");
     return lua_error(state);
   }
-}
-
-// NOTE: this function pushes a new builder object onto the stack, which means
-// that if you want to test subprojects you can't really (because the
-// LUAMAKE_TEST#n macro won't be included in the compilation)
-auto Builder::build_dep(lua_State *state) noexcept -> int {
-  fn_print();
-  LUA_EXPECTED_ARGUMENTS(state, 1, build_dep);
-  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
-                    "Expected type of argument to function "
-                    "`build_dep` to be number, found [%s]",
-                    lua_typename(ret_t));
-
-  try {
-    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-    expr_dbg(mod_idx);
-    auto const luamake_path = mods.get_module_path(mod_idx);
-    lua_pop(state, 1);
-
-    if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
-      (void)lua_pushfstring(
-          state,
-          "Unable to run the `luamake.lua` file required, in directory [%s]",
-          luamake_path.parent_path().c_str());
-      return lua_error(state);
-    }
-
-    LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
-                      "Expected table, found [%s]", lua_typename(ret_t));
-
-    if (auto const build_func_t = lua_getfield(state, -1, "Build");
-        build_func_t != LUA_TFUNCTION) {
-      (void)lua_pushfstring(
-          state,
-          "Expected `Build` to have type function when "
-          "returned in a table from the `luamake.lua` script at [%s]",
-          luamake_path.c_str());
-      return lua_error(state);
-    }
-
-    builtins::make_builder_obj(state);
-    lua_pushstring(state, luamake_path.parent_path().c_str());
-    lua_seti(state, -2, lua_Integer{1});
-    if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
-      return lua_error(state);
-    }
-    return 0;
-  } catch (std::exception const &e) {
-    lua_pushfstring(state, "%s", e.what());
-    return lua_error(state);
-  } catch (...) {
-    lua_pushstring(state, "Unfortunately an error has occured");
-    return lua_error(state);
-  }
-
-  lua_pushstring(
-      state,
-      std::format(
-          "Unreachable point reached :), please report this. Function [{}]",
-          __FUNCTION__)
-          .c_str());
-  return lua_error(state);
 }
 
 auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
@@ -2365,6 +2282,14 @@ auto Builder::clang_bare(lua_State *state) noexcept -> int {
 
 auto Builder::require(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 2, requires)
+  // we should probably use metatables to make sure that this table on top of
+  // the stack is actually the builder table, that was something i remember
+  // reading about in the best practices using the lua c api, but also that
+  // would create an error later on if somebody passes in the wrong table, so i
+  // don't really know that it's worth checking, like it'd just be a performance
+  // hit for no reason, just assume that the user has passed in the right thing,
+  // and if they haven't they'll (probably) figure it out later when something
+  // breaks
   LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -2), LUA_TTABLE,
                     "Expected table to require function, found [%s]",
                     lua_typename(arg_t));
@@ -2372,23 +2297,10 @@ auto Builder::require(lua_State *state) noexcept -> int {
                     "Expected string to require function, found [%s]",
                     lua_typename(arg_t));
   try {
-    auto const parent_path_t = lua_geti(state, -2, lua_Integer{1});
-    switch (parent_path_t) {
-    case LUA_TSTRING:
-      break;
-    case LUA_TNIL:
-      throw std::runtime_error(std::format(
-          "Got nil for b[1], forgot to set the parent path variable"));
-    default:
-      throw std::runtime_error(
-          std::format("expected type of b[1] to be string, got [{}]",
-                      lua_typename(parent_path_t)));
-    }
-    auto const parent_path = fs::path(lua_tolstring(state, -1, nullptr));
+    auto const parent_path = previous_path;
     auto const luamake_path = fs::canonical(
         parent_path /
-        fs::path(std::string(lua_tolstring(state, -2, nullptr)) + ".lua"));
-    expr_dbg(luamake_path);
+        fs::path(std::string(lua_tolstring(state, -1, nullptr)) + ".lua"));
 
     auto ec = std::error_code{};
     if ((void)fs::exists(luamake_path, ec); ec) {
@@ -2402,9 +2314,9 @@ auto Builder::require(lua_State *state) noexcept -> int {
     // to pass it along to the function, so that we don't have to recompute
     // things that we already know, idk how to do that rn though(?)
     mods.new_module(luamake_path);
-    // need to pop the call to lua_geti, and the first argument from the stack
-    // so we can have the builder object at the top of the stack
-    lua_pop(state, 2);
+    // want the builder table on top of the stack, and no longer need the path
+    // name now that we have it saved as a local variable
+    lua_pop(state, 1);
 
     if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
       (void)lua_pushfstring(
@@ -2442,13 +2354,7 @@ auto Builder::require(lua_State *state) noexcept -> int {
                       "the top of the stack, found [%s]",
                       lua_typename(ret_t));
 
-    {
-      // idk we have to make a tmp here, otherwise we run into some memory
-      // issues
-      auto const tmp_parent_path = luamake_path.parent_path();
-      lua_pushstring(state, tmp_parent_path.c_str());
-      lua_seti(state, -2, lua_Integer{1});
-    }
+    previous_path = luamake_path.parent_path();
 
     // TODO: make sure that the function actually returns the integer, idk if
     // that's possible, but if so we can do that, and double check that
@@ -2456,6 +2362,8 @@ auto Builder::require(lua_State *state) noexcept -> int {
     if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
       return lua_error(state);
     }
+
+    previous_path = parent_path;
 
     return 1;
   } catch (std::exception const &e) {
@@ -2482,14 +2390,8 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
     auto const lib_to_be_linked = ModIndex(lua_tointeger(state, -2));
     auto const lib_getting_diddled = ModIndex(lua_tointeger(state, -1));
 
-    expr_dbg(lib_to_be_linked);
-    expr_dbg(lib_getting_diddled);
-
     auto const &mod_linked = mods.module_at(lib_to_be_linked);
     auto &mod_d = mods.module_at(lib_getting_diddled);
-
-    expr_dbg(mod_linked.install_dir);
-    expr_dbg(mod_linked.name);
 
     // this should be correct, basically stolen from the install_static
     // function, there shouldn't be any issues, because the install_static
@@ -2553,7 +2455,6 @@ auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
 
   try {
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-    lua_pop(state, 1);
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
     auto const &exe_mod = mods.module_at(mod_idx);
@@ -2563,7 +2464,7 @@ auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
           static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
               exe_mod.type)));
     }
-    return 0;
+    return 1;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
@@ -2595,7 +2496,6 @@ auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
 
   try {
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-    lua_pop(state, 1);
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
     auto const &exe_mod = mods.module_at(mod_idx);
@@ -2605,7 +2505,7 @@ auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
           static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
               exe_mod.type)));
     }
-    return 0;
+    return 1;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
@@ -2622,66 +2522,6 @@ auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
     lua_pushstring(state, "Unfortunately an error occured");
     return lua_error(state);
   }
-}
-
-// NOTE: this function pushes a new builder object onto the stack, which means
-// that if you want to test subprojects you can't really (because the
-// LUAMAKE_TEST#n macro won't be included in the compilation)
-auto Builder::build_dep_thunk(lua_State *state) noexcept -> int {
-  LUA_EXPECTED_ARGUMENTS(state, 1, build_dep);
-  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
-                    "Expected type of argument to function "
-                    "`build_dep` to be number, found [%s]",
-                    lua_typename(ret_t));
-
-  try {
-    auto const luamake_path =
-        mods.get_module_path(ModIndex(lua_tointeger(state, -1)));
-    lua_pop(state, 1);
-
-    if (luaL_dofile(state, luamake_path.c_str()) != LUA_OK) {
-      (void)lua_pushfstring(
-          state,
-          "Unable to run the `luamake.lua` file required, in directory [%s]",
-          luamake_path.parent_path().c_str());
-      return lua_error(state);
-    }
-
-    LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
-                      "Expected table, found [%s]", lua_typename(ret_t));
-
-    if (auto const build_func_t = lua_getfield(state, -1, "Build");
-        build_func_t != LUA_TFUNCTION) {
-      (void)lua_pushfstring(
-          state,
-          "Expected `Build` to have type function when "
-          "returned in a table from the `luamake.lua` script at [%s]",
-          luamake_path.c_str());
-      return lua_error(state);
-    }
-
-    builtins::make_builder_thunk(state);
-    lua_pushstring(state, luamake_path.parent_path().c_str());
-    lua_seti(state, -2, lua_Integer{1});
-    if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
-      return lua_error(state);
-    }
-    return 0;
-  } catch (std::exception const &e) {
-    lua_pushfstring(state, "%s", e.what());
-    return lua_error(state);
-  } catch (...) {
-    lua_pushstring(state, "Unfortunately an error has occured");
-    return lua_error(state);
-  }
-
-  lua_pushstring(
-      state,
-      std::format(
-          "Unreachable point reached :), please report this. Function [{}]",
-          __FUNCTION__)
-          .c_str());
-  return lua_error(state);
 }
 
 auto Runner::run(lua_State *L) noexcept -> int {
@@ -2748,7 +2588,7 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 9);
+  lua_createtable(state, 0, 10);
 
   lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
@@ -2771,9 +2611,6 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::install_static);
   lua_setfield(state, -2, "install_static");
 
-  lua_pushcfunction(state, &Builder::build_dep);
-  lua_setfield(state, -2, "build_dep");
-
   lua_pushcfunction(state, &Builder::require);
   lua_setfield(state, -2, "requires");
 
@@ -2783,10 +2620,7 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::get_os);
   lua_setfield(state, -2, "get_os");
 
-  // this will set Lake[1] = $CWD, which could cause issues, but you should be
-  // calling luamake in the same directory with the luamake.lua file in it
-  lua_pushstring(state, fs::current_path().c_str());
-  lua_seti(state, -2, 1);
+  previous_path = fs::current_path();
 
   // TODO: add the functions install_dynamic
 }
@@ -2799,7 +2633,7 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 }
 
 auto make_builder_thunk(lua_State *state) noexcept -> void {
-  lua_createtable(state, 1, 9);
+  lua_createtable(state, 0, 10);
 
   lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
@@ -2822,9 +2656,6 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::install_static_thunk);
   lua_setfield(state, -2, "install_static");
 
-  lua_pushcfunction(state, &Builder::build_dep_thunk);
-  lua_setfield(state, -2, "build_dep");
-
   lua_pushcfunction(state, &Builder::require);
   lua_setfield(state, -2, "requires");
 
@@ -2834,10 +2665,9 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::get_os);
   lua_setfield(state, -2, "get_os");
 
-  // this will set Lake[1] = $CWD, which could cause issues, but you should be
-  // calling luamake in the same directory with the luamake.lua file in it
-  lua_pushstring(state, fs::current_path().c_str());
-  lua_seti(state, -2, 1);
+  // idk, we're expecting you to be calling luamake in the same path the
+  // luamake.lua file is in
+  previous_path = fs::current_path();
 
   // TODO: add the functions install_dynamic
 }
@@ -2881,11 +2711,12 @@ auto LakeModules::deinit() -> void {
 }
 
 auto LakeModules::new_module(fs::path const &path) noexcept -> void {
-  expr_dbg(path);
   if (num_paths >= paths_cap)
     resize_paths();
   luamake_paths[num_paths++] = path;
+#ifdef DEBUG
   dump_paths(std::cout);
+#endif // DEBUG
 }
 
 auto LakeModules::get_module_path(ModIndex const idx) const noexcept
@@ -2947,8 +2778,6 @@ auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
 
 auto LakeModules::append_module_with_path(fs::path const &path, Module &&mod)
     -> ModIndex {
-  expr_dbg(path);
-  expr_dbg(path / "luamake.lua");
   if (num_mods >= mods_cap) {
     resize_mods();
   }
@@ -2962,7 +2791,9 @@ auto LakeModules::append_module_with_path(fs::path const &path, Module &&mod)
     }
   }
   if (files == ModIndex::not_found) {
+#ifdef DEBUG
     dump_paths(std::cout);
+#endif // DEBUG
     throw std::runtime_error(
         std::format("Unable to associate module with path [{}], path in the "
                     "known luamake paths",
