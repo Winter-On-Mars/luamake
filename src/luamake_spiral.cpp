@@ -65,6 +65,11 @@ auto Serializer::write(std::integral auto t) -> size_t {
     memcpy(m.buffer.get() + m.size, &t, sizeof(t));
     return sizeof(t);
   } break;
+  case 4: {
+    auto const tmp = htobe32(t);
+    memcpy(buffer() + m.size, &tmp, sizeof(t));
+    return sizeof(t);
+  } break;
   case 8: {
     auto const tmp = htobe64(t);
     memcpy(m.buffer.get() + m.size, &tmp, sizeof(t));
@@ -87,7 +92,7 @@ auto Serializer::resize(size_t at_least) -> void {
   auto new_buffer = std::make_unique<u8[]>(new_size);
   memcpy(new_buffer.get(), buffer(), size());
   m.buffer = std::move(new_buffer);
-  m.size = new_size;
+  m.cap = new_size;
 }
 
 auto Serializer::serialize(builtins::Module const &mod) -> void {
@@ -119,11 +124,15 @@ auto Serializer::serialize(builtins::Module::DepTree const &tree) -> void {
       write(tree.types.get(), sizeof(decltype(tree.types[0])) * tree.num_files);
   m.size +=
       write(tree.files.get(), sizeof(decltype(tree.files[0])) * tree.num_files);
-  auto constexpr tree_dep_size = sizeof(decltype(tree.deps[0][0]));
+  // auto constexpr tree_dep_size = sizeof(decltype(tree.deps[0][0]));
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     auto const dep_size = tree.deps[i].size();
     m.size += write(dep_size);
-    m.size += write(tree.deps[i].data(), dep_size * tree_dep_size);
+    for (auto &&dep : tree.deps[i]) {
+      // we have to be sure to actually do the endian swap
+      m.size += write(dep);
+    }
+    // m.size += write(tree.deps[i].data(), dep_size * tree_dep_size);
   }
   m.size += write(tree.hashes.get(),
                   sizeof(decltype(tree.hashes[0])) * tree.num_files);
@@ -147,7 +156,7 @@ auto Serializer::serialize(std::string_view const str) -> void {
 }
 
 struct Deserializer {
-  Deserializer(fs::path const &path);
+  Deserializer(File &file);
 
   template <class T> auto deserialize() -> T = delete;
   template <> auto deserialize<builtins::Module>() -> builtins::Module;
@@ -172,6 +181,10 @@ private:
 
   template <>
   [[nodiscard]]
+  auto read<uint>() -> uint;
+
+  template <>
+  [[nodiscard]]
   auto read<u8>() -> u8;
 
   template <class T>
@@ -189,8 +202,7 @@ private:
   } m;
 };
 
-Deserializer::Deserializer(fs::path const &path) : m() {
-  auto file = File(path, File::READ | File::BINARY);
+Deserializer::Deserializer(File &file) : m() {
   auto &&[size, buf] = file.dump_content();
   m.size = size;
   m.buf = std::move(buf);
@@ -203,6 +215,16 @@ template <> auto Deserializer::read<size_t>() -> size_t {
   // this *should* be the same as if we did an if constexpr branch
   res = be64toh(res);
   m.cur += sizeof(size_t);
+  return res;
+}
+
+template <> auto Deserializer::read<uint>() -> uint {
+  check(sizeof(uint), "uint");
+  auto res = uint{};
+  memcpy(&res, buffer() + m.cur, sizeof(uint));
+  // this *should* be the same as if we did an if constexpr branch
+  res = be32toh(res);
+  m.cur += sizeof(uint);
   return res;
 }
 
@@ -273,13 +295,11 @@ auto Deserializer::deserialize<builtins::Module::DepTree>()
   res.deps = std::make_unique<std::vector<uint>[]>(res.num_files);
   for (auto i = size_t{}; i < res.num_files; ++i) {
     auto const size = read<size_t>();
-    res.deps[i].reserve(size);
-    // i think if we reinterpret_cast, the pointer addition should take into
-    // account sizeof(uint), so we don't need to do the multiplication
-    auto const tmp =
-        std::span<uint>(reinterpret_cast<uint *>(buffer()) + m.cur,
-                        reinterpret_cast<uint *>(buffer()) + m.cur + size);
-    res.deps[i].assign(tmp.begin(), tmp.end());
+    res.deps[i] = std::vector<uint>(size);
+    // res.deps[i].reserve(size);
+    for (auto j = size_t{}; j < size; ++j) {
+      res.deps[i][j] = read<uint>();
+    }
   }
   res.hashes = readv<size_t>(res.num_files);
   return res;
@@ -311,27 +331,24 @@ template <> auto Deserializer::deserialize<OwnedString>() -> OwnedString {
   auto const size = read<size_t>();
   check(size * sizeof(char), "OwnedString");
   auto buf = static_cast<char *>(malloc(size * sizeof(char)));
-  memcpy(buf, buffer() + m.cur, size * sizeof(char));
+  auto res = OwnedString(buf, size);
+  memcpy(res.buffer, buffer() + m.cur, size * sizeof(char));
+  res.size = size;
   m.cur += size * sizeof(char);
-  return OwnedString(buf, size);
+  return res;
 }
 
 auto serialize(builtins::Module const &mod, std::filesystem::path const &path)
     -> void {
-  // this just kind of sticks around, when we only really need it at the end,
-  // but if there's some issue opening the file, then we'd want to error out
-  // early(?)
+  auto cereal = Serializer();
+  cereal.serialize(mod);
+
   auto outfile = File(path, File::WRITE | File::CREATE);
   // we should also add some error checking for this
   // idk what we'd do if we can't serialize, like it's not a fatel error, but
   // it's something
   if (!outfile)
     return;
-
-  auto cereal = Serializer();
-
-  cereal.serialize(mod);
-
   outfile.write(cereal.buffer(), cereal.size(), 1);
   outfile.flush();
 #ifdef DEBUG
@@ -350,7 +367,7 @@ auto deserialize(fs::path const &path)
 #ifdef DEBUG
   std::cout << std::format("deserializing file [{}]\n", path.string());
 #endif // DEBUG
-  auto decereal = Deserializer(path);
+  auto decereal = Deserializer(file);
   return decereal.deserialize<builtins::Module>();
 }
 } // namespace luamake::spl

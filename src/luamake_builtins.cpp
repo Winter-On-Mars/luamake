@@ -3,6 +3,7 @@
 #include "common.hpp"
 #include "luamake_file.hpp"
 #include "luamake_pre_ir.hpp"
+#include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
 #include "luamake_thread_pool.hpp"
 #include <atomic>
@@ -525,7 +526,7 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   auto const files_deps = interpreter.interpret(
       std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
 
-#ifdef DEBUG
+#ifndef DEBUG
   std::cout << "Possible includes for " << dep.string() << ": {\n";
   for (auto &&include : files_deps) {
     std::cout << "\t" << include << "\n";
@@ -630,7 +631,9 @@ auto Module::DepTree::display(std::ostream &out,
   out << "All string = [" << string_view{all_paths.buffer, all_paths.size}
       << "]\n";
   out.flush();
+  out << std::hex;
   display_impl(out, depth, 0);
+  out << std::dec;
 }
 
 auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
@@ -665,7 +668,7 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
                      all_paths.buffer + files[idx].end}
       << "\",\n";
 
-  out << std::hex << indents << "\"hash\":" << hashes[idx] << ",\n";
+  out << indents << "\"hash\":" << hashes[idx] << ",\n";
 
   out << indents << "\"deps\":[\n";
 
@@ -678,264 +681,6 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
   out << indents << "}\n";
 }
 #endif // DEBUG
-
-// TODO: idk make this better (faster, or smaller file size)
-// TODO: update this function to return some error code or whatever
-// TODO: update this to also include the files that were actually compiled for
-// some kind of incrimental build process
-auto Module::serialize(fs::path const &path) const -> void {
-  auto outfile = File(path, File::WRITE | File::CREATE);
-  if (!outfile) {
-    return;
-  }
-
-  struct memory_buffer final {
-    auto resize(size_t at_least = 0) noexcept -> void {
-      auto const new_size = 3 * size / 2 + at_least;
-      auto new_buffer = std::make_unique<u8[]>(new_size);
-      memcpy(new_buffer.get(), buffer.get(), size);
-      buffer = std::move(new_buffer);
-      size = new_size;
-    }
-    auto write(void const *src, size_t n_bytes) noexcept -> void {
-      if (cur + n_bytes >= size)
-        resize(n_bytes);
-      memcpy(buffer.get() + cur, src, n_bytes);
-      cur += n_bytes;
-    }
-    auto write_string(std::string_view const str) noexcept -> void {
-      auto const str_size = str.size();
-      write(&str_size, sizeof(str_size));
-      write(str.data(), str_size * sizeof(char));
-    }
-    auto write_vector(std::span<fs::path const> const span) noexcept -> void {
-      auto const span_size = span.size();
-      write(&span_size, sizeof(span_size));
-
-      for (auto i = size_t{}; i < span_size; ++i) {
-        write_string(span[i].string());
-      }
-    }
-
-    std::unique_ptr<u8[]> buffer;
-    size_t cur;
-    size_t size;
-  } mem = {std::make_unique<u8[]>(1024), 0, 1024};
-
-  mem.write(&type, sizeof(type));
-
-#pragma region DepTree
-  mem.write(&tree.all_paths.size, sizeof(tree.all_paths.size));
-  mem.write(tree.all_paths.buffer, tree.all_paths.size * sizeof(char));
-
-  mem.write(&tree.num_files, sizeof(tree.num_files));
-
-  // it would probably be better to have a vec_write function or something like
-  // that, which would help with buffering, but this should be a fine hack for
-  // now
-  mem.write(tree.types.get(), sizeof(decltype(tree.types[0])) * tree.num_files);
-  mem.write(tree.files.get(), sizeof(decltype(tree.files[0])) * tree.num_files);
-
-  auto constexpr tree_dep_size = sizeof(decltype(tree.deps[0][0]));
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    auto const dep_size = tree.deps[i].size();
-    mem.write(&dep_size, sizeof(dep_size));
-
-    mem.write(tree.deps[i].data(), dep_size * tree_dep_size);
-  }
-
-  mem.write(tree.hashes.get(),
-            sizeof(decltype(tree.hashes[0])) * tree.num_files);
-
-#pragma endregion DepTree
-
-  mem.write_vector(roots);
-  mem.write_vector(headers);
-  mem.write_vector(includes);
-  mem.write_vector(dep_includes);
-  mem.write_vector(sys_includes);
-  mem.write_vector(linking);
-
-  // TODO: serialize pp::Interpreter
-  mem.write_string(compiler);
-  mem.write_string(name);
-  mem.write_string(install_dir);
-
-  // TODO: this part can fail and we should report it :)
-  outfile.write(mem.buffer.get(), mem.cur, 1);
-  outfile.flush();
-#ifdef DEBUG
-  std::cout << "serialized file [" << path.string() << "] with [" << mem.cur
-            << "] byte\n";
-#endif // DEBUG
-}
-
-// TODO: write this, figure out how to work with the pp::Interpreter macros
-auto Module::deserialize(fs::path const &path)
-    -> std::variant<Module, std::string> {
-  auto file = File(path, File::READ | File::BINARY);
-  if (!file) {
-    return std::format("unable to open serialization file [{}]", path.c_str());
-  }
-  std::cout << "deserializing file [" << path.string() << "]\n";
-  struct Deserializer final {
-    constexpr Deserializer(File &file) noexcept
-        : buf(nullptr), cur(0), size(0) {
-      auto &&[fsize, fcontent] = file.dump_content();
-      size = fsize;
-      buf = std::move(fcontent);
-    }
-
-    auto check(size_t const amount, std::string_view const name) -> void {
-      // i think this should be >=, but when that happens we seem to get false
-      // positives when cur + amount == size(?)
-      // i'm not smart enough with serialization to know if that is what's
-      // supposed to happen or not
-      if (cur + amount > size) {
-        throw std::runtime_error(std::format(
-            "Attempting to read [{}] bytes for [{}], but not enough bytes "
-            "available in buffer. cur = [{}], size = [{}].",
-            amount, name, cur, size));
-      }
-    }
-
-#define read_basic_t(t)                                                        \
-  auto read_##t() -> t {                                                       \
-    check(sizeof(t), #t);                                                      \
-    auto const res = static_cast<t>(buf[cur]);                                 \
-    cur += sizeof(t);                                                          \
-    return res;                                                                \
-  }
-    read_basic_t(size_t);
-    read_basic_t(len_t);
-    read_basic_t(Module_t);
-#undef read_basic_t
-    auto read_uint() -> unsigned int {
-      check(sizeof(unsigned), "unsigned int");
-      auto const res = static_cast<unsigned int>(buf[cur]);
-      cur += sizeof(unsigned int);
-      return res;
-    }
-
-    auto read_OwnedString() -> OwnedString {
-      auto const str_size = read_len_t();
-      if (cur + str_size >= size)
-        unreachable();
-      // we would normally have to allocate str_size + 1, but the null
-      // terminator is being included in the cache (which is not intended and
-      // when that's fixed this will need to be updated as well)
-      auto str = (char *)malloc(sizeof(char) * str_size);
-      auto res = OwnedString(str, str_size);
-      memcpy(res.buffer, buf.get() + cur, sizeof(char) * str_size);
-      res.size = str_size; // this shouldn't really be allowed, but i fucked
-                           // up the api for OwnedString, and this seems
-                           // like the only way to make this work :)
-      cur += sizeof(char) * str_size;
-      return res;
-    }
-
-    auto vec_read_types(size_t const vec_size)
-        -> std::unique_ptr<DepTree::SourceFile_t[]> {
-      check(vec_size * sizeof(DepTree::SourceFile_t), "SourceFile_t");
-
-      auto res = std::make_unique<DepTree::SourceFile_t[]>(vec_size);
-      memcpy(res.get(), buf.get() + cur,
-             vec_size * sizeof(DepTree::SourceFile_t));
-      cur += vec_size * sizeof(DepTree::SourceFile_t);
-      return res;
-    }
-    auto vec_read_files(size_t const vec_size)
-        -> std::unique_ptr<StringViews[]> {
-      check(vec_size * sizeof(StringViews), "StringViews");
-
-      auto res = std::make_unique<StringViews[]>(vec_size);
-      memcpy(res.get(), buf.get() + cur, vec_size * sizeof(StringViews));
-      cur += vec_size * sizeof(StringViews);
-      return res;
-    }
-    auto vec_read_deps(size_t const vec_size)
-        -> std::unique_ptr<vector<unsigned int>[]> {
-      auto res = std::make_unique<vector<unsigned int>[]>(vec_size);
-      for (auto i = size_t{}; i < vec_size; ++i) {
-        auto const this_vec_size = read_size_t();
-        // TODO: optimize this
-        res[i].reserve(this_vec_size);
-        for (auto j = size_t{}; j < this_vec_size; ++j) {
-          res[i].push_back(read_uint());
-        }
-      }
-      return res;
-    }
-
-    auto vec_read_hashes(size_t const vec_size) -> std::unique_ptr<size_t[]> {
-      check(vec_size * sizeof(size_t), "Hashes");
-
-      auto res = std::make_unique<size_t[]>(vec_size);
-      memcpy(res.get(), buf.get() + cur, vec_size * sizeof(size_t));
-      cur += vec_size * sizeof(size_t);
-      return res;
-    }
-
-    auto read_std_string() -> std::string {
-      auto res = std::string();
-      auto const str_size = read_size_t();
-      check(str_size * sizeof(char), "std::string");
-      res.reserve(str_size);
-      res.assign(buf.get() + cur, buf.get() + cur + str_size * sizeof(char));
-      cur += str_size * sizeof(char);
-      return res;
-    }
-
-    auto read_std_vector_fs_path() -> std::vector<fs::path> {
-      auto res = vector<fs::path>();
-      auto const vec_size = read_size_t();
-      res.reserve(vec_size);
-      for (auto i = size_t{}; i < vec_size; ++i) {
-        res.emplace_back(fs::path(read_std_string()));
-      }
-      return res;
-    }
-
-    std::unique_ptr<u8[]> buf;
-    size_t cur;
-    size_t size;
-  } mem = Deserializer(file);
-  try {
-    auto mod = Module();
-
-    mod.type = mem.read_Module_t();
-
-#pragma region DepTree
-    // NOTE: i'm not sure if this is worth it, but if you initialize mod.tree =
-    // DepTree(number), then it causes a memory leak, not fully sure where, but
-    // we can just ignore it by not initializing it with anything
-    mod.tree = DepTree();
-    mod.tree.all_paths = mem.read_OwnedString();
-    mod.tree.num_files = mem.read_size_t();
-    mod.tree.types = mem.vec_read_types(mod.tree.num_files);
-    mod.tree.files = mem.vec_read_files(mod.tree.num_files);
-    // TODO: do the vector read of the vectors for the deps
-    mod.tree.deps = mem.vec_read_deps(mod.tree.num_files);
-    mod.tree.hashes = mem.vec_read_hashes(mod.tree.num_files);
-#pragma endregion DepTree
-    mod.roots = mem.read_std_vector_fs_path();
-    mod.headers = mem.read_std_vector_fs_path();
-    mod.includes = mem.read_std_vector_fs_path();
-    mod.dep_includes = mem.read_std_vector_fs_path();
-    mod.sys_includes = mem.read_std_vector_fs_path();
-    mod.linking = mem.read_std_vector_fs_path();
-
-    // TODO: deserialize pp::Interpreter
-
-    mod.compiler = mem.read_std_string();
-    mod.name = mem.read_std_string();
-    mod.install_dir = mem.read_std_string();
-
-    return mod;
-  } catch (std::exception const &e) {
-    return std::string(e.what());
-  }
-}
 
 // TODO: optimize this, reorder equality checks, maybe in memory serialize the
 // objects and just compare the bytes(?)
@@ -1812,7 +1557,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     // NOTE: we might be able to put this on a background thread, then just
     // continue on doing things, and when this is done we do the comparison, but
     // for now we'll have this be blocking :)
-    auto const maybe_cached_mod = builtins::Module::deserialize(cache_path);
+    auto const maybe_cached_mod = spl::deserialize(cache_path);
     /* compare the current mod with the cached mod */
     switch (maybe_cached_mod.index()) {
     case 0: {
@@ -1830,7 +1575,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     } break;
     case 1: {
       auto const &error_message = std::get<std::string>(maybe_cached_mod);
-      std::cerr << std::format("Error message = [{}]\n", error_message);
+      std::cerr << std::format("[{}]\n", error_message);
     } break;
     default:
       unreachable();
@@ -1869,7 +1614,12 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
       auto const invoked_command =
           std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
                       mod.name, actually_compiled_files, mod.format_links());
-      fprintf(stdout, "[%s]\n", invoked_command.c_str());
+      if (builtins::cl_options.verbose) {
+        fprintf(stdout, "[%s]\n", invoked_command.c_str());
+      } else {
+        // idk we can make this prettier
+        fprintf(stdout, "Building [%s]\n", mod.name.c_str());
+      }
       // NOTE: figure out how to handle errors with the lua vm, if there's
       // internal mutex's that will stop conflicting and corrupting the stack,
       // or if we have to worry about a mutex around the lua vm ourselves
@@ -1889,7 +1639,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
         // lua_pushfstring(state, "Error compiling [%s]",
         // invoked_command.c_str()); (void)lua_error(state);
       } else {
-        mod.serialize(cache_path);
+        spl::serialize(mod, cache_path);
       }
     });
     return 1;
@@ -1965,7 +1715,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
         fs::path(std::format("{}/__luamake_cache/{}.cache",
                              static_mod.install_dir, static_mod.name));
     // NOTE: see note in install_exe
-    auto const maybe_cached_mod = builtins::Module::deserialize(cache_path);
+    auto const maybe_cached_mod = spl::deserialize(cache_path);
     switch (maybe_cached_mod.index()) {
     case 0: {
       auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
@@ -2039,7 +1789,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
 
       // if nothing goes wrong we can serialize the whole data, check the note
       // in install_exe for more details about improvements
-      mod.serialize(cache_path);
+      spl::serialize(mod, cache_path);
     });
     return 1;
   } catch (ModuleErr const &e) {
@@ -2749,7 +2499,7 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
   auto &lof = compiled_files[idx.mods];
   auto const &mod = mods[idx.mods];
 #ifdef DEBUG
-  std::cout << DBG "pushing back" NORMAL
+  std::cout << DBG "[pushing back]" NORMAL
             << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
             << " to " << idx << std::endl;
 #endif // DEBUG

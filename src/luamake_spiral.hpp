@@ -9,6 +9,7 @@ namespace builtins {
 struct Module;
 }
 
+// TODO: this module is broken, idk how we fix it :)
 namespace spl {
 auto serialize(builtins::Module const &, std::filesystem::path const &) -> void;
 
