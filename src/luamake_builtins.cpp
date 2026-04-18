@@ -526,7 +526,7 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   auto const files_deps = interpreter.interpret(
       std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
 
-#ifndef DEBUG
+#ifdef DEBUG
   std::cout << "Possible includes for " << dep.string() << ": {\n";
   for (auto &&include : files_deps) {
     std::cout << "\t" << include << "\n";
