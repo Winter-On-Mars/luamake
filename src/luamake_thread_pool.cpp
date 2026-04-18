@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <iostream>
 #include <mutex>
 #include <thread>
 
@@ -52,7 +51,6 @@ auto CompilationPool::deinit() noexcept -> void {
 auto CompilationPool::add_dep_tree_tasks(
     builtins::ModIndex const idx,
     builtins::Module::DepTree const &tree) noexcept -> void {
-  expr_dbg(idx);
   auto const &mod = builtins::mods.module_at(idx);
   auto const include_path = mod.format_includes();
   for (auto i = size_t{}; i < tree.num_files; ++i) {
@@ -73,12 +71,15 @@ auto CompilationPool::add_dep_tree_tasks(
     add_task([idx, include_path, compiler = mod.compiler,
               install_dir = mod.install_dir, name = mod.name,
               path = fname]() -> void {
-      fprintf(stdout, "\tworking with path [%s]\n", path.c_str());
       auto const invoked_command =
           std::format("{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path,
                       path.c_str(), install_dir, name, path.stem().c_str());
       // idk i tried using std::cout, but there was an error :)
-      fprintf(stdout, "[%s]\n", invoked_command.c_str());
+      if (builtins::cl_options.verbose) {
+        fprintf(stdout, "[%s]\n", invoked_command.c_str());
+      } else {
+        fprintf(stdout, "Building [%s]\n", path.c_str());
+      }
       if (OS_CALL(invoked_command.c_str()) == 0) {
         builtins::mods.add_compiled_file(idx, path.stem().string());
       } else {
