@@ -12,7 +12,7 @@ struct Module;
 namespace spl {
 auto serialize(builtins::Module const &, std::filesystem::path const &) -> void;
 
-auto deserializer(std::filesystem::path const &path)
+auto deserialize(std::filesystem::path const &path)
     -> std::variant<builtins::Module, std::string>;
 
 struct Serializer;
