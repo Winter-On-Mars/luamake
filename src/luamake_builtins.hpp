@@ -3,6 +3,7 @@
 
 #include "common.hpp"
 #include "luamake_pre_ir.hpp"
+#include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
 
 #include <filesystem>
@@ -89,12 +90,6 @@ struct Module final {
    */
   auto gen_dep_tree() noexcept(false) -> void;
 
-  auto serialize(std::filesystem::path const &path) const -> void;
-  [[nodiscard(
-      "We spent all this time deserializing you better use the result")]]
-  static auto deserialize(std::filesystem::path const &path)
-      -> std::variant<Module, std::string>;
-
   Module(Module &&) noexcept = default;
 
   Module &operator=(Module &&that) noexcept = default;
@@ -109,6 +104,8 @@ struct Module final {
   // this is kinda stupid i'm not gonna lie, but this is the only
   // way i can think to have DepTree be able to reference Module and vice versa
   // without having to worry about pointer indirection
+  // TODO: have the DepTree depend on the LakeModules, where all of these paths
+  // are relative to said lakemodule
   struct DepTree final {
     enum class SourceFile_t : u8 {
       IMPL,
@@ -175,7 +172,7 @@ struct Module final {
     size_t cap_files;
     std::unique_ptr<SourceFile_t[]> types;
     std::unique_ptr<StringViews[]> files;
-    std::unique_ptr<std::vector<unsigned int>[]> deps;
+    std::unique_ptr<std::vector<uint>[]> deps;
     std::unique_ptr<size_t[]> hashes;
 
     /**
@@ -205,6 +202,8 @@ struct Module final {
     friend CompilationPool;
     friend Module;
     friend Builder;
+    friend spl::Serializer;
+    friend spl::Deserializer;
   };
 
   // NOTE: we could probably use the empty space in the vector<fs::path> headers
@@ -262,6 +261,8 @@ struct Module final {
 
   friend CompilationPool;
   friend Builder;
+  friend spl::Serializer;
+  friend spl::Deserializer;
 };
 
 struct ModIndex final {
