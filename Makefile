@@ -20,7 +20,7 @@ all: $(_files) $(_lua_a)
 # that or there is still a memory leak and i'm lying to myself, idk valgrind seems to just vomit whenever i run it, i assume partially because lua has a gc in it, valgrind reports that a lot of things in the lua vm are potentially lost
 dbg: _cc_flags+=-ggdb3 -DDEBUG -fno-omit-frame-pointer
 dbg: $(_files) $(_lua_a)
-	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
+	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) --for-linker=--gdb-index  $(_lua_a)
 
 ncolor: _cc_flags+=-DNO_TERM_COLOR
 ncolor: $(_files)
