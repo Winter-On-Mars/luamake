@@ -564,6 +564,13 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   if (idx == ROOT_IDX)
     return fs::current_path();
   auto &&[start, end] = files[idx];
+  // HACK: idk theres some bug happening, this "fixes" it, but we have to figure
+  // out where the acutal issue is
+  if (end == 0) {
+    std::cerr << std::format("end == 0, something is wrong with idx [{}]" NL,
+                             idx);
+    return fs::current_path();
+  }
   // NOTE: -1 because otherwise it includes the null term, and that fucks with
   // fs::path comparing to strings and checking the extension type
   return fs::path(all_paths.buffer + start, all_paths.buffer + end - 1);
@@ -636,14 +643,36 @@ auto Module::DepTree::display(std::ostream &out,
   out << std::dec;
 }
 
+auto Module::DepTree::dump(std::ostream &out) const noexcept -> void {
+  out << "All string = [" << string_view{all_paths.buffer, all_paths.size}
+      << "]" NL;
+  out << std::format("num_files = [{}]" NL, num_files);
+  out << std::format("cap_files = [{}]" NL, cap_files);
+  for (auto i = size_t{}; i < num_files; ++i) {
+    out << std::format(
+        "types[{}] = [{}]" NL, i,
+        static_cast<std::underlying_type_t<SourceFile_t>>(types[i]));
+  }
+  for (auto i = size_t{}; i < num_files; ++i) {
+    auto &&[start, end] = files[i];
+    out << std::format("files[{}] = [{}, {}]" NL, i, start, end);
+  }
+  for (auto i = size_t{}; i < num_files; ++i) {
+    for (auto j = size_t{}; j < deps[i].size(); ++j) {
+      out << std::format("deps[{}][{}] = [{}]" NL, i, j, deps[i][j]);
+    }
+  }
+  out << std::hex;
+  for (auto i = size_t{}; i < num_files; ++i) {
+    out << std::format("hashes[{}] = [{}]" NL, i, hashes[i]);
+  }
+  out << std::dec;
+}
+
 auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
                                    unsigned int const idx) const noexcept
     -> void {
-
-  auto const indents = [](auto const depth) -> string {
-    auto res = string(depth, '\t');
-    return res;
-  }(depth);
+  auto const indents = string(depth, '\t');
 
   out << indents << "{" NL;
   out << indents << "\"type\":\"";
@@ -1583,6 +1612,9 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
       unreachable();
     }
 
+#ifdef DEBUG
+    exe_mod.tree.dump(std::cout);
+#endif // DEBUG
     threads.add_dep_tree_tasks(mod_idx, exe_mod.tree);
 
     // TODO: have some way of keeping track of if an error occurs when building
@@ -2569,6 +2601,8 @@ auto LakeModules::append_module_with_path(fs::path const &path, Module &&mod)
 }
 
 auto LakeModules::resize_mods() -> void {
+  for (auto i = size_t{}; i < num_mods; ++i)
+    mtxs[i].lock();
   auto const n_cap = 3 * mods_cap / 2;
 
   auto n_states = std::make_unique<LakeModules::ModState[]>(n_cap);
@@ -2579,10 +2613,6 @@ auto LakeModules::resize_mods() -> void {
 
   std::memcpy(n_states.get(), states.get(), sizeof(bool) * mods_cap);
 
-  // probably ub :)
-  std::memcpy(n_mtxs.get(), mtxs.get(),
-              sizeof(std::mutex::native_handle_type) * mods_cap);
-
   for (auto i = size_t{}; i < mods_cap; ++i)
     n_remaining_files[i] = std::move(static_cast<size_t>(remaining_files[i]));
   for (auto i = size_t{}; i < mods_cap; ++i)
@@ -2591,13 +2621,27 @@ auto LakeModules::resize_mods() -> void {
     n_mods[i] = std::move(mods[i]);
 
   states = std::move(n_states);
-  mtxs = std::move(n_mtxs);
   remaining_files = std::move(n_remaining_files);
   compiled_files = std::move(n_compiled_files);
   mods = std::move(n_mods);
+  // idk if we should have a mutex for this array of mutices (?), would that
+  // defeat the point of having multiple mutexs to allow the parallel code to
+  // not interfear with one another(?)
+  for (auto i = size_t{}; i < num_mods; ++i)
+    mtxs[i].unlock();
+  // idk if mutexs actually contain any reference data that we should be worried
+  // about, i think if we just make a new array with the new size it should be
+  // fine
+  mtxs = std::move(n_mtxs);
 }
 
 auto LakeModules::resize_paths() -> void {
+  // idk what happens if an exception is thrown here, that seems like one of
+  // those unrecoverable exceptions (i.e. out of memory) so we just give up
+  // anyways
+  for (auto i = size_t{}; i < num_mods; ++i) {
+    mtxs[i].lock();
+  }
   auto const n_cap = 3 * paths_cap / 2;
   auto n_luamake_paths = std::make_unique<fs::path[]>(n_cap);
 
@@ -2605,6 +2649,9 @@ auto LakeModules::resize_paths() -> void {
     n_luamake_paths[i] = std::move(luamake_paths[i]);
 
   luamake_paths = std::move(n_luamake_paths);
+  for (auto i = size_t{}; i < num_mods; ++i) {
+    mtxs[i].unlock();
+  }
 }
 
 #ifdef DEBUG

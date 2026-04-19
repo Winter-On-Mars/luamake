@@ -106,6 +106,15 @@ struct Module final {
   // without having to worry about pointer indirection
   // TODO: have the DepTree depend on the LakeModules, where all of these paths
   // are relative to said lakemodule
+  // NOTE: there is some bug going on right now where when we have the following
+  // set up,
+  // m.cpp < a.hpp, b.hpp
+  // a.hpp
+  // b.hpp
+  // a.cpp
+  // b.cpp < a.hpp
+  // where < indicateds that LHS depends on RHS
+  // i assume somewhere we are returning a {0,0} somewhere, causing the issue
   struct DepTree final {
     enum class SourceFile_t : u8 {
       IMPL,
@@ -132,6 +141,8 @@ struct Module final {
     // displays the function in a pseudo json format
     auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
         -> void;
+
+    auto dump(std::ostream &out) const noexcept -> void;
 #endif // DEBUG
 
     [[nodiscard]]
