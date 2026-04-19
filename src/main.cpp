@@ -152,9 +152,15 @@ static auto run(lua_State *const) noexcept -> exit_t;
 static auto test(lua_State *const) noexcept -> exit_t;
 
 struct Type final {
-  // TODO: add command for generating compile_commands.json to the project
-  // add optional argument for running in verbose mode to output more
-  // information like the specific thread things are being run on
+  // TODO: add a command line argument to specify the number of threads to be
+  // used
+  // TODO: add a command option for package management, we will probably need to
+  // depend on libcurl (and openssl) to do the networking to grab https urls,
+  // but that would be nice.
+  //  we can add things like --local as a cl arg to have it in the root project
+  //  (adding it to a .gitignore or whatever), or just (probably by default)
+  //  have it install in the $HOME/.luamake/package directory to be used for the
+  //  user packages that they have installed
   enum class Command : int {
     UNKNOWN_ARG,
     BUILD,

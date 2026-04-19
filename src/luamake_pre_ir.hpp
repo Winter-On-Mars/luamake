@@ -1,6 +1,11 @@
 #ifndef __LUAMAKE_PRE_IR_HPP
 #define __LUAMAKE_PRE_IR_HPP
 
+// NOTE: this is great, and i love this, but we should probably think about just
+// having a dependency on treesitter, because it should be able to handle all
+// that we would need in terms of reading the headers, and it's supposed to be
+// fast, so hopefully it will be, something worth trying
+
 #include <filesystem>
 #include <ostream>
 #include <string>
