@@ -1806,7 +1806,11 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
       auto const invoked_command = std::format(
           "ar crs {}/lib{}.a {}", mod.install_dir, mod.name, compiled_files);
 
-      std::cout << '[' << invoked_command << "]" NL;
+      if (cl_options.verbose) {
+        std::cout << std::format("[{}]" NL, invoked_command);
+      } else {
+        std::cout << std::format("Making archive for [{}]" NL, mod.name);
+      }
       std::cout.flush();
       if (OS_CALL(invoked_command.c_str()) != 0) {
         fprintf(stderr, "Error compiling [%s]" NL, invoked_command.c_str());
@@ -1827,7 +1831,11 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
       auto const copy_headers = std::format(
           "cp --target-directory={} {}",
           (parent_path / mod.install_dir / mod.name).string(), formatted_files);
-      std::cout << '[' << copy_headers << "]" NL;
+      if (cl_options.verbose) {
+        std::cout << std::format("[{}]" NL, copy_headers);
+      } else {
+        std::cout << std::format("Copying [{}] headers" NL, mod.name);
+      }
       std::cout.flush();
       if (OS_CALL(copy_headers.c_str()) != 0) {
         fprintf(stderr, "Error moving headers [%s]" NL, copy_headers.c_str());
