@@ -1641,6 +1641,20 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
         // lua_pushfstring(state, "Error compiling [%s]",
         // invoked_command.c_str()); (void)lua_error(state);
       } else {
+        // TODO: there is some issue happening when serializing, where the
+        // compiler field is written to non-deterministically, so the
+        // serialization will fail because it will think there is a different
+        // compiler field, but in reality it's the same compiler field with the
+        // arguments rotated (yes technically the arguments changing order would
+        // produce a different output, but we don't want them to) so we have to
+        // come up with some way of making sure the compiler arguments are
+        // passed in in the same way, or we have to do something to make sure
+        // that when we're comparing the modules, the differences in the fields
+        // doesn't cause an issue
+        // i think this means we would have to seperate out the compiler into
+        // the actual compiler command, and then the arguments to be passed into
+        // the compiler, because we already seperate out the includes and things
+        // like that
         spl::serialize(mod, cache_path);
       }
     });
