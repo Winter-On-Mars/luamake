@@ -527,11 +527,11 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
       std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
 
 #ifdef DEBUG
-  std::cout << "Possible includes for " << dep.string() << ": {\n";
+  std::cout << "Possible includes for " << dep.string() << ": {" NL;
   for (auto &&include : files_deps) {
-    std::cout << "\t" << include << "\n";
+    std::cout << "\t" << include << NL;
   }
-  std::cout << "}\n";
+  std::cout << "}" NL;
   std::cout.flush();
 #endif // DEBUG
 
@@ -629,7 +629,7 @@ auto Module::DepTree::reserve(size_t min) noexcept(false) -> void {
 auto Module::DepTree::display(std::ostream &out,
                               unsigned int const depth) const noexcept -> void {
   out << "All string = [" << string_view{all_paths.buffer, all_paths.size}
-      << "]\n";
+      << "]" NL;
   out.flush();
   out << std::hex;
   display_impl(out, depth, 0);
@@ -645,7 +645,7 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
     return res;
   }(depth);
 
-  out << indents << "{\n";
+  out << indents << "{" NL;
   out << indents << "\"type\":\"";
   switch (types[idx]) {
   case SourceFile_t::IMPL:
@@ -661,24 +661,24 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
     out << "MISC";
     break;
   };
-  out << "\",\n";
+  out << "\"," NL;
 
   out << indents << "\"path\":\""
       << string_view{all_paths.buffer + files[idx].start,
                      all_paths.buffer + files[idx].end}
-      << "\",\n";
+      << "\"," NL;
 
-  out << indents << "\"hash\":" << hashes[idx] << ",\n";
+  out << indents << "\"hash\":" << hashes[idx] << "," NL;
 
-  out << indents << "\"deps\":[\n";
+  out << indents << "\"deps\":[" NL;
 
   for (auto const dep_idx : deps[idx]) {
     display_impl(out, depth + 1, dep_idx);
   }
 
-  out << indents << "]\n";
+  out << indents << "]" NL;
 
-  out << indents << "}\n";
+  out << indents << "}" NL;
 }
 #endif // DEBUG
 
@@ -792,35 +792,35 @@ auto Module::display(std::ostream &out) const noexcept -> void {
     break;
   }
 
-  out << '\n';
+  out << NL;
 
   out << "roots = [";
   std::for_each(roots.begin(), roots.end(), _display);
-  out << "]\n";
+  out << "]" NL;
 
   out << "headers = [";
   std::for_each(headers.begin(), headers.end(), _display);
-  out << "]\n";
+  out << "]" NL;
 
   out << "includes= [";
   std::for_each(includes.begin(), includes.end(), _display);
-  out << "]\n";
+  out << "]" NL;
 
   out << "dep_includes= [";
   std::for_each(dep_includes.begin(), dep_includes.end(), _display);
-  out << "]\n";
+  out << "]" NL;
 
   out << "sys_includes= [";
   std::for_each(sys_includes.begin(), sys_includes.end(), _display);
-  out << "]\n";
+  out << "]" NL;
 
   out << "linking = [";
   std::for_each(linking.begin(), linking.end(), _display);
-  out << "]\n";
+  out << "]" NL;
 
-  out << "compiler = " << compiler << '\n';
-  out << "name = " << name << '\n';
-  out << "install_dir = " << install_dir << '\n';
+  out << "compiler = " << compiler << NL;
+  out << "name = " << name << NL;
+  out << "install_dir = " << install_dir << NL;
   out.flush();
 }
 #endif // DEBUG
@@ -1129,7 +1129,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     }
   } break;
   case DYNAMIC:
-    std::cerr << "Not currently implimented\n";
+    std::cerr << "Not currently implimented" NL;
     std::terminate();
     break;
   }
@@ -1532,7 +1532,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
         fs::path(std::format("{}/{}.o", exe_mod.install_dir, exe_mod.name));
     auto ec = std::error_code{};
     if (fs::create_directories(install_dir, ec); ec) {
-      std::cerr << ec.message() << '\n';
+      std::cerr << ec.message() << NL;
       lua_pushfstring(state, "Unable to create directory [%s]",
                       install_dir.c_str());
       return lua_error(state);
@@ -1544,7 +1544,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
         ec) {
       auto const message =
           std::format("{}/__luamake_cache", exe_mod.install_dir);
-      std::cerr << ec.message() << '\n';
+      std::cerr << ec.message() << NL;
       lua_pushfstring(state, "Unable to create directory [%s]",
                       message.c_str());
       return lua_error(state);
@@ -1561,6 +1561,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     /* compare the current mod with the cached mod */
     switch (maybe_cached_mod.index()) {
     case 0: {
+      std::cout << std::format("Checking cache" NL);
       auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
       // TODO: get this to work
       // idk seems like the easiest way to do this kind of synchronization
@@ -1570,12 +1571,13 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
       }
       */
       if (exe_mod == cached_mod) {
+        std::cout << std::format("\tModule already built" NL);
         return 1;
       }
     } break;
     case 1: {
       auto const &error_message = std::get<std::string>(maybe_cached_mod);
-      std::cerr << std::format("[{}]\n", error_message);
+      std::cerr << std::format("[{}]" NL, error_message);
     } break;
     default:
       unreachable();
@@ -1615,10 +1617,10 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
           std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
                       mod.name, actually_compiled_files, mod.format_links());
       if (builtins::cl_options.verbose) {
-        fprintf(stdout, "[%s]\n", invoked_command.c_str());
+        fprintf(stdout, "[%s]" NL, invoked_command.c_str());
       } else {
         // idk we can make this prettier
-        fprintf(stdout, "Building [%s]\n", mod.name.c_str());
+        fprintf(stdout, "Building [%s]" NL, mod.name.c_str());
       }
       // NOTE: figure out how to handle errors with the lua vm, if there's
       // internal mutex's that will stop conflicting and corrupting the stack,
@@ -1691,11 +1693,11 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
         parent_path / fs::path(std::format("{}/{}.o", static_mod.install_dir,
                                            static_mod.name));
     std::cout << std::format("making directory [{}]", install_dir.string())
-              << '\n';
+              << NL;
     std::cout.flush();
     auto ec = std::error_code{};
     if (fs::create_directories(install_dir, ec); ec) {
-      lua_pushfstring(state, "Unable to create directory\n\t[%s]",
+      lua_pushfstring(state, "Unable to create directory" NL "\t[%s]",
                       ec.message().c_str());
       return lua_error(state);
     }
@@ -1706,7 +1708,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     if (fs::create_directories(fs::path(
             std::format("{}/__luamake_cache", static_mod.install_dir)));
         ec) {
-      std::cerr << ec.message() << '\n';
+      std::cerr << ec.message() << NL;
       lua_pushstring(state, "Unable to create directory");
       return lua_error(state);
     }
@@ -1725,7 +1727,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     } break;
     case 1: {
       auto const &error_message = std::get<std::string>(maybe_cached_mod);
-      std::cerr << std::format("\t[{}]\n", error_message);
+      std::cerr << std::format("\t[{}]" NL, error_message);
     } break;
     default:
       unreachable();
@@ -1758,10 +1760,10 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
       auto const invoked_command = std::format(
           "ar crs {}/lib{}.a {}", mod.install_dir, mod.name, compiled_files);
 
-      std::cout << '[' << invoked_command << "]\n";
+      std::cout << '[' << invoked_command << "]" NL;
       std::cout.flush();
       if (OS_CALL(invoked_command.c_str()) != 0) {
-        fprintf(stderr, "Error compiling [%s]\n", invoked_command.c_str());
+        fprintf(stderr, "Error compiling [%s]" NL, invoked_command.c_str());
         mods.set_state_at(mod_idx, LakeModules::ModState::error);
         return;
       }
@@ -1779,10 +1781,10 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
       auto const copy_headers = std::format(
           "cp --target-directory={} {}",
           (parent_path / mod.install_dir / mod.name).string(), formatted_files);
-      std::cout << '[' << copy_headers << "]\n";
+      std::cout << '[' << copy_headers << "]" NL;
       std::cout.flush();
       if (OS_CALL(copy_headers.c_str()) != 0) {
-        fprintf(stderr, "Error moving headers [%s]\n", copy_headers.c_str());
+        fprintf(stderr, "Error moving headers [%s]" NL, copy_headers.c_str());
         mods.set_state_at(mod_idx, LakeModules::ModState::error);
         return;
       }
@@ -1826,7 +1828,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << (lua_toboolean(state, -1) ? "true" : "false");
     break;
   case LUA_TTABLE: {
-    std::cout << "{\n";
+    std::cout << "{" NL;
     auto const tbl_idx = lua_absindex(state, -1);
     for (lua_pushnil(state); lua_next(state, tbl_idx) != 0;) {
       std::cout << indents(depth);
@@ -1853,7 +1855,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << lua_typename(type);
     break;
   }
-  std::cout << '\n';
+  std::cout << NL;
 }
 
 // TODO: switch this to use userdata, which should make things faster to process
@@ -2304,7 +2306,7 @@ auto Runner::run(lua_State *L) noexcept -> int {
     return lua_error(L);
   }
 
-  std::cout << "[" << exe_path << "]\n";
+  std::cout << "[" << exe_path << "]" NL;
   std::cout.flush();
 
   OS_CALL(exe_path.data());
@@ -2593,22 +2595,22 @@ auto LakeModules::resize_paths() -> void {
 
 #ifdef DEBUG
 auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
-  out << "modules.paths = {\n";
+  out << "modules.paths = {" NL;
   for (auto i = uint{0}; i < num_paths; ++i) {
-    out << "\t[" << i << "][" << luamake_paths[i].string() << "]\n";
+    out << "\t[" << i << "][" << luamake_paths[i].string() << "]" NL;
   }
-  out << "}\n";
+  out << "}" NL;
   out.flush();
 }
 
 auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
-  out << "modules.mods = {\n";
+  out << "modules.mods = {" NL;
   for (auto i = uint{}; i < num_mods; ++i) {
     out << '[' << i << "] {";
     mods[i].display(out);
     out << '}';
   }
-  out << "}\n";
+  out << "}" NL;
   out.flush();
 }
 #endif // DEBUG

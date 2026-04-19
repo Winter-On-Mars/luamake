@@ -58,7 +58,6 @@ auto CompilationPool::add_dep_tree_tasks(
 
     if (builtins::Module::DepTree::determine_file_type(fname.extension()) !=
         builtins::Module::DepTree::SourceFile_t::IMPL) {
-      fprintf(stdout, "file [%s] is not an impl, skipping\n", fname.c_str());
       continue;
     }
 
@@ -76,9 +75,9 @@ auto CompilationPool::add_dep_tree_tasks(
                       path.c_str(), install_dir, name, path.stem().c_str());
       // idk i tried using std::cout, but there was an error :)
       if (builtins::cl_options.verbose) {
-        fprintf(stdout, "[%s]\n", invoked_command.c_str());
+        fprintf(stdout, "[%s]" NL, invoked_command.c_str());
       } else {
-        fprintf(stdout, "Building [%s]\n", path.c_str());
+        fprintf(stdout, "Building [%s]" NL, path.c_str());
       }
       if (OS_CALL(invoked_command.c_str()) == 0) {
         builtins::mods.add_compiled_file(idx, path.stem().string());

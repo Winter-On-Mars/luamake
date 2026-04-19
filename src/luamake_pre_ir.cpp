@@ -669,11 +669,11 @@ struct AstPrinter final : AstVisitor {
   AstPrinter(std::ostream &out) noexcept : out(out), depth(0) {}
 
   auto print(Ast &ast) -> void {
-    out << "AstPrinter:\n";
+    out << "AstPrinter:" NL;
     for (auto &&node : ast.nodes) {
       node->accept(*this);
     }
-    out << "---\n";
+    out << "---" NL;
     out.flush();
   }
 
@@ -958,7 +958,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       default:
 #ifdef DEBUG
         std::cerr << WARNING "Unknown ir_t preprocessor directive ["
-                  << to_string(keyword->second) << "]" NORMAL << '\n';
+                  << to_string(keyword->second) << "]" NORMAL NL;
 #endif // DEBUG
         lex.types.push_back(keyword->second);
         break;
@@ -1004,7 +1004,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
     }
   }
 #ifdef DEBUG
-  std::cout << "Lexer:\n";
+  std::cout << "Lexer:" NL;
   lex.display(std::cout).flush();
 #endif // DEBUG
   return lex;
@@ -1735,16 +1735,16 @@ auto Lexer::expect(size_t cur_t, ir_t tkn, string_view calling_func) -> void {
 
 #ifdef DEBUG
 auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
-  out << "Types:\n\t";
+  out << "Types:" NL "\t";
   for (auto const &type : types) {
     out << '[' << to_string(type) << ']';
   }
-  out << '\n';
-  out << "Lexemes:\n\t";
+  out << NL;
+  out << "Lexemes:" NL "\t";
   for (auto const &lexeme : lexemes) {
     out << '[' << lexeme << ']';
   }
-  out << '\n';
+  out << NL;
   return out;
 }
 #endif
@@ -2015,16 +2015,16 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
 #ifdef DEBUG
 auto Expressions::ExprLexer::display(std::ostream &out) const noexcept
     -> std::ostream & {
-  out << "Tokens:\n\t";
+  out << "Tokens:" NL "\t";
   for (auto const &type : tkns) {
     out << '[' << to_string(type) << ']';
   }
-  out << '\n';
-  out << "Macros:\n\t";
+  out << NL;
+  out << "Macros:" NL "\t";
   for (auto const &macro : macros) {
     out << '[' << macro << ']';
   }
-  out << '\n';
+  out << NL;
   return out;
 }
 #endif // DEBUG
@@ -2519,7 +2519,7 @@ auto Expressions::expand_macro(
 
 #ifdef DEBUG
 auto AstPrinter::visit_if(IfNode &i) -> void {
-  out << get_indents() << "(if (" << i.condition << ")\n";
+  out << get_indents() << "(if (" << i.condition << ")" NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2531,11 +2531,11 @@ auto AstPrinter::visit_if(IfNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")\n";
+  out << get_indents() << ")" NL;
 }
 
 auto AstPrinter::visit_ifdef(IfDefNode &i) -> void {
-  out << get_indents() << "(ifdef (" << i.macro << ")\n";
+  out << get_indents() << "(ifdef (" << i.macro << ")" NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2547,11 +2547,11 @@ auto AstPrinter::visit_ifdef(IfDefNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")\n";
+  out << get_indents() << ")" NL;
 }
 
 auto AstPrinter::visit_ifndef(IfNDefNode &i) -> void {
-  out << get_indents() << "(ifndef (" << i.macro << ")\n";
+  out << get_indents() << "(ifndef (" << i.macro << ")" NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2563,35 +2563,35 @@ auto AstPrinter::visit_ifndef(IfNDefNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")\n";
+  out << get_indents() << ")" NL;
 }
 
 auto AstPrinter::visit_elif(ElifNode &e) -> void {
-  out << get_indents() << "(elif (" << e.condition << ")\n";
+  out << get_indents() << "(elif (" << e.condition << ")" NL;
   ++depth;
   for (auto &&thens : e.then_branch) {
     thens->accept(*this);
   }
   --depth;
-  out << get_indents() << ")\n";
+  out << get_indents() << ")" NL;
 }
 
 auto AstPrinter::visit_else(ElseNode &e) -> void {
-  out << get_indents() << "(else (\n";
+  out << get_indents() << "(else (" NL;
   ++depth;
   for (auto &&elses : e.stmts) {
     elses->accept(*this);
   }
   --depth;
-  out << get_indents() << ")\n";
+  out << get_indents() << ")" NL;
 }
 
 auto AstPrinter::visit_global_include(GlobalIncludeNode &global) -> void {
-  out << get_indents() << "(include global (" << global.path << "))\n";
+  out << get_indents() << "(include global (" << global.path << "))" NL;
 }
 
 auto AstPrinter::visit_local_include(LocalIncludeNode &local) -> void {
-  out << get_indents() << "(include local (" << local.path << "))\n";
+  out << get_indents() << "(include local (" << local.path << "))" NL;
 }
 
 auto AstPrinter::visit_define(DefineNode &d) -> void {
@@ -2601,7 +2601,7 @@ auto AstPrinter::visit_define(DefineNode &d) -> void {
     out << d.lexeme.value();
     out << '}';
   }
-  out << "))\n";
+  out << "))" NL;
 }
 
 auto AstPrinter::visit_define_func(DefineFuncNode &f) -> void {
@@ -2610,16 +2610,16 @@ auto AstPrinter::visit_define_func(DefineFuncNode &f) -> void {
     out << param << ",";
   }
   out << ")";
-  out << "{" << f.body << "}))\n";
+  out << "{" << f.body << "}))" NL;
 }
 
 auto AstPrinter::visit_undef(UndefNode &u) -> void {
   out << get_indents() << "(undef (" << u.name;
-  out << "))\n";
+  out << "))" NL;
 }
 
 auto AstPrinter::visit_pragma(PragmaNode &p) -> void {
-  out << get_indents() << "(pragma {" << p.value << "})\n";
+  out << get_indents() << "(pragma {" << p.value << "})" NL;
 }
 #endif // DEBUG
 
@@ -2755,18 +2755,18 @@ auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {
 
 #ifdef DEBUG
 auto Interpreter::dump_macros(std::ostream &out) noexcept -> void {
-  out << "macros = {\n";
+  out << "macros = {" NL;
   for (auto &&[name, value] : macros) {
-    out << name << "=" << value << ",\n";
+    out << name << "=" << value << "," NL;
   }
-  out << "}\n";
+  out << "}" NL;
 
   out << "defined_macros = ";
-  out << "[" << def_macros.size() << "]{\n";
+  out << "[" << def_macros.size() << "]{" NL;
   for (auto const &name : def_macros) {
-    out << name << ",\n";
+    out << name << "," NL;
   }
-  out << "}\n";
+  out << "}" NL;
 }
 #endif // DEBUG
 } // namespace pp

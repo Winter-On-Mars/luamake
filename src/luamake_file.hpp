@@ -79,10 +79,10 @@ struct File final {
                            : 0] = 'c';
     }
     std::cerr << "Opening [" << path << "] with options [" << max_length_perms
-              << "]\n";
+              << "]" NL;
 #else
     std::cerr << "Opening [" << path << "] with options [" << max_length_perms
-              << "]\n";
+              << "]" NL;
 #endif // __unix__
 #endif // DEBUG
 
@@ -150,7 +150,7 @@ struct File final {
 
     auto const res = ::fstat(fd, &file_stats);
     if (res == -1) {
-      std::cerr << "Error reading stats of file\n";
+      std::cerr << "Error reading stats of file" NL;
       std::terminate();
     }
     auto const fsize = static_cast<size_t>(file_stats.st_size);
@@ -164,7 +164,7 @@ struct File final {
     auto fsize = size_t{};
     if (fseek(file, 0, SEEK_END) == -1) {
 #ifdef DEBUG
-      fprintf(stderr, "[%s]\n", strerror(errno));
+      fprintf(stderr, "[%s]" NL, strerror(errno));
 #endif // DEBUG
       return {0, nullptr};
     }
@@ -172,7 +172,7 @@ struct File final {
       fsize = static_cast<size_t>(size);
     } else {
 #ifdef DEBUG
-      fprintf(stderr, "[%s]\n", strerror(errno));
+      fprintf(stderr, "[%s]" NL, strerror(errno));
 #endif // DEBUG
       return {0, nullptr};
     }
@@ -183,7 +183,7 @@ struct File final {
             fread(fcontent.get(), sizeof(unsigned char), fsize, file);
         amount_read != fsize) {
 #ifdef DEBUG
-      fprintf(stderr, "[%s]\n", strerror(errno));
+      fprintf(stderr, "[%s]" NL, strerror(errno));
 #endif // DEBUG
       return {0, nullptr};
     }

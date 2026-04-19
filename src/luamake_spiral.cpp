@@ -352,7 +352,7 @@ auto serialize(builtins::Module const &mod, std::filesystem::path const &path)
   outfile.write(cereal.buffer(), cereal.size(), 1);
   outfile.flush();
 #ifdef DEBUG
-  std::cout << std::format("serialized file [{}] with [{}] bytes\n",
+  std::cout << std::format("serialized file [{}] with [{}] bytes" NL,
                            path.string(), cereal.size());
 
 #endif // DEBUG
@@ -365,7 +365,7 @@ auto deserialize(fs::path const &path)
   if (!file)
     return std::format("unable to open serialization file [{}]", path.string());
 #ifdef DEBUG
-  std::cout << std::format("deserializing file [{}]\n", path.string());
+  std::cout << std::format("deserializing file [{}]" NL, path.string());
 #endif // DEBUG
   auto decereal = Deserializer(file);
   return decereal.deserialize<builtins::Module>();
