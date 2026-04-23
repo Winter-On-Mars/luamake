@@ -810,33 +810,6 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
   return true;
 }
 
-// this function could probably have better error handling, but this is fine for
-// now
-auto Module::DepTree::get_file_content(FILE *file) noexcept(false)
-    -> FixedString {
-  if (fseek(file, 0, SEEK_END) == -1)
-    throw CAPI(strerror(errno));
-
-  auto const _fsize = ftell(file);
-  if (_fsize == -1)
-    throw CAPI(strerror(errno));
-
-  auto fsize = static_cast<size_t>(_fsize);
-  rewind(file);
-
-  auto *fcontent = (char *)malloc(sizeof(char) * fsize + 1);
-  if (fcontent == nullptr)
-    throw CAPI(strerror(errno));
-
-  if (auto const amount_read = fread(fcontent, sizeof(char), fsize, file);
-      amount_read != fsize) {
-    free(fcontent);
-    throw CAPI(strerror(errno));
-  }
-  fcontent[fsize] = 0;
-  return FixedString(fcontent, fsize);
-}
-
 #ifdef DEBUG
 auto Module::display(std::ostream &out) const noexcept -> void {
   auto _display = [&](auto x) { out << x << ", "; };

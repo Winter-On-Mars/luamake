@@ -10,7 +10,6 @@
 #include <memory>
 #include <ostream>
 #include <string>
-#include <variant>
 #include <vector>
 
 extern "C" {
@@ -199,11 +198,6 @@ struct Module final {
     // TODO: rename this to like invalid_idx or something, then we can use 0 as
     // the root index, because that's where the root index *should* be
     static constexpr auto ROOT_IDX = static_cast<size_t>(-1);
-
-    /**
-     * @throws DepTreeErr
-     */
-    static auto get_file_content(FILE *file) noexcept(false) -> FixedString;
 
 #ifdef DEBUG
     auto display_impl(std::ostream &out, unsigned int const depth,
