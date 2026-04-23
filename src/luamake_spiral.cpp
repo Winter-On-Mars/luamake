@@ -26,6 +26,8 @@ namespace fs = std::filesystem;
 
 namespace luamake::spl {
 struct Serializer {
+  Serializer() noexcept;
+
   template <class T> auto serialize(T) = delete;
   auto serialize(builtins::Module const &) -> void;
 
@@ -48,14 +50,23 @@ private:
   auto resize(size_t at_least = 0) -> void;
 
   struct M {
-    std::unique_ptr<u8[]> buffer;
-    size_t size;
-    size_t cap;
+    std::unique_ptr<u8[]> buffer = nullptr;
+    size_t size = 0;
+    size_t cap = 0;
   } m;
 };
 
+Serializer::Serializer() noexcept : m{} {
+  // idk some variable that we can change, maybe we could take it in as a
+  // parameter, making an estimate to how big the file will be, so that we don't
+  // have to reallocate, but for now this is fine
+  constexpr auto initial_size = size_t{2 << 12};
+  m.buffer = std::make_unique<u8[]>(initial_size);
+  m.cap = initial_size;
+}
+
 auto Serializer::write(std::integral auto t) -> size_t {
-  if (m.cap + sizeof(t) >= m.size)
+  if (m.size + sizeof(t) >= m.cap)
     resize(sizeof(t));
   // TODO: idk if we actually need to fill out this table because we'll only be
   // using it with 64bit (8 byte) numbers
@@ -88,11 +99,11 @@ auto Serializer::write(void const *const bytes, size_t n_bytes) -> size_t {
 }
 
 auto Serializer::resize(size_t at_least) -> void {
-  auto const new_size = 3 * size() / 2 + at_least;
-  auto new_buffer = std::make_unique<u8[]>(new_size);
-  memcpy(new_buffer.get(), buffer(), size());
+  auto const new_cap = 3 * m.cap / 2 + at_least;
+  auto new_buffer = std::make_unique<u8[]>(new_cap);
+  memcpy(new_buffer.get(), buffer(), m.cap);
   m.buffer = std::move(new_buffer);
-  m.cap = new_size;
+  m.cap = new_cap;
 }
 
 auto Serializer::serialize(builtins::Module const &mod) -> void {
@@ -117,6 +128,7 @@ auto Serializer::serialize(builtins::Module::Module_t const t) -> void {
   m.size += write(byte);
 }
 
+// TODO: probably have to actually do endian swap here (?) for all of the types
 auto Serializer::serialize(builtins::Module::DepTree const &tree) -> void {
   serialize(tree.all_paths.view());
   m.size += write(tree.num_files);
@@ -124,16 +136,15 @@ auto Serializer::serialize(builtins::Module::DepTree const &tree) -> void {
       write(tree.types.get(), sizeof(decltype(tree.types[0])) * tree.num_files);
   m.size +=
       write(tree.files.get(), sizeof(decltype(tree.files[0])) * tree.num_files);
-  // auto constexpr tree_dep_size = sizeof(decltype(tree.deps[0][0]));
   for (auto i = size_t{}; i < tree.num_files; ++i) {
     auto const dep_size = tree.deps[i].size();
     m.size += write(dep_size);
     for (auto &&dep : tree.deps[i]) {
-      // we have to be sure to actually do the endian swap
+      // NOTE: we have to be sure to actually do the endian swap :(
       m.size += write(dep);
     }
-    // m.size += write(tree.deps[i].data(), dep_size * tree_dep_size);
   }
+  // fuck we also have to do endian swap here
   m.size += write(tree.hashes.get(),
                   sizeof(decltype(tree.hashes[0])) * tree.num_files);
 }
