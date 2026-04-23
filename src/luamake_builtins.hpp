@@ -158,13 +158,11 @@ struct Module final {
     }
 
     [[nodiscard]]
-    auto append_path(std::filesystem::path const &)
-        -> std::pair<bool, StringViews>;
+    auto append_path(std::filesystem::path const &) -> StringViews;
     [[nodiscard]]
     auto get_path(size_t const) const noexcept -> std::filesystem::path;
     [[nodiscard]]
-    auto find(std::string_view const) const noexcept
-        -> std::pair<bool, StringViews>;
+    auto find(std::string_view const) const noexcept -> size_t;
 
     [[nodiscard]]
     constexpr auto size() const noexcept -> size_t {
@@ -198,6 +196,8 @@ struct Module final {
     // basically making the assumption that a project isn't gonna have
     // size_t.max files in it, idk if that's even physically possible
     // so this *seems like* a valid assumption
+    // TODO: rename this to like invalid_idx or something, then we can use 0 as
+    // the root index, because that's where the root index *should* be
     static constexpr auto ROOT_IDX = static_cast<size_t>(-1);
 
     /**

@@ -458,12 +458,11 @@ Module::DepTree::DepTree(size_t const num_files) {
   cap_files = num_files;
 }
 
-auto Module::DepTree::append_path(fs::path const &path)
-    -> std::pair<bool, StringViews> {
+// NOTE: this function *should* only be called when we know the path has not
+// been added
+auto Module::DepTree::append_path(fs::path const &path) -> StringViews {
   auto const canonical_path = fs::canonical(path);
-  if (auto &&[found, str] = find(canonical_path.c_str()); found) {
-    return std::make_pair(true, str);
-  }
+
   auto const start = all_paths.size;
   all_paths.append(canonical_path.string());
   auto const end = all_paths.size;
@@ -476,23 +475,38 @@ auto Module::DepTree::append_path(fs::path const &path)
         "of the StringViews class?",
         std::numeric_limits<unsigned int>::max()));
   }
-
-  return std::make_pair(false, StringViews{static_cast<unsigned int>(start),
-                                           static_cast<unsigned int>(end)});
+#ifdef DEBUG
+  std::cout << std::format("File not found yet, so returning str = ({}, {})" NL,
+                           start, end);
+#endif // DEBUG
+  return StringViews{static_cast<unsigned int>(start),
+                     static_cast<unsigned int>(end)};
 }
 
 auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
   if (tree.num_files == tree.cap_files) {
     tree.resize();
   }
+
+  auto const possible_idx = tree.find(dep.string());
+  if (possible_idx != DepTree::ROOT_IDX) {
+#ifdef DEBUG
+    std::cout << std::format(
+        "Already found dep [{}], pushing back it's info and returning" NL,
+        dep.string());
+#endif // DEBUG
+    if (parent_idx != DepTree::ROOT_IDX) {
+      tree.deps[parent_idx].push_back(static_cast<uint>(possible_idx));
+    }
+    return;
+  }
+
+  auto const str = tree.append_path(dep);
+
   auto const this_idx = tree.num_files;
   if (parent_idx != DepTree::ROOT_IDX)
     tree.deps[parent_idx].push_back(static_cast<unsigned int>(this_idx));
   ++tree.num_files;
-
-  auto &&[found, str] = tree.append_path(dep);
-  if (found) // early return if file was already processed
-    return;
 
   auto file = File(dep, File::READ);
   if (!file)
@@ -578,9 +592,28 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
 
 // this could (and probably should (if possible)) be rewritten to use the files
 // array(?)
-auto Module::DepTree::find(string_view const path) const noexcept
-    -> std::pair<bool, StringViews> {
-  return all_paths.find(path);
+auto Module::DepTree::find(string_view const path) const noexcept -> size_t {
+  auto const *start = all_paths.buffer;
+  auto const *current = all_paths.buffer;
+  auto end = size_t{};
+
+  auto idx = size_t{};
+
+  while (end != all_paths.size) {
+    if (all_paths.buffer[end] == 0) {
+      current = all_paths.buffer + end;
+      auto const path_view = std::string_view{start, current};
+      if (path_view.size() == path.size() &&
+          *path_view.data() == *path.data() &&
+          strncmp(path_view.data(), path.data(), path_view.size()) == 0) {
+        return idx;
+      }
+      start = current + 1;
+      ++idx;
+    }
+    ++end;
+  }
+  return ROOT_IDX;
 }
 
 auto Module::DepTree::resize() noexcept(false) -> void {
