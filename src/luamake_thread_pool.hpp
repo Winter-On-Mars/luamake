@@ -28,10 +28,7 @@ struct CompilationPool final {
   auto init(size_t num_threads) noexcept -> void;
   auto deinit() noexcept -> void;
 
-  // TODO: remove the deptree parameter, it should just come from the idx
-  auto add_dep_tree_tasks(builtins::ModIndex const,
-                          luamake::builtins::Module::DepTree const &) noexcept
-      -> void;
+  auto add_dep_tree_tasks(builtins::ModIndex const) noexcept -> void;
 
   // TODO: try and template this, it might give better source code
   auto add_task(std::function<void()> &&) noexcept -> void;
