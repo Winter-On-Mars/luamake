@@ -65,6 +65,64 @@ class Runner final {
   friend auto make_runner_obj(lua_State *) noexcept -> void;
 };
 
+struct ModIndex final {
+  uint files;
+  uint mods;
+
+  constexpr ModIndex() noexcept = default;
+  constexpr ModIndex(uint files, uint mods) noexcept
+      : files(files), mods(mods) {}
+
+  explicit constexpr ModIndex(lua_Integer const i) noexcept
+      : files(static_cast<uint>(i >> 32)), mods(static_cast<uint>(i)) {}
+
+  // idk this can almost certainly be improved, but because it's constexpr i
+  // assume the optimizer will just make this go away
+  explicit constexpr operator lua_Integer() const noexcept {
+    auto res = lua_Integer{0};
+    res |= files;
+    res <<= 32;
+    res |= mods;
+    return res;
+  }
+
+  friend auto operator<<(std::ostream &, ModIndex const) noexcept
+      -> std::ostream &;
+
+  static auto constexpr not_found = static_cast<uint>(-1);
+};
+static_assert(sizeof(ModIndex) == sizeof(lua_Integer),
+              "really dumb, but we need to push this onto the lua stack as an "
+              "\"integer\"");
+
+static_assert([]() -> bool {
+  auto constexpr idx = ModIndex(0, 1);
+  auto constexpr lint = static_cast<lua_Integer>(idx);
+  static_assert(lint == lua_Integer{0x1});
+  return true;
+}());
+static_assert([]() -> bool {
+  auto constexpr idx = ModIndex(6, 1);
+  auto constexpr lint = static_cast<lua_Integer>(idx);
+  static_assert(lint == lua_Integer{0x0000000600000001});
+  return true;
+}());
+
+static_assert([]() -> bool {
+  auto constexpr idx = lua_Integer{1};
+  auto constexpr mod_idx = ModIndex(idx);
+  static_assert(mod_idx.files == 0);
+  static_assert(mod_idx.mods == 1);
+  return true;
+}());
+static_assert([]() -> bool {
+  auto constexpr idx = lua_Integer{0x0000000200000004};
+  auto constexpr mod_idx = ModIndex(idx);
+  static_assert(mod_idx.files == 2);
+  static_assert(mod_idx.mods == 4);
+  return true;
+}());
+
 // TODO: add exported header field, and probably refactor this to be a tagged
 // union to discriminate between exe and library type modules
 // TODO: rewrite how the include files are processed to have a system header
@@ -83,11 +141,6 @@ struct Module final {
    */
   Module(Module_t &&type, lua_State *state,
          std::filesystem::path const &) noexcept(false);
-
-  /**
-   * @throws
-   */
-  auto gen_dep_tree() noexcept(false) -> void;
 
   Module(Module &&) noexcept = default;
 
@@ -126,6 +179,12 @@ struct Module final {
 
     DepTree(DepTree &&) = default;
     DepTree &operator=(DepTree &&) = default;
+
+    /**
+     * @throws
+     */
+    auto gen_dep_tree(Module const &mod, pp::Interpreter &,
+                      ModIndex const) noexcept(false) -> void;
 
 #ifdef DEBUG
     // displays the function in a pseudo json format
@@ -188,12 +247,19 @@ struct Module final {
     // so this *seems like* a valid assumption
     // TODO: rename this to like invalid_idx or something, then we can use 0 as
     // the root index, because that's where the root index *should* be
-    static constexpr auto ROOT_IDX = static_cast<size_t>(-1);
+    static constexpr auto NIL_IDX = static_cast<size_t>(-1);
 
 #ifdef DEBUG
     auto display_impl(std::ostream &out, unsigned int const depth,
                       unsigned int const idx) const noexcept -> void;
 #endif // DEBUG
+
+    /**
+     * @throws DepTreeErr
+     */
+    auto append_dep(Module const &, pp::Interpreter &, ModIndex const,
+                    std::filesystem::path const &,
+                    std::filesystem::path const &, size_t const) -> void;
 
     friend CompilationPool;
     friend Module;
@@ -218,8 +284,8 @@ struct Module final {
   std::vector<std::filesystem::path> dep_includes;
   std::vector<std::filesystem::path> sys_includes;
   std::vector<std::filesystem::path> linking;
-  // TODO: see about removing this, it might just take up space when we could
-  // move it onto the stack
+  // TODO: remove this from the module, it should just be on the stack or
+  // something
   luamake::pp::Interpreter interpreter;
   // TODO: optimize this :)
   std::string compiler;
@@ -245,10 +311,6 @@ struct Module final {
   auto append_predefined_macros(std::string_view const)
       -> std::pair<std::unordered_map<std::string, pp::Macro>,
                    std::unordered_set<std::string>>;
-  /**
-   * @throws DepTreeErr
-   */
-  auto append_dep(std::filesystem::path const &, size_t const) -> void;
 
   // TODO: update these to return FixedString
   auto format_includes() const -> std::string;
@@ -260,64 +322,6 @@ struct Module final {
   friend spl::Serializer;
   friend spl::Deserializer;
 };
-
-struct ModIndex final {
-  uint files;
-  uint mods;
-
-  constexpr ModIndex() noexcept = default;
-  constexpr ModIndex(uint files, uint mods) noexcept
-      : files(files), mods(mods) {}
-
-  explicit constexpr ModIndex(lua_Integer const i) noexcept
-      : files(static_cast<uint>(i >> 32)), mods(static_cast<uint>(i)) {}
-
-  // idk this can almost certainly be improved, but because it's constexpr i
-  // assume the optimizer will just make this go away
-  explicit constexpr operator lua_Integer() const noexcept {
-    auto res = lua_Integer{0};
-    res |= files;
-    res <<= 32;
-    res |= mods;
-    return res;
-  }
-
-  friend auto operator<<(std::ostream &, ModIndex const) noexcept
-      -> std::ostream &;
-
-  static auto constexpr not_found = static_cast<uint>(-1);
-};
-static_assert(sizeof(ModIndex) == sizeof(lua_Integer),
-              "really dumb, but we need to push this onto the lua stack as an "
-              "\"integer\"");
-
-static_assert([]() -> bool {
-  auto constexpr idx = ModIndex(0, 1);
-  auto constexpr lint = static_cast<lua_Integer>(idx);
-  static_assert(lint == lua_Integer{0x1});
-  return true;
-}());
-static_assert([]() -> bool {
-  auto constexpr idx = ModIndex(6, 1);
-  auto constexpr lint = static_cast<lua_Integer>(idx);
-  static_assert(lint == lua_Integer{0x0000000600000001});
-  return true;
-}());
-
-static_assert([]() -> bool {
-  auto constexpr idx = lua_Integer{1};
-  auto constexpr mod_idx = ModIndex(idx);
-  static_assert(mod_idx.files == 0);
-  static_assert(mod_idx.mods == 1);
-  return true;
-}());
-static_assert([]() -> bool {
-  auto constexpr idx = lua_Integer{0x0000000200000004};
-  auto constexpr mod_idx = ModIndex(idx);
-  static_assert(mod_idx.files == 2);
-  static_assert(mod_idx.mods == 4);
-  return true;
-}());
 
 // EXPL: the ModIndex struct is used to index into this, the top 32 bits index
 // into luamake_paths, while the bottom 32 bits index into everything else.
@@ -418,6 +422,8 @@ private:
   // NOTE: we could switch this to a list<module>, then switch the new_exe
   // function to return a lightuserdata
   std::unique_ptr<Module[]> mods;
+  // TODO: switch this to not have the luamake.lua in the path, i.e. just push
+  // back the parent path
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
 
   friend CompilationPool;
