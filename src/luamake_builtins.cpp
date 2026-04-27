@@ -2286,15 +2286,15 @@ auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
 
   try {
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-    auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
-    auto const &exe_mod = mods.module_at(mod_idx);
+    auto &exe_mod = mods.module_at(mod_idx);
     if (exe_mod.type != builtins::Module::EXE) {
       throw std::runtime_error(std ::format(
           "module type is not exe, found [{}]",
           static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
               exe_mod.type)));
     }
+    exe_mod.tree.gen_dep_tree(exe_mod, exe_mod.interpreter, mod_idx);
     return 1;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
@@ -2327,15 +2327,16 @@ auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
 
   try {
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-    auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
-    auto const &exe_mod = mods.module_at(mod_idx);
-    if (exe_mod.type != builtins::Module::STATIC) {
+    auto &static_mod = mods.module_at(mod_idx);
+    if (static_mod.type != builtins::Module::STATIC) {
       throw std::runtime_error(std ::format(
           "module type is not static, found [{}]",
           static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
-              exe_mod.type)));
+              static_mod.type)));
     }
+
+    static_mod.tree.gen_dep_tree(static_mod, static_mod.interpreter, mod_idx);
     return 1;
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
