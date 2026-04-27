@@ -30,7 +30,6 @@ extern "C" {
 #include <memory>
 #include <mutex>
 #include <numeric>
-#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -461,10 +460,8 @@ Module::DepTree::DepTree(size_t const num_files) {
 // NOTE: this function *should* only be called when we know the path has not
 // been added
 auto Module::DepTree::append_path(fs::path const &path) -> StringViews {
-  auto const canonical_path = fs::canonical(path);
-
   auto const start = all_paths.size;
-  all_paths.append(canonical_path.string());
+  all_paths.append(path.string());
   auto const end = all_paths.size;
 
   if (start >= std::numeric_limits<unsigned int>::max() ||
@@ -483,34 +480,39 @@ auto Module::DepTree::append_path(fs::path const &path) -> StringViews {
                      static_cast<unsigned int>(end)};
 }
 
-auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
-  if (tree.num_files == tree.cap_files) {
-    tree.resize();
+auto Module::DepTree::append_dep(Module const &mod,
+                                 pp::Interpreter &interpreter,
+                                 ModIndex const mod_idx,
+                                 fs::path const &parent_path,
+                                 fs::path const &dep, size_t const parent_idx)
+    -> void {
+  if (num_files == cap_files) {
+    resize();
   }
 
-  auto const possible_idx = tree.find(dep.string());
-  if (possible_idx != DepTree::ROOT_IDX) {
+  auto const possible_idx = find(dep.string());
+  if (possible_idx != DepTree::NIL_IDX) {
 #ifdef DEBUG
     std::cout << std::format(
         "Already found dep [{}], pushing back it's info and returning" NL,
         dep.string());
 #endif // DEBUG
-    if (parent_idx != DepTree::ROOT_IDX) {
-      tree.deps[parent_idx].push_back(static_cast<uint>(possible_idx));
+    if (parent_idx != DepTree::NIL_IDX) {
+      deps[parent_idx].push_back(static_cast<uint>(possible_idx));
     }
     return;
   }
 
-  auto const str = tree.append_path(dep);
+  auto const str = append_path(dep);
 
-  auto const this_idx = tree.num_files;
-  if (parent_idx != DepTree::ROOT_IDX)
-    tree.deps[parent_idx].push_back(static_cast<unsigned int>(this_idx));
-  ++tree.num_files;
+  auto const this_idx = num_files;
+  if (parent_idx != DepTree::NIL_IDX)
+    deps[parent_idx].push_back(static_cast<unsigned int>(this_idx));
+  ++num_files;
 
-  auto file = File(dep, File::READ);
+  auto file = File(parent_path / dep, File::READ);
   if (!file)
-    throw FileDoesNotExist(dep, tree.get_path(parent_idx));
+    throw FileDoesNotExist(parent_path / dep, get_path(parent_idx));
 
   auto &&[fsize, fcontent] = file.dump_content();
 
@@ -526,60 +528,71 @@ auto Module::append_dep(fs::path const &dep, size_t const parent_idx) -> void {
       auto const possible_path =
           fs::path(potential_impl + potential_extension.data());
       if (fs::exists(possible_path)) {
-        append_dep(possible_path, this_idx);
+        append_dep(mod, interpreter, mod_idx, parent_path, possible_path,
+                   this_idx);
       }
     }
     // HOL
   }
 
-  tree.types[this_idx] = ftype;
-  tree.files[this_idx] = str;
+  types[this_idx] = ftype;
+  files[this_idx] = str;
 
-  // this is a big point of failure that needs to be checked to make sure it
-  // works
+  // HACK: didn't want to rewrite all of the interpreter code to work with
+  // explicitly utf8 strings
   auto const files_deps = interpreter.interpret(
       std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
 
 #ifdef DEBUG
-  std::cout << "Possible includes for " << dep.string() << ": {" NL;
+  std::cout << std::format("Possible includes for {}: {{" NL, dep.string());
   for (auto &&include : files_deps) {
-    std::cout << "\t" << include << NL;
+    std::cout << std::format("\t{}" NL, include.string());
   }
   std::cout << "}" NL;
   std::cout.flush();
+
+  mods.dump_paths(std::cout);
 #endif // DEBUG
 
-  for (auto const &file : files_deps) {
-    auto const maybe_file = [&]() -> std::optional<fs::path> {
-      for (auto const &include : includes) {
-        auto ec = std::error_code{};
-        auto const p = fs::canonical(include / file, ec);
-        if (ec)
-          continue;
-
-        if (DepTree::determine_file_type(p.extension()) !=
-                DepTree::SourceFile_t::IMPL &&
-            p.parent_path() / p.stem() == dep.parent_path() / dep.stem()) {
-          return std::nullopt; // impl file including header file
-        }
-        return p;
+  auto ec = std::error_code{};
+  for (auto &&file : files_deps) {
+    for (auto &&include : mod.includes) {
+      auto const include_rel_path =
+          fs::relative(include / file, parent_path, ec);
+      if (ec) {
+        // idk maybe block these behind a verbose check(?)
+        std::cerr << std::format("\t{}" NL, ec.message());
+        ec.clear();
+        continue;
       }
-      // TODO: update this to throw
-      return std::nullopt;
-    }();
-    if (maybe_file)
-      append_dep(maybe_file.value(), this_idx);
+
+      if (!fs::exists(include_rel_path, ec)) {
+        // we should probably report an error, the issue is that we have to also
+        // worry about if it's in the deps, if so then we have to worry about
+        // false positives, so for now we'll just ignore things
+        continue;
+      }
+
+      if (ec) {
+        std::cerr << std::format("\t{}" NL, ec.message());
+        ec.clear();
+        continue;
+      }
+
+      append_dep(mod, interpreter, mod_idx, parent_path, include_rel_path,
+                 this_idx);
+    }
   }
 
-  tree.hashes[this_idx] = hash_fut.get();
+  hashes[this_idx] = hash_fut.get();
 }
 
 auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
-  if (idx == ROOT_IDX)
+  if (idx == NIL_IDX)
     return fs::current_path();
   auto &&[start, end] = files[idx];
-  // HACK: idk theres some bug happening, this "fixes" it, but we have to figure
-  // out where the acutal issue is
+  // HACK: idk theres some bug happening, this "fixes" it, but we have to
+  // figure out where the acutal issue is
   if (end == 0) {
     std::cerr << std::format("end == 0, something is wrong with idx [{}]" NL,
                              idx);
@@ -590,8 +603,8 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   return fs::path(all_paths.buffer + start, all_paths.buffer + end - 1);
 }
 
-// this could (and probably should (if possible)) be rewritten to use the files
-// array(?)
+// this could (and probably should (if possible)) be rewritten to use the
+// files array(?)
 auto Module::DepTree::find(string_view const path) const noexcept -> size_t {
   auto const *start = all_paths.buffer;
   auto const *current = all_paths.buffer;
@@ -613,7 +626,7 @@ auto Module::DepTree::find(string_view const path) const noexcept -> size_t {
     }
     ++end;
   }
-  return ROOT_IDX;
+  return NIL_IDX;
 }
 
 auto Module::DepTree::resize() noexcept(false) -> void {
@@ -864,15 +877,15 @@ static auto include_path_cache =
     std::unordered_map<std::string_view, vector<fs::path>>();
 // TODO: i think i'm not properly handling child procs, so see about fixing it
 // in these two functions :)
-// from some basic perf testing, these two functions seem to be the biggest slow
-// downs, they should be run in parallel (or just in the background) which will
-// help speed things up. We could rework the thread pool to allow for arbitrary
-// functions to be run(?)
+// from some basic perf testing, these two functions seem to be the biggest
+// slow downs, they should be run in parallel (or just in the background)
+// which will help speed things up. We could rework the thread pool to allow
+// for arbitrary functions to be run(?)
 auto Module::append_include_paths(string_view const compiler) -> void {
-  // TODO: see if we need to cache the whole compiler string, or if it's enough
-  // to just cache the path to the binary, i.e. if we can get away with just
-  // caching /usr/bin/clang, then we can use the cache more, and don't have to
-  // actually go into the function that much
+  // TODO: see if we need to cache the whole compiler string, or if it's
+  // enough to just cache the path to the binary, i.e. if we can get away with
+  // just caching /usr/bin/clang, then we can use the cache more, and don't
+  // have to actually go into the function that much
   if (auto includes = include_path_cache.find(compiler);
       includes != include_path_cache.end()) {
     sys_includes = includes->second;
@@ -932,10 +945,9 @@ auto Module::append_include_paths(string_view const compiler) -> void {
 
     if (amount_read < 0) {
       auto const err = errno;
-      // this can change errno, so to get the error we're interested in we have
-      // to do this :)
-      // we might want to also check if this errors, but i'll leave that for
-      // someone else to do
+      // this can change errno, so to get the error we're interested in we
+      // have to do this :) we might want to also check if this errors, but
+      // i'll leave that for someone else to do
       close(read_pipe);
       throw CAPI(strerror(err));
     }
@@ -961,7 +973,8 @@ auto Module::append_include_paths(string_view const compiler) -> void {
       }
       if (*end_path == 0)
         break;
-      // there's probably a better way to do this, but idk this is fine for now
+      // there's probably a better way to do this, but idk this is fine for
+      // now
       // :)
       if (fs::exists(fs::path(string_view(start_path, end_path)))) {
         includes.emplace_back(fs::canonical(fs::path(start_path, end_path)));
@@ -1131,8 +1144,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     roots.reserve(1);
     switch (auto const root_t = lua_getfield(state, -1, "root")) {
     case LUA_TSTRING:
-      roots.push_back(
-          fs::canonical(root / fs::path(lua_tolstring(state, -1, nullptr))));
+      roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
       break;
     case LUA_TNIL:
       throw MissingField("root");
@@ -1151,8 +1163,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
         if (value_t != LUA_TSTRING) {
           throw UnexpectedType("roots[i]", LUA_TSTRING, value_t);
         }
-        roots.push_back(
-            fs::canonical(root / fs::path(lua_tolstring(state, -1, nullptr))));
+        roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
         --roots_tbl;
       }
       lua_pop(state, static_cast<int>(num_roots) + 1);
@@ -1186,7 +1197,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   auto macros_res = std::async(std::launch::async, [this]() {
     return this->append_predefined_macros(this->compiler);
   });
-  // auto &&[macros, def_macros] = append_predefined_macros(compiler);
 
   switch (auto const install_dir_t = lua_getfield(state, -1, "install_dir")) {
   case LUA_TSTRING:
@@ -1199,11 +1209,12 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
   lua_pop(state, 1);
 
+  // TODO: make this a relative path
   switch (type) {
   case Module_t::EXE: {
     includes.reserve(1);
-    auto const test = fs::canonical(roots[0]).parent_path();
-    includes.push_back(test);
+    auto const tmp = fs::canonical(roots[0]).parent_path();
+    includes.push_back(tmp);
   } break;
   case Module_t::STATIC:
     includes.reserve(roots.size());
@@ -1270,7 +1281,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   switch (type) {
   case Module_t::EXE:
     break;
-  // this needs to not be nullable
+  // TODO: make sure this isn't nil
   case Module_t::STATIC: {
     switch (auto const header_t = lua_getfield(state, -1, "headers")) {
     case LUA_TTABLE: {
@@ -1279,7 +1290,8 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
       for (auto i = 1; i <= len; ++i) {
         switch (auto const value_t = lua_geti(state, headers_tbl, i)) {
         case LUA_TSTRING: {
-          headers.push_back(root / fs::path(lua_tostring(state, -1)));
+          expr_dbg(root);
+          headers.push_back(fs::path(lua_tostring(state, -1)));
         } break;
         default:
           throw UnexpectedType("headers[i]", LUA_TSTRING, value_t);
@@ -1329,12 +1341,12 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   res.get();
 }
 
-auto Module::gen_dep_tree() -> void {
-  // we probably don't need this, b/c the constructor will be called when we
-  // originally construct this module
-  // [[tree = DepTree();]]
-  for (auto const &root : roots) {
-    append_dep(root, DepTree::ROOT_IDX);
+auto Module::DepTree::gen_dep_tree(Module const &mod,
+                                   pp::Interpreter &interpreter,
+                                   ModIndex const idx) -> void {
+  auto const parent = mods.get_module_path(idx).parent_path();
+  for (auto const &root : mod.roots) {
+    append_dep(mod, interpreter, idx, parent, root, DepTree::NIL_IDX);
   }
 }
 
@@ -1386,8 +1398,8 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
     throw UnexpectedType("compiler.compiler", LUA_TSTRING, compiler_t);
   }
 
-  // TODO: honestly probably write a macro to make parsing optional and required
-  // table entries easier
+  // TODO: honestly probably write a macro to make parsing optional and
+  // required table entries easier
   auto const optimize_t = lua_getfield(state, compiler_idx, "optimize");
   switch (optimize_t) {
   case LUA_TSTRING:
@@ -1459,11 +1471,8 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    // TODO: move the gen_dep_tree function to the install step(?), that
-    // way we can make use of async functions for deserialization
     auto exe_mod =
         builtins::Module(builtins::Module::EXE, state, previous_path);
-    exe_mod.gen_dep_tree();
 
     auto const index =
         mods.append_module_with_path(previous_path, std::move(exe_mod));
@@ -1505,7 +1514,6 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
   try {
     auto static_mod =
         builtins::Module(builtins::Module::STATIC, state, previous_path);
-    static_mod.gen_dep_tree();
 
     auto const index =
         mods.append_module_with_path(previous_path, std::move(static_mod));
@@ -1548,6 +1556,12 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
               exe_mod.type)));
     }
 
+    // we actually have to generate the dep tree here, because we have to make
+    // sure we have all of the dependency linking information at this point,
+    // any sooner and we run into linking errors, everybodys favorite :)
+    // TODO: put this in an async function,
+    exe_mod.tree.gen_dep_tree(exe_mod, exe_mod.interpreter, mod_idx);
+
     // TODO: get this working
     /*
     auto done = false;
@@ -1558,10 +1572,10 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     */
 
     // TODO: update these functions to throw exceptions
-    // TODO: see if there is a performance increase by checking if the directory
-    // is made and not making it if it is most of the time the directory will be
-    // there, it's just annoying because we have to check every time in case
-    // somebody changes the install_dir variable
+    // TODO: see if there is a performance increase by checking if the
+    // directory is made and not making it if it is most of the time the
+    // directory will be there, it's just annoying because we have to check
+    // every time in case somebody changes the install_dir variable
     auto const install_dir =
         parent_path /
         fs::path(std::format("{}/{}.o", exe_mod.install_dir, exe_mod.name));
@@ -1590,8 +1604,8 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
         "{}/__luamake_cache/{}.cache", exe_mod.install_dir, exe_mod.name));
 
     // NOTE: we might be able to put this on a background thread, then just
-    // continue on doing things, and when this is done we do the comparison, but
-    // for now we'll have this be blocking :)
+    // continue on doing things, and when this is done we do the comparison,
+    // but for now we'll have this be blocking :)
     auto const maybe_cached_mod = spl::deserialize(cache_path);
     /* compare the current mod with the cached mod */
     switch (maybe_cached_mod.index()) {
@@ -1621,15 +1635,15 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
 #ifdef DEBUG
     exe_mod.tree.dump(std::cout);
 #endif // DEBUG
-    threads.add_dep_tree_tasks(mod_idx, exe_mod.tree);
+    threads.add_dep_tree_tasks(mod_idx);
 
-    // TODO: have some way of keeping track of if an error occurs when building
-    // a module, that way we don't try to build with extraneous errors, but we
-    // still build all we can of the module for incrimental builds
-    // NOTE: this takes a lot of parameters by ref, idk if that's something that
-    // we should be doing there *might* be some issues taking exe_mod, by ref,
-    // it will point to something in static memory, but there might be some
-    // issues with it
+    // TODO: have some way of keeping track of if an error occurs when
+    // building a module, that way we don't try to build with extraneous
+    // errors, but we still build all we can of the module for incrimental
+    // builds NOTE: this takes a lot of parameters by ref, idk if that's
+    // something that we should be doing there *might* be some issues taking
+    // exe_mod, by ref, it will point to something in static memory, but there
+    // might be some issues with it
     threads.add_task([mod_idx, cache_path]() -> void {
       for (auto mod_state = mods.state_at(mod_idx);
            mod_state !=
@@ -1663,17 +1677,17 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
       // NOTE: figure out how to handle errors with the lua vm, if there's
       // internal mutex's that will stop conflicting and corrupting the stack,
       // or if we have to worry about a mutex around the lua vm ourselves
-      // we might have to move some of the error handling into the global scope,
-      // that way we can access it across threads and communicate with it
-      // through the lua vm
+      // we might have to move some of the error handling into the global
+      // scope, that way we can access it across threads and communicate with
+      // it through the lua vm
       // TODO: have a list of errors that we store for each module, then just
-      // append to said list, at the end of compiling we can dump out a summary
-      // of errors, and in verbose mode just dump out all of the errors
-      // themselves, but for now just calling lua_error should be fine :)
-      // NOTE: the lua vm is closed after all the threads have finished, so it's
-      // fine to do this, kind of, but also because this is executed async, we
-      // might no longer be in the pcall function, so we really just need to
-      // change how we store + handle errors :)
+      // append to said list, at the end of compiling we can dump out a
+      // summary of errors, and in verbose mode just dump out all of the
+      // errors themselves, but for now just calling lua_error should be fine
+      // :) NOTE: the lua vm is closed after all the threads have finished, so
+      // it's fine to do this, kind of, but also because this is executed
+      // async, we might no longer be in the pcall function, so we really just
+      // need to change how we store + handle errors :)
       if (OS_CALL(invoked_command.c_str()) != 0) {
         mods.set_state_at(mod_idx, LakeModules::ModState::error);
         // lua_pushfstring(state, "Error compiling [%s]",
@@ -1682,17 +1696,16 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
         // TODO: there is some issue happening when serializing, where the
         // compiler field is written to non-deterministically, so the
         // serialization will fail because it will think there is a different
-        // compiler field, but in reality it's the same compiler field with the
-        // arguments rotated (yes technically the arguments changing order would
-        // produce a different output, but we don't want them to) so we have to
-        // come up with some way of making sure the compiler arguments are
-        // passed in in the same way, or we have to do something to make sure
-        // that when we're comparing the modules, the differences in the fields
-        // doesn't cause an issue
-        // i think this means we would have to seperate out the compiler into
-        // the actual compiler command, and then the arguments to be passed into
-        // the compiler, because we already seperate out the includes and things
-        // like that
+        // compiler field, but in reality it's the same compiler field with
+        // the arguments rotated (yes technically the arguments changing order
+        // would produce a different output, but we don't want them to) so we
+        // have to come up with some way of making sure the compiler arguments
+        // are passed in in the same way, or we have to do something to make
+        // sure that when we're comparing the modules, the differences in the
+        // fields doesn't cause an issue i think this means we would have to
+        // seperate out the compiler into the actual compiler command, and
+        // then the arguments to be passed into the compiler, because we
+        // already seperate out the includes and things like that
         spl::serialize(mod, cache_path);
       }
     });
@@ -1723,8 +1736,8 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    // mod_idx is at the top of the stack, and we'll just return it at the end,
-    // assuming everything else has gone well
+    // mod_idx is at the top of the stack, and we'll just return it at the
+    // end, assuming everything else has gone well
     auto const mod_idx = ModIndex(lua_tointeger(state, -1));
 
     // i'm not sure if we actually need this variable now that we're using
@@ -1732,7 +1745,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
     // and break everything :)
     auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
 
-    auto const &static_mod = mods.module_at(mod_idx);
+    auto &static_mod = mods.module_at(mod_idx);
     // TODO: better error handling with this
     if (static_mod.type != builtins::Module::STATIC) {
       throw std::runtime_error(std ::format(
@@ -1740,6 +1753,8 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
           static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
               static_mod.type)));
     }
+
+    static_mod.tree.gen_dep_tree(static_mod, static_mod.interpreter, mod_idx);
 
     auto const install_dir =
         parent_path / fs::path(std::format("{}/{}.o", static_mod.install_dir,
@@ -1785,7 +1800,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
       unreachable();
     }
 
-    threads.add_dep_tree_tasks(mod_idx, static_mod.tree);
+    threads.add_dep_tree_tasks(mod_idx);
     threads.add_task([mod_idx, cache_path]() -> void {
       for (auto mod_state = mods.state_at(mod_idx);
            mod_state !=
@@ -1828,11 +1843,13 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
           parent_path /
           fs::path(std::format("{}/{}", mod.install_dir, mod.name)));
 
-      auto const formatted_files =
-          std::accumulate(mod.headers.begin(), mod.headers.end(), std::string(),
-                          [](auto &&e, auto &&next) {
-                            return std::format("{} {}", e, next.string());
-                          });
+      auto const formatted_files = std::accumulate(
+          mod.headers.begin(), mod.headers.end(), std::string(),
+          [&parent_path](auto &&e, auto &&next) {
+            return std::format("{} {}/{}", e,
+                               parent_path.parent_path().string(),
+                               next.string());
+          });
 
       auto const copy_headers = std::format(
           "cp --target-directory={} {}",
@@ -1918,7 +1935,8 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
   std::cout << NL;
 }
 
-// TODO: switch this to use userdata, which should make things faster to process
+// TODO: switch this to use userdata, which should make things faster to
+// process
 // TODO: double check that this function isn't doing redundant type checks
 // TODO: change this function to use the compiler_impl function
 auto Builder::clang(lua_State *state) noexcept -> int {
@@ -2097,11 +2115,11 @@ auto Builder::require(lua_State *state) noexcept -> int {
   // we should probably use metatables to make sure that this table on top of
   // the stack is actually the builder table, that was something i remember
   // reading about in the best practices using the lua c api, but also that
-  // would create an error later on if somebody passes in the wrong table, so i
-  // don't really know that it's worth checking, like it'd just be a performance
-  // hit for no reason, just assume that the user has passed in the right thing,
-  // and if they haven't they'll (probably) figure it out later when something
-  // breaks
+  // would create an error later on if somebody passes in the wrong table, so
+  // i don't really know that it's worth checking, like it'd just be a
+  // performance hit for no reason, just assume that the user has passed in
+  // the right thing, and if they haven't they'll (probably) figure it out
+  // later when something breaks
   LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -2), LUA_TTABLE,
                     "Expected table to require function, found [%s]",
                     lua_typename(arg_t));
@@ -2122,9 +2140,9 @@ auto Builder::require(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
 
-    // for now we discard the ModIndex returned, we could instead find some way
-    // to pass it along to the function, so that we don't have to recompute
-    // things that we already know, idk how to do that rn though(?)
+    // for now we discard the ModIndex returned, we could instead find some
+    // way to pass it along to the function, so that we don't have to
+    // recompute things that we already know, idk how to do that rn though(?)
     mods.new_module(luamake_path);
     // want the builder table on top of the stack, and no longer need the path
     // name now that we have it saved as a local variable
@@ -2231,9 +2249,10 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
 auto Builder::get_os(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 0, get_os);
   try {
-    // for now we're going to be assuming that the host machine you're on is the
-    // one that you're building the libraries for, i do want to add a way to
-    // enable cross compilation out of the box, but i'm not sure how to do that
+    // for now we're going to be assuming that the host machine you're on is
+    // the one that you're building the libraries for, i do want to add a way
+    // to enable cross compilation out of the box, but i'm not sure how to do
+    // that
     (void)lua_pushstring(state,
 #if defined(_WIN32)
                          "windows"
@@ -2255,9 +2274,9 @@ auto Builder::get_os(lua_State *state) noexcept -> int {
   }
 }
 
-// probably shouldn't call it a thunk, but basically just a dummy function that
-// doesn't run any commands, nor make any directories, just varifies that there
-// is a module there, and that the module is an exe mod
+// probably shouldn't call it a thunk, but basically just a dummy function
+// that doesn't run any commands, nor make any directories, just varifies that
+// there is a module there, and that the module is an exe mod
 auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, install_exe)
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
@@ -2295,9 +2314,9 @@ auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
   }
 }
 
-// probably shouldn't call it a thunk, but basically just a dummy function that
-// doesn't run any commands, nor make any directories, just varifies that there
-// is a module there, and that the module is a static mod
+// probably shouldn't call it a thunk, but basically just a dummy function
+// that doesn't run any commands, nor make any directories, just varifies that
+// there is a module there, and that the module is a static mod
 auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, install_static)
   LUA_ASSERT_FORMAT(
@@ -2572,8 +2591,8 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
   // needed to be compiled(?)
   // if this doesn't end up working, then we will need to probably have two
   // numbers, one that keeps track of the number of files compiled, and the
-  // other that says how many files total we need to compile, then compare those
-  // two number(?)
+  // other that says how many files total we need to compile, then compare
+  // those two number(?)
   if (remaining_files[idx.mods] == 0) {
     states[idx.mods] = ModState::ready_for_final_compile;
   }
@@ -2643,9 +2662,9 @@ auto LakeModules::resize_mods() -> void {
   // not interfear with one another(?)
   for (auto i = size_t{}; i < num_mods; ++i)
     mtxs[i].unlock();
-  // idk if mutexs actually contain any reference data that we should be worried
-  // about, i think if we just make a new array with the new size it should be
-  // fine
+  // idk if mutexs actually contain any reference data that we should be
+  // worried about, i think if we just make a new array with the new size it
+  // should be fine
   mtxs = std::move(n_mtxs);
 }
 
