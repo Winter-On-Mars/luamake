@@ -48,13 +48,14 @@ auto CompilationPool::deinit() noexcept -> void {
 
 // TODO: update this function to just take a control of the mutex, then push
 // back all of the functions like a vectorized version of add_task
-auto CompilationPool::add_dep_tree_tasks(
-    builtins::ModIndex const idx,
-    builtins::Module::DepTree const &tree) noexcept -> void {
+auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
+    -> void {
+  auto const parent_path = builtins::mods.get_module_path(idx).parent_path();
   auto const &mod = builtins::mods.module_at(idx);
   auto const include_path = mod.format_includes();
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    auto const fname = tree.get_path(i);
+  for (auto i = size_t{}; i < mod.tree.num_files; ++i) {
+    auto const fname = std::filesystem::relative(
+        parent_path / mod.tree.get_path(i), std::filesystem::current_path());
 
     if (builtins::Module::DepTree::determine_file_type(fname.extension()) !=
         builtins::Module::DepTree::SourceFile_t::IMPL) {
