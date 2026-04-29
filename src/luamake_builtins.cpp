@@ -1610,7 +1610,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     /* compare the current mod with the cached mod */
     switch (maybe_cached_mod.index()) {
     case 0: {
-      std::cout << std::format("Checking cache" NL);
+      std::cout << std::format("Checking [{}] cache" NL, exe_mod.name);
       auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
       // TODO: get this to work
       // idk seems like the easiest way to do this kind of synchronization
@@ -1620,7 +1620,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
       }
       */
       if (exe_mod == cached_mod) {
-        std::cout << std::format("\tModule already built" NL);
+        std::cout << std::format("\t[{}] already built" NL, exe_mod.name);
         return 1;
       }
     } break;
