@@ -982,6 +982,10 @@ static auto run(lua_State *const state) noexcept -> exit_t {
     return exit_t::config_error;
   };
 
+  // NOTE: technically causing a double deinit, but this seems to work for
+  // requiring all of the modules be built before running the run function
+  threads.deinit();
+
   if (lua_pcall(state, 1, 0, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
     ferror_message("While in the lua vm, Run function" NL "\t[%s]",
