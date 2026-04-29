@@ -2356,42 +2356,59 @@ auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
   }
 }
 
-auto Runner::run(lua_State *L) noexcept -> int {
-  auto const num_args = lua_gettop(L);
-  if (num_args != 1) {
-    lua_pushstring(L, "Too many args to function run");
-    return lua_error(L);
+auto Runner::run(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, run);
+  LUA_ASSERT_FORMAT(
+      state, ret_t, lua_type(state, -1), LUA_TTABLE,
+      "Expected type of argument to `run` to be of type table, found [%s]",
+      lua_typename(ret_t));
+
+  try {
+    lua_getfield(state, -1, "path");
+    LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
+               "Expected type of exe.path to be string [in function Run]");
+    auto exe_path = std::string(lua_tolstring(state, -1, nullptr));
+
+    lua_getfield(state, -2, "args");
+    switch (auto t = lua_type(state, -1)) {
+    case LUA_TNIL:
+      // nothing to do either type is explicitly nil, or field is undefined so
+      // which is fine bc it's an optional field
+      break;
+    case LUA_TTABLE: {
+      auto const arg_idx = lua_absindex(state, -1);
+      lua_pushnil(state);
+      while (lua_next(state, arg_idx) != 0) {
+        if (lua_type(state, -1) != LUA_TSTRING) {
+          lua_pushstring(
+              state, "Incorrect type in `args` table in the `run` function");
+          return lua_error(state);
+        }
+        auto const val = lua_tolstring(state, -1, nullptr);
+        exe_path += ' ';
+        exe_path += val;
+        lua_pop(state, 1);
+      }
+    } break;
+    default:
+      lua_pushfstring(
+          state,
+          "Expected type of exe.args to either be `nil` "
+          "(undefined) or a table (array), found [%s] [in function Run]",
+          lua_typename(t));
+      return lua_error(state);
+    }
+
+    std::cout << "[" << exe_path << "]" NL;
+    std::cout.flush();
+
+    OS_CALL(exe_path.c_str());
+
+    return 0;
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
   }
-
-  lua_getfield(L, -1, "path");
-  LUA_ASSERT(L, lua_type(L, -1), LUA_TSTRING,
-             "Expected type of exe.path to be string [in function Run]");
-  auto const exe_path = string_view(lua_tolstring(L, -1, nullptr));
-
-  lua_getfield(L, -2, "args");
-  switch (auto t = lua_type(L, -1)) {
-  case LUA_TNIL:
-    // nothing to do either type is explicitly nil, or field is undefined so
-    // which is fine bc it's an optional field
-    break;
-  case LUA_TTABLE:
-    // TODO: concatinate all these strings
-    break;
-  default:
-    lua_pushfstring(
-        L,
-        "Expected type of exe.args to either be `nil` "
-        "(undefined) or a table (array), found [%s] [in function Run]",
-        lua_typename(t));
-    return lua_error(L);
-  }
-
-  std::cout << "[" << exe_path << "]" NL;
-  std::cout.flush();
-
-  OS_CALL(exe_path.data());
-
-  return 0;
 }
 
 auto dump(lua_State *state) noexcept -> int {
