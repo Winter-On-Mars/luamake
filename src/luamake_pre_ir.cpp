@@ -810,7 +810,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
     {string_view{"#undef"}, ir_t::UNDEF},
     {string_view{"#pragma"}, ir_t::PRAGMA}
   }};
-  auto constexpr chars_of_interest = string_view{"#/\""};
+  auto constexpr chars_of_interest = string_view{"#/\"'"};
   // clang-format on
   auto lex = Lexer();
   lex.types.reserve(64);
@@ -981,7 +981,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           throw Exception(string("Non terminated multi line comment"));
       } break;
       default: // probably just an op /
-        i = luamake::skip_until(std::string_view("#/\""), fcontent, i + 1);
+        i = luamake::skip_until(chars_of_interest, fcontent, i + 1);
         break;
       }
     } break;
@@ -998,8 +998,18 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       } while (fcontent[i - 1] == '\\');
       ++i;
     } break;
+      // TODO: test that this loop works
+    case '\'': {
+      do {
+        i = luamake::skip_until('\'', fcontent, i + 1);
+        if (!(i < file.size())) {
+          throw Exception(string("Non terminated char"));
+        }
+      } while (fcontent[i - 1] == '\\');
+      ++i;
+    } break;
     default:
-      i = luamake::skip_until(std::string_view("#/\""), fcontent, i + 1);
+      i = luamake::skip_until(chars_of_interest, fcontent, i + 1);
       break;
     }
   }
