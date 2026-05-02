@@ -44,8 +44,10 @@ class Builder final {
   static auto install_static(lua_State *) noexcept -> int;
 
   static auto clang(lua_State *) noexcept -> int;
+  static auto gcc(lua_State *) noexcept -> int;
   static auto gcc_bare(lua_State *) noexcept -> int;
   static auto clang_bare(lua_State *) noexcept -> int;
+
   static auto require(lua_State *) noexcept -> int;
   static auto link_lib(lua_State *) noexcept -> int;
 
