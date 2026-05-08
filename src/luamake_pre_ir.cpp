@@ -551,6 +551,7 @@ struct Expressions final {
     case MACRO:
       return string_view{"MACRO"};
     }
+    unreachable();
   }
 
   struct ExprLexer final {
@@ -764,6 +765,7 @@ auto constexpr to_string(ir_t t) -> std::string_view {
   case ir_t::LIT_STRING:
     return std::string_view("LIT_STRING");
   }
+  unreachable();
 }
 
 auto constexpr ExprNode::readable_type(Expr_t t) noexcept -> std::string_view {
@@ -2228,6 +2230,7 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
     case int_type::OCTAL:
       return string_view{"n octal"};
     }
+    unreachable();
   };
 
   auto constexpr is_allowed_char = [](int_type int_t, char ch) -> bool {
@@ -2241,6 +2244,7 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
     case int_type::OCTAL:
       return is_any_of(delims_at(delims::ALLOWED_OCTAL), ch);
     }
+    unreachable();
   };
   auto allow_quote = true;
   auto const start = i;
@@ -2281,6 +2285,7 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
     case int_type::HEX:
       return LIT_HEX;
     }
+    unreachable();
   }(int_t));
   macros.push_back(string(str.data() + start, str.data() + i));
   i = skip_while(integer_suffix, str, i);
@@ -2347,11 +2352,13 @@ auto Expressions::eval_impl(
     case ExprNode::Unary::BANG:
       return !res;
     }
+    unreachable();
   }
   case ExprNode::NONE:
     throw Exception(
         std::format("Attempting to evaluate an uninitialized expression."));
   }
+  unreachable();
 }
 
 auto Expressions::make_binary(Expressions::expr_t tkn, ExprNode &&lhs,
