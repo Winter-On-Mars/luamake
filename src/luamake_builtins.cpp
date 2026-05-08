@@ -8,6 +8,7 @@
 #include "luamake_thread_pool.hpp"
 #include <atomic>
 #include <chrono>
+#include <set>
 #include <thread>
 
 extern "C" {
@@ -89,7 +90,13 @@ namespace luamake {
 static auto previous_path = fs::path();
 namespace {
 using std::pair, std::array, std::string, std::string_view, std::vector,
-    std::unordered_map, std::unordered_set;
+    std::unordered_map, std::set;
+
+// TODO: export this to the user so that they don't have to go through the
+// clang/gcc functions if they don't want to
+struct OptArgs final {
+  set<string> args;
+};
 
 // see the lua docs about lua_type for information about how this function works
 // with that
@@ -304,8 +311,8 @@ struct MisformattedOutput final : public ModuleErr {
   }
 };
 
-static auto compiler_impl(lua_State *state,
-                          string_view const compiler_name) noexcept -> int {
+static auto compiler_impl(lua_State *state, string_view const compiler_name)
+    -> int {
   // idk get better error messages
   LUA_EXPECTED_ARGUMENTS(state, 1, compiler_name);
   LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
@@ -360,30 +367,28 @@ static auto compiler_impl(lua_State *state,
         }
       });
 
-  lua_createtable(state, 0, 1);
+  lua_createtable(state, 0, 4);
   auto const ret_tbl_idx = lua_absindex(state, -1);
 
-  // opt_args tbl
-  lua_createtable(state, 0, 0);
-  auto const opt_args = lua_absindex(state, -1);
+  auto *opt_args = ::new (lua_newuserdata(state, sizeof(OptArgs)))(OptArgs){};
 
   lua_pushnil(state);
-  for (auto i = lua_Integer{1}; lua_next(state, cc_config_idx) != 0;) {
+  for (; lua_next(state, cc_config_idx) != 0;) {
     switch (lua_type(state, -2)) {
     case LUA_TNUMBER:
       LUA_ASSERT(state, lua_type(state, -1), LUA_TSTRING,
                  "Expected value type in Compiler Config to be either string "
                  "or table");
       // array values are just passed straight to the config
-      lua_seti(state, opt_args, i++);
+      opt_args->args.insert(lua_tolstring(state, -1, nullptr));
+      lua_pop(state, 1);
       break;
     case LUA_TSTRING: {
       auto const field_name = lua_tolstring(state, -2, nullptr);
       switch (lua_type(state, -1)) {
       case LUA_TSTRING:
-        lua_pushfstring(state, "-%s=%s", field_name,
-                        lua_tolstring(state, -1, nullptr));
-        lua_seti(state, opt_args, i++);
+        opt_args->args.insert(std::format("-{}={}", field_name,
+                                          lua_tolstring(state, -1, nullptr)));
         lua_pop(state, 1);
         break;
       case LUA_TTABLE: {
@@ -393,9 +398,8 @@ static auto compiler_impl(lua_State *state,
           LUA_ASSERT(
               state, tbl_val_t, LUA_TSTRING,
               "Expected string in subarray passed to ha%or0\thcrah,.c&h^@cu");
-          lua_pushfstring(state, "-%s%s", field_name,
-                          lua_tolstring(state, -1, nullptr));
-          lua_seti(state, opt_args, i++);
+          opt_args->args.insert(std::format("-{}{}", field_name,
+                                            lua_tolstring(state, -1, nullptr)));
           lua_pop(state, 1);
         }
         lua_pop(state, 1);
@@ -907,9 +911,8 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     // close reader
     close(read_pipe);
     auto const command_string =
-        std::format("{} -v -c -xc++ /dev/null -o {}/luamake_null.o",
-                    /*string_view{compiler.data(), compiler_command_end},*/
-                    compiler, fs::temp_directory_path().c_str());
+        std::format("{} -v -c -xc++ /dev/null -o {}/luamake_null.o", compiler,
+                    fs::temp_directory_path().c_str());
 
     dup2(write_pipe, STDERR_FILENO);
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
@@ -956,6 +959,9 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     // reached EOF
 
     auto const include_start = search_string.find("#include <");
+    // TODO: update this error handling, idk probably just means we messed up
+    // something with passing in the command causing the child process to error
+    // out
     ASSERT_ERROR(include_start == search_string.npos);
 
     auto const *start_path = search_string.data() + include_start;
@@ -1020,8 +1026,7 @@ auto Module::append_predefined_macros(string_view const compiler)
   case 0: { // in child proc
     // close reader
     close(read_pipe);
-    auto const command_string = std::format(
-        "echo | {} -dM -E -", string_view{compiler.data(), compiler.find(' ')});
+    auto const command_string = std::format("echo | {} -dM -E -", compiler);
 
     dup2(write_pipe, STDOUT_FILENO);
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
@@ -1191,11 +1196,17 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
   lua_pop(state, 1);
 
-  auto res = std::async(std::launch::async, [this]() {
-    this->append_include_paths(this->compiler);
+  // if the compiler string doesn't contain a space then it *should* just be the
+  // path to the compiler, so just use the whole length
+  auto const compiler_command = std::string_view{
+      compiler.data(), compiler.find(' ') != compiler.npos ? compiler.find(' ')
+                                                           : compiler.length()};
+
+  auto res = std::async(std::launch::async, [this, compiler_command]() {
+    this->append_include_paths(compiler_command);
   });
-  auto macros_res = std::async(std::launch::async, [this]() {
-    return this->append_predefined_macros(this->compiler);
+  auto macros_res = std::async(std::launch::async, [this, compiler_command]() {
+    return this->append_predefined_macros(compiler_command);
   });
 
   switch (auto const install_dir_t = lua_getfield(state, -1, "install_dir")) {
@@ -1290,7 +1301,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
       for (auto i = 1; i <= len; ++i) {
         switch (auto const value_t = lua_geti(state, headers_tbl, i)) {
         case LUA_TSTRING: {
-          expr_dbg(root);
           headers.push_back(fs::path(lua_tostring(state, -1)));
         } break;
         default:
@@ -1438,22 +1448,22 @@ auto Module::parse_compiler_table(lua_State *state) -> string {
     throw UnexpectedType("compiler.warnings", LUA_TTABLE, warnings_t);
   }
 
-  // *should* always exist, we'll just assume it exists for now
-  lua_getfield(state, compiler_idx, "opt_args");
-  auto const opt_arg_idx = lua_absindex(state, -1);
-
-  lua_pushnil(state);
-  while (lua_next(state, opt_arg_idx) != 0) {
-    if (lua_type(state, -1) != LUA_TSTRING) {
-      lua_pushstring(state, "Incorrect type in `opt_args` table");
-      lua_error(state);
-      return "";
-    }
-    str += ' ';
-    str += lua_tolstring(state, -1, nullptr);
-
-    lua_pop(state, 1);
+  auto const opt_args_t = lua_getfield(state, compiler_idx, "opt_args");
+  switch (opt_args_t) {
+  case LUA_TUSERDATA:
+    // TODO: check metatable type
+    break;
+  case LUA_TNIL:
+    throw MissingField("compiler.opt_args");
+  default:
+    throw UnexpectedType("compiler.opt_args", LUA_TUSERDATA, opt_args_t);
   }
+  auto *opt_args = reinterpret_cast<OptArgs *>(lua_touserdata(state, -1));
+  str += std::accumulate(
+      opt_args->args.begin(), opt_args->args.end(), std::string(),
+      [](auto &&e, auto &&next) { return std::format("{} {}", e, next); });
+  // NOTE: ok to do bc we use placement new
+  opt_args->~OptArgs();
 
   lua_pop(state, 4);
   return str;
