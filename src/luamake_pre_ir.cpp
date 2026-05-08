@@ -995,7 +995,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           throw Exception(string("Non terminated string"));
         }
         // to fix when we're in a string that contains \" escape character
-      } while (fcontent[i - 1] == '\\');
+      } while (fcontent[i - 1] == '\\' && fcontent[i - 2] != '\\');
       ++i;
     } break;
       // TODO: test that this loop works
@@ -1005,7 +1005,8 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         if (!(i < file.size())) {
           throw Exception(string("Non terminated char"));
         }
-      } while (fcontent[i - 1] == '\\');
+        // the case when you have '\\'
+      } while (fcontent[i - 1] == '\\' && fcontent[i - 2] != '\\');
       ++i;
     } break;
     default:
