@@ -46,13 +46,17 @@ auto CompilationPool::deinit() noexcept -> void {
   workers.clear();
 }
 
-// TODO: update this function to just take a control of the mutex, then push
-// back all of the functions like a vectorized version of add_task
+// TODO: switch this to grab the mutex the vector push back everything, and do
+// so while avoiding a data race
+// NOTE: from my testing it doesn't seem much faster to have this be a
+// vectorized push (maybe my testing was wrong or the data race was borking the
+// results)
 auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
     -> void {
   auto const parent_path = builtins::mods.get_module_path(idx).parent_path();
   auto const &mod = builtins::mods.module_at(idx);
   auto const include_path = mod.format_includes();
+
   for (auto i = size_t{}; i < mod.tree.num_files; ++i) {
     auto const fname = std::filesystem::relative(
         parent_path / mod.tree.get_path(i), std::filesystem::current_path());
@@ -63,7 +67,6 @@ auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
     }
 
     {
-      // idk if we actually have to aquire the lock because they're atomic(?)
       auto lock = std::unique_lock(builtins::mods.mtxs[idx.mods]);
       builtins::mods.remaining_files[idx.mods]++;
     }
