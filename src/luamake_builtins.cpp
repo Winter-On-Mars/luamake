@@ -578,7 +578,7 @@ static auto default_compiler_impl(lua_State *state,
 
 namespace builtins {
 LakeModules mods = LakeModules();
-CLOptions cl_options = CLOptions{};
+CLOptions cl_options = CLOptions{false, -1};
 
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);

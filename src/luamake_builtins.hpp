@@ -6,6 +6,7 @@
 #include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <ostream>
@@ -433,7 +434,10 @@ private:
 extern LakeModules mods;
 
 struct CLOptions final {
-  bool verbose;
+  bool verbose = false;
+  // i would use size_t, but then compilers would yell at me about alignment,
+  // and i don't careeeeee
+  int8_t num_threads = -1;
 };
 extern CLOptions cl_options;
 } // namespace builtins
