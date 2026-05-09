@@ -6,6 +6,7 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -29,7 +30,6 @@ namespace fs = std::filesystem;
 
 using std::array, std::pair, std::string, std::string_view;
 
-namespace luamake {
 namespace {
 enum class Value_t { NUMBER, STRING, BOOL_TRUE, BOOL_FALSE, NIL };
 auto constexpr determine_type(string_view const str) noexcept -> Value_t {
@@ -148,82 +148,67 @@ static auto compile_commands_json(lua_State *const) noexcept -> exit_t;
 static auto run(lua_State *const) noexcept -> exit_t;
 static auto test(lua_State *const) noexcept -> exit_t;
 
-struct Type final {
-  // TODO: add a command line argument to specify the number of threads to be
-  // used
-  // TODO: add a command option for package management, we will probably need to
-  // depend on libcurl (and openssl) to do the networking to grab https urls,
-  // but that would be nice.
-  //  we can add things like --local as a cl arg to have it in the root project
-  //  (adding it to a .gitignore or whatever), or just (probably by default)
-  //  have it install in the $HOME/.luamake/package directory to be used for the
-  //  user packages that they have installed
-  enum class Command : int {
-    UNKNOWN_ARG,
-    BUILD,
-    NEW,
-    INIT,
-    CLEAN,
-    TEST,
-    RUN,
-    HELP,
-    CC_JSON,
-  } type_t;
-  using enum Command;
-
-  // TODO: just pass these to the functions instead of having them on this
-  // object and potentially having to move them around
-  int argc;
-  char **argv;
-
-  static auto make(int, char **) noexcept -> Type;
-
-  auto do_command() const noexcept -> exit_t;
+// TODO: add a command option for package management, we will probably need to
+// depend on libcurl (and openssl) to do the networking to grab https urls,
+// but that would be nice.
+//  we can add things like --local as a cl arg to have it in the root project
+//  (adding it to a .gitignore or whatever), or just (probably by default)
+//  have it install in the $HOME/.luamake/package directory to be used for the
+//  user packages that they have installed
+enum class Command : int {
+  UNKNOWN_ARG,
+  BUILD,
+  NEW,
+  INIT,
+  CLEAN,
+  TEST,
+  RUN,
+  HELP,
+  CC_JSON,
 };
 
-// TODO: just pass argc and argv to the functions directly, there's no reason to
-// be attaching them to the objects like this ?
-auto Type::make(int argc, char **argv) noexcept -> Type {
+auto determine_command(int argc, char **argv) noexcept -> Command {
   if (argc == 1) {
-    return {Type::RUN, 0, nullptr};
+    return Command::RUN;
   }
 
   if (strcmp(argv[1], "b") == 0 || strcmp(argv[1], "build") == 0) {
-    return {Type::BUILD, argc, argv};
+    return Command::BUILD;
   } else if (strcmp(argv[1], "n") == 0 || strcmp(argv[1], "new") == 0) {
     if (argc < 3) {
       error_message("Expected string for the name of the "
                     "project, found nothing" NL
                     "\tDisplaying help message for more information" NL);
-      return {Type::HELP, 0, nullptr};
+      return Command::HELP;
     }
-    return {Type::NEW, argc, argv};
+    return Command::NEW;
   } else if (strcmp(argv[1], "c") == 0 || strcmp(argv[1], "clean") == 0) {
-    return {Type::CLEAN, argc, argv};
+    return Command::CLEAN;
   } else if (strcmp(argv[1], "t") == 0 || strcmp(argv[1], "test") == 0) {
-    return {Type::TEST, argc, argv};
+    return Command::TEST;
   } else if (strcmp(argv[1], "r") == 0 || strcmp(argv[1], "run") == 0) {
-    return {Type::RUN, argc, argv};
+    return Command::RUN;
   } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
-    return {Type::HELP, 0, nullptr};
+    return Command::HELP;
   } else if (strcmp(argv[1], "i") == 0 || strcmp(argv[1], "init") == 0) {
-    return {Type::INIT, argc, argv};
+    return Command::INIT;
   } else if (strcmp(argv[1], "cc") == 0 ||
              strcmp(argv[1], "compile_commands") == 0) {
-    return {Type::CC_JSON, 0, nullptr};
+    return Command::CC_JSON;
   } else {
     fwarning_message("Unknown argument [%s]" NL
                      "\tDisplaying help for list of accepted arguments",
                      argv[1]);
-    return {Type::UNKNOWN_ARG, 0, nullptr};
+    return Command::UNKNOWN_ARG;
   }
 }
 
-auto Type::do_command() const noexcept -> exit_t {
-  switch (type_t) {
-  case UNKNOWN_ARG:
+auto run_command(Command const command, int argc, char **argv) noexcept
+    -> exit_t {
+  switch (command) {
+  case Command::UNKNOWN_ARG:
     return help();
-  case NEW: {
+  case Command::NEW: {
     auto project_type = proj_t::Executable;
     for (int i = 0; i < argc; ++i) {
       if (strcmp("--static", argv[i]) == 0) {
@@ -238,7 +223,7 @@ auto Type::do_command() const noexcept -> exit_t {
     }
     return new_proj(string_view{argv[2]}, project_type);
   }
-  case INIT: {
+  case Command::INIT: {
     char const *project_root = nullptr;
     auto project_type = proj_t::Executable;
 
@@ -278,17 +263,17 @@ auto Type::do_command() const noexcept -> exit_t {
     }
     return init_proj(project_root, project_type);
   }
-  case HELP:
+  case Command::HELP:
     return help();
-  case CLEAN:
+  case Command::CLEAN:
     [[fallthrough]];
-  case CC_JSON:
+  case Command::CC_JSON:
     [[fallthrough]];
-  case BUILD:
+  case Command::BUILD:
     [[fallthrough]];
-  case TEST:
+  case Command::TEST:
     [[fallthrough]];
-  case RUN:
+  case Command::RUN:
     break;
   }
 
@@ -329,26 +314,59 @@ auto Type::do_command() const noexcept -> exit_t {
   auto res = exit_t::ok;
 
   for (int i = 0; i < argc; ++i) {
-    if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
-      builtins::cl_options.verbose = true;
+    if (strncmp(argv[i], "-v", sizeof("-v")) == 0 ||
+        strncmp(argv[i], "--verbose", sizeof("--verbose")) == 0) {
+      luamake::builtins::cl_options.verbose = true;
+    }
+    // i know it's inconsistent to have this be formatted as --num_threads
+    // <nthreads>, while the arguments must be formatted as
+    // <arg_name>=<arg_value>, but idk this is the only way i can get this to
+    // work and it's (probably) not a big deal
+    else if (strncmp(argv[i], "--num_threads", sizeof("--num_threads")) == 0) {
+      ++i;
+      if (!(i < argc)) {
+        error_message("Improperly formatted --num_threads argument, expected "
+                      "`--num_threads <nthreads>`, but no <nthreads> parameter "
+                      "was passed in.");
+        return exit_t::useage_error;
+      }
+      auto const n_threads = std::atoi(argv[i]);
+      if (n_threads == 0) {
+        // NOTE: this does *technically* also catch cases like '012', but if
+        // you're doing that idk don't
+        if (argv[i][0] == '0') {
+          warning_message("Ignoring 0 for <nthreads> argument.");
+          --i;
+        } else {
+          warning_message(
+              "Parsing for '--num_threads <nthreads>' failed, using "
+              "max number of threads possible (minus 1)");
+        }
+      } else {
+        luamake::builtins::cl_options.num_threads =
+            static_cast<int8_t>(n_threads);
+      }
     }
   }
 
-  builtins::mods.init();
+  luamake::builtins::mods.init();
   // this can arguably be moved into just the build function, because that's the
   // only one that really needs a thread pool, but for now we'll do it here
-  threads.init(std::thread::hardware_concurrency() - 1);
-  switch (type_t) {
-  case BUILD:
+  luamake::threads.init(
+      luamake::builtins::cl_options.num_threads != -1
+          ? static_cast<size_t>(luamake::builtins::cl_options.num_threads)
+          : std::thread::hardware_concurrency() - 1);
+  switch (command) {
+  case Command::BUILD:
     res = build(state);
     break;
-  case TEST:
+  case Command::TEST:
     res = test(state);
     break;
-  case RUN:
+  case Command::RUN:
     res = run(state);
     break;
-  case CLEAN: {
+  case Command::CLEAN: {
     auto rm_everything = false;
     for (auto i = 0; i < argc; ++i) {
       if (strncmp(argv[i], "--everything", sizeof("--everything")) == 0) {
@@ -357,20 +375,20 @@ auto Type::do_command() const noexcept -> exit_t {
     }
     res = clean(state, rm_everything);
   } break;
-  case CC_JSON:
+  case Command::CC_JSON:
     res = compile_commands_json(state);
     break;
-  case UNKNOWN_ARG:
+  case Command::UNKNOWN_ARG:
     [[fallthrough]];
-  case NEW:
+  case Command::NEW:
     [[fallthrough]];
-  case INIT:
+  case Command::INIT:
     [[fallthrough]];
-  case HELP:
+  case Command::HELP:
     unreachable();
   }
-  threads.deinit();
-  builtins::mods.deinit();
+  luamake::threads.deinit();
+  luamake::builtins::mods.deinit();
   lua_close(state);
   return res;
 }
@@ -394,7 +412,8 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
 
   // creating default `luamake.lua`
   auto luamake_lua =
-      File(project_root / "luamake.lua", File::WRITE | File::CREATE);
+      luamake::File(project_root / "luamake.lua",
+                    luamake::File::WRITE | luamake::File::CREATE);
   if (!luamake_lua) {
     ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
                    "with permissions, or out of space.",
@@ -575,7 +594,8 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
     return exit_t::internal_error;
   }
 
-  auto impl = File(project_root / impl_f_name, File::WRITE | File::CREATE);
+  auto impl = luamake::File(project_root / impl_f_name,
+                            luamake::File::WRITE | luamake::File::CREATE);
   if (!impl) {
     ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
                    "with permissions, or out of space.",
@@ -749,11 +769,11 @@ static auto build(lua_State *const state) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  auto const builder = lua_getglobal(state, BUILDER_OBJ);
+  auto const builder = lua_getglobal(state, luamake::BUILDER_OBJ);
   switch (builder) {
   case LUA_TNIL:
     lua_pop(state, 1);
-    builtins::make_builder_obj(state);
+    luamake::builtins::make_builder_obj(state);
     break;
   case LUA_TTABLE:
     break;
@@ -797,7 +817,7 @@ static auto clean(lua_State *const state, bool const rm_everything) noexcept
   // normally we need to get the builder object from the global, but in this
   // case there's no other point that can call this function, so we just need to
   // make a builder object
-  builtins::make_builder_thunk(state);
+  luamake::builtins::make_builder_thunk(state);
   if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
     ferror_message("While in the lua vm, Build function" NL "\t[%s]",
@@ -805,7 +825,7 @@ static auto clean(lua_State *const state, bool const rm_everything) noexcept
     return exit_t::lua_vm_error; // ?
   }
 
-  for (auto &&mod : builtins::mods) {
+  for (auto &&mod : luamake::builtins::mods) {
     auto const cache_path = fs::path(
         std::format("{}/__luamake_cache/{}.cache", mod.install_dir, mod.name));
     (void)fs::remove(cache_path);
@@ -842,7 +862,7 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
   // normally we need to get the builder object from the global, but in this
   // case there's no other point that can call this function, so we just need to
   // make a builder object
-  builtins::make_builder_thunk(state);
+  luamake::builtins::make_builder_thunk(state);
   if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
     ferror_message("While in the lua vm, Build function" NL "\t[%s]",
@@ -850,7 +870,7 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     return exit_t::lua_vm_error; // ?
   }
 
-  for (auto &&mod : builtins::mods) {
+  for (auto &&mod : luamake::builtins::mods) {
     auto const &directory = mod.install_dir;
     auto const arguments = [&]() -> string {
       auto res = string();
@@ -945,7 +965,8 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     fs::create_directory(mod.install_dir);
     auto const cc_json_path =
         mod.install_dir / fs::path("compile_commands.json");
-    auto cc_json = File(cc_json_path, File::WRITE | File::CREATE);
+    auto cc_json = luamake::File(cc_json_path,
+                                 luamake::File::WRITE | luamake::File::CREATE);
     if (!cc_json) {
       ferror_message("Unable to make file %s", cc_json_path.c_str());
       return exit_t::internal_error;
@@ -970,11 +991,11 @@ static auto run(lua_State *const state) noexcept -> exit_t {
     return exit_t::config_error;
   }
 
-  auto runner_t = lua_getglobal(state, RUNNER_OBJ);
+  auto runner_t = lua_getglobal(state, luamake::RUNNER_OBJ);
   switch (runner_t) {
   case LUA_TNIL:
     lua_pop(state, 1);
-    builtins::make_runner_obj(state);
+    luamake::builtins::make_runner_obj(state);
     break;
   case LUA_TTABLE:
     break;
@@ -987,7 +1008,7 @@ static auto run(lua_State *const state) noexcept -> exit_t {
 
   // NOTE: technically causing a double deinit, but this seems to work for
   // requiring all of the modules be built before running the run function
-  threads.deinit();
+  luamake::threads.deinit();
 
   if (lua_pcall(state, 1, 0, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
@@ -1000,9 +1021,9 @@ static auto run(lua_State *const state) noexcept -> exit_t {
 }
 
 static auto test(lua_State *const state) noexcept -> exit_t {
-  builtins::make_builder_obj(state);
+  luamake::builtins::make_builder_obj(state);
   lua_pushboolean(state, true);
-  lua_setfield(state, -2, TESTING_MACRO);
+  lua_setfield(state, -2, luamake::TESTING_MACRO);
 
   auto const build_res = build(state);
   if (build_res != exit_t::ok) {
@@ -1014,12 +1035,10 @@ static auto test(lua_State *const state) noexcept -> exit_t {
   return exit_t::internal_error;
 }
 } // namespace
-} // namespace luamake
 
 auto main(int argc, char **argv) -> int {
-  using namespace luamake;
-  auto const flags = Type::Type::make(argc, argv);
-  switch (flags.do_command()) {
+  auto const command = determine_command(argc, argv);
+  switch (run_command(command, argc, argv)) {
   case exit_t::ok:
     return 0;
   case exit_t::internal_error:
