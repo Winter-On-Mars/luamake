@@ -68,8 +68,8 @@
 
 #define expr_dbg(expr)                                                         \
   do {                                                                         \
-    auto const res = (expr);                                                   \
-    std::cerr << DBG "[expr] " NORMAL #expr " = " << res << '\n';              \
+    auto const _expr_res = (expr);                                             \
+    std::cerr << DBG "[expr] " NORMAL #expr " = " << _expr_res << '\n';        \
   } while (false);
 #else
 #define fn_print()
