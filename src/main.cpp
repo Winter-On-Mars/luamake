@@ -33,7 +33,6 @@ namespace luamake {
 namespace {
 enum class Value_t { NUMBER, STRING, BOOL_TRUE, BOOL_FALSE, NIL };
 auto constexpr determine_type(string_view const str) noexcept -> Value_t {
-  // TODO: handle \" (and other escape characters) appearing in the string
   if (str.length() == 0 || str == string_view{"nil"}) {
     return Value_t::NIL; // i don't know if this is actually what we want to do?
   } else if (str == string_view{"true"}) {
@@ -48,6 +47,9 @@ auto constexpr determine_type(string_view const str) noexcept -> Value_t {
   return Value_t::NIL;
 }
 
+// TODO: (Winter-On-Mars) try moving the args table to be a userdata with
+// indexing operator overloaded, then just use our own hashmap/unordered_map
+// under the hood(?), it might not be faster but worth a try
 auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
   lua_createtable(state, 0, 0);
   auto start_lua_args = 0;
@@ -59,18 +61,15 @@ auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
     }
   }
 
-  // TODO: finish this, idk add a function that checks if a table value already
-  // exists, and appends to it if it does, otherwise creates the value; that way
-  // the function can be used to allow us to put subtables into the args table
   for (; start_lua_args < argc; ++start_lua_args) {
-    // TODO: parse the args and put them in the table
     auto arg = string(argv[start_lua_args]);
     auto const eq_pos = arg.find('=');
     if (eq_pos == arg.npos) {
-      // idk should report an error/warning here?
-      // all args passed to the script should be of the form
-      // <arg_name> = <literal value>
-      // where <literal value> is a lua literal
+      fwarning_message("Arguments passed to the args table should be of the "
+                       "form <arg_name>=<arg_value>, here arg_value is a lua "
+                       "literal value (no spaces between the '=')." NL
+                       "\tIgnoring arg_name = %s",
+                       arg.c_str());
       continue;
     }
     // NOTE: we have to set this bc lua_setfield just takes in a c_str, and
@@ -122,9 +121,7 @@ enum class proj_t : unsigned char {
 };
 
 auto file_exists(fs::path &&path) noexcept -> bool {
-  // TODO: rewrite this because O_PATH is linux specific, see man 2 open for
-  // info
-#if defined(__unix__)
+#if defined(__linux__)
   auto file = open(path.c_str(), O_PATH);
   close(file);
   return file != -1;
@@ -146,7 +143,7 @@ static auto init_proj(string_view const, proj_t const) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
 static auto build(lua_State *const) noexcept -> exit_t;
-static auto clean(lua_State *const) noexcept -> exit_t;
+static auto clean(lua_State *const, bool const) noexcept -> exit_t;
 static auto compile_commands_json(lua_State *const) noexcept -> exit_t;
 static auto run(lua_State *const) noexcept -> exit_t;
 static auto test(lua_State *const) noexcept -> exit_t;
@@ -174,6 +171,8 @@ struct Type final {
   } type_t;
   using enum Command;
 
+  // TODO: just pass these to the functions instead of having them on this
+  // object and potentially having to move them around
   int argc;
   char **argv;
 
@@ -200,7 +199,7 @@ auto Type::make(int argc, char **argv) noexcept -> Type {
     }
     return {Type::NEW, argc, argv};
   } else if (strcmp(argv[1], "c") == 0 || strcmp(argv[1], "clean") == 0) {
-    return {Type::CLEAN, 0, nullptr};
+    return {Type::CLEAN, argc, argv};
   } else if (strcmp(argv[1], "t") == 0 || strcmp(argv[1], "test") == 0) {
     return {Type::TEST, argc, argv};
   } else if (strcmp(argv[1], "r") == 0 || strcmp(argv[1], "run") == 0) {
@@ -305,7 +304,7 @@ auto Type::do_command() const noexcept -> exit_t {
   (void)lua_gc(state, LUA_GCSTOP);
 
   if (!file_exists(fs::current_path() / "luamake.lua")) {
-    ferror_message("unable to discover `luamake.lua` in current dir at [%s]" NL
+    ferror_message("Unable to discover `luamake.lua` in current dir at [%s]" NL
                    "\tRun "
                    "init <proj-name> to create a initialize a new project, "
                    "or new <proj-name> to create a new subproject.",
@@ -349,9 +348,15 @@ auto Type::do_command() const noexcept -> exit_t {
   case RUN:
     res = run(state);
     break;
-  case CLEAN:
-    res = clean(state);
-    break;
+  case CLEAN: {
+    auto rm_everything = false;
+    for (auto i = 0; i < argc; ++i) {
+      if (strncmp(argv[i], "--everything", sizeof("--everything")) == 0) {
+        rm_everything = true;
+      }
+    }
+    res = clean(state, rm_everything);
+  } break;
   case CC_JSON:
     res = compile_commands_json(state);
     break;
@@ -679,8 +684,6 @@ static auto init_proj(string_view root, proj_t const type) noexcept -> exit_t {
     // clang-format on
   }
 
-  // idk if it's worth calling this function?
-  // [luamake_content.shrink_to_fit()]
   if (fprintf(luamake_file, "%s", luamake_content.data()) !=
       luamake_content.length()) {
     ferror_message(
@@ -771,15 +774,8 @@ static auto build(lua_State *const state) noexcept -> exit_t {
   return exit_t::ok;
 }
 
-// TODO: add a command line arg to specify which directories you want to clean,
-// something like --base for the root directory, along with being able to
-// specify the name of a specific module to clean
-// NOTE: this function just clears the cache, it leaves every other file as is,
-// we should add a command line arg to fully remove the files, something like
-// --everything
-// TODO: there's some error here where if you have multipe modules it will only
-// clean one of them(?), not sure how to fix it :)
-static auto clean(lua_State *const state) noexcept -> exit_t {
+static auto clean(lua_State *const state, bool const rm_everything) noexcept
+    -> exit_t {
   auto const build_fn_t = lua_getglobal(state, "Build");
   switch (build_fn_t) {
   case LUA_TFUNCTION:
@@ -813,6 +809,13 @@ static auto clean(lua_State *const state) noexcept -> exit_t {
     auto const cache_path = fs::path(
         std::format("{}/__luamake_cache/{}.cache", mod.install_dir, mod.name));
     (void)fs::remove(cache_path);
+    if (rm_everything) {
+      auto const object_path =
+          fs::path(std::format("{}/{}.o", mod.install_dir, mod.name));
+      for (auto &&obj : fs::directory_iterator(object_path)) {
+        (void)fs::remove(obj);
+      }
+    }
   }
   return exit_t::ok;
 }
