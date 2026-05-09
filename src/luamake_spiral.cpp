@@ -7,6 +7,7 @@
 
 #include <concepts>
 #include <cstddef>
+#include <filesystem>
 #include <format>
 #include <memory>
 #include <span>
@@ -14,6 +15,7 @@
 #include <string_view>
 #include <type_traits>
 #include <variant>
+#include <vector>
 
 #ifdef DEBUG
 #include <iostream>
@@ -25,333 +27,348 @@
 namespace fs = std::filesystem;
 
 namespace luamake::spl {
-struct Serializer {
-  Serializer() noexcept;
-
-  template <class T> auto serialize(T) = delete;
-  auto serialize(builtins::Module const &) -> void;
-
-  auto serialize(builtins::Module::Module_t const) -> void;
-  auto serialize(builtins::Module::DepTree const &) -> void;
-  auto serialize(std::span<fs::path const> const) -> void;
-  auto serialize(std::string_view const) -> void;
-
-  constexpr auto buffer() const noexcept -> u8 * { return m.buffer.get(); }
-  constexpr auto size() const noexcept -> size_t { return m.size; }
-
-private:
-  [[nodiscard]]
-  auto write(...) = delete;
-  [[nodiscard]]
-  auto write(std::integral auto) -> size_t;
-  [[nodiscard]]
-  auto write(void const *const, size_t) -> size_t;
+namespace {
+struct ByteBuffer final {
+  ByteBuffer() noexcept;
+  ByteBuffer(std::unique_ptr<u8[]> &&, size_t const) noexcept;
+  std::unique_ptr<u8[]> buffer = nullptr;
+  size_t cur = 0;
+  size_t cap = 0;
 
   auto resize(size_t at_least = 0) -> void;
-
-  struct M {
-    std::unique_ptr<u8[]> buffer = nullptr;
-    size_t size = 0;
-    size_t cap = 0;
-  } m;
 };
 
-Serializer::Serializer() noexcept : m{} {
-  // idk some variable that we can change, maybe we could take it in as a
-  // parameter, making an estimate to how big the file will be, so that we don't
-  // have to reallocate, but for now this is fine
-  constexpr auto initial_size = size_t{2 << 12};
-  m.buffer = std::make_unique<u8[]>(initial_size);
-  m.cap = initial_size;
+ByteBuffer::ByteBuffer() noexcept
+    : buffer(std::make_unique<u8[]>(2 << 12)), cur(0), cap(2 << 12) {}
+
+ByteBuffer::ByteBuffer(std::unique_ptr<u8[]> &&buffer,
+                       size_t const size) noexcept
+    : buffer(std::move(buffer)), cur(0), cap(size) {}
+
+auto ByteBuffer::resize(size_t at_least) -> void {
+  auto const new_cap = 3 * cap / 2 + at_least;
+  auto new_buffer = std::make_unique<u8[]>(new_cap);
+  memcpy(new_buffer.get(), buffer.get(), cur);
+  buffer = std::move(new_buffer);
+  cap = new_cap;
 }
 
-auto Serializer::write(std::integral auto t) -> size_t {
-  if (m.size + sizeof(t) >= m.cap)
-    resize(sizeof(t));
-  // TODO: idk if we actually need to fill out this table because we'll only be
-  // using it with 64bit (8 byte) numbers
+auto write(...) -> void = delete;
+
+auto write(ByteBuffer &bytes, std::integral auto t) -> void {
+  if (bytes.cur + sizeof(t) >= bytes.cap)
+    bytes.resize(sizeof(t));
   switch (sizeof(t)) {
   case 1: {
     // shouldn't need to do any byte flipping because this is a single byte
-    memcpy(m.buffer.get() + m.size, &t, sizeof(t));
-    return sizeof(t);
+    memcpy(bytes.buffer.get() + bytes.cur, &t, sizeof(t));
   } break;
+  case 2: {
+    auto const tmp = htobe16(t);
+    memcpy(bytes.buffer.get() + bytes.cur, &tmp, sizeof(t));
+  }
   case 4: {
     auto const tmp = htobe32(t);
-    memcpy(buffer() + m.size, &tmp, sizeof(t));
-    return sizeof(t);
+    memcpy(bytes.buffer.get() + bytes.cur, &tmp, sizeof(t));
   } break;
   case 8: {
     auto const tmp = htobe64(t);
-    memcpy(m.buffer.get() + m.size, &tmp, sizeof(t));
-    return sizeof(t);
+    memcpy(bytes.buffer.get() + bytes.cur, &tmp, sizeof(t));
   } break;
   }
-
-  unreachable();
+  bytes.cur += sizeof(t);
 }
 
-auto Serializer::write(void const *const bytes, size_t n_bytes) -> size_t {
-  if (m.size + n_bytes >= m.cap)
-    resize(n_bytes);
-  memcpy(m.buffer.get() + m.size, bytes, n_bytes);
-  return n_bytes;
+// TODO: idk probably change this to a span(?)
+// also change this to writev (?)
+// TODO: update this to not take the n_bytes, but n_things(?), or update the
+// readv function to also take the num_bytes to be consistent(?)
+auto write(ByteBuffer &bytes, void const *const thing, size_t n_bytes) -> void {
+  if (bytes.cur + n_bytes >= bytes.cap)
+    bytes.resize(n_bytes);
+  memcpy(bytes.buffer.get() + bytes.cur, thing, n_bytes);
+  bytes.cur += n_bytes;
 }
 
-auto Serializer::resize(size_t at_least) -> void {
-  auto const new_cap = 3 * m.cap / 2 + at_least;
-  auto new_buffer = std::make_unique<u8[]>(new_cap);
-  memcpy(new_buffer.get(), buffer(), m.cap);
-  m.buffer = std::move(new_buffer);
-  m.cap = new_cap;
-}
-
-auto Serializer::serialize(builtins::Module const &mod) -> void {
-  serialize(mod.type);
-  serialize(mod.tree);
-
-  serialize(std::span<fs::path const>(mod.roots));
-  serialize(std::span<fs::path const>(mod.headers));
-  serialize(std::span<fs::path const>(mod.includes));
-  serialize(std::span<fs::path const>(mod.dep_includes));
-  serialize(std::span<fs::path const>(mod.sys_includes));
-  serialize(std::span<fs::path const>(mod.linking));
-  // TODO: serialize pp::Interpreter
-  serialize(std::string_view{mod.compiler});
-  serialize(std::string_view{mod.name});
-  serialize(std::string_view{mod.install_dir});
-}
-
-auto Serializer::serialize(builtins::Module::Module_t const t) -> void {
-  auto const byte =
-      static_cast<std::underlying_type_t<builtins::Module::Module_t>>(t);
-  m.size += write(byte);
-}
-
-// TODO: probably have to actually do endian swap here (?) for all of the types
-auto Serializer::serialize(builtins::Module::DepTree const &tree) -> void {
-  serialize(tree.all_paths.view());
-  m.size += write(tree.num_files);
-  m.size +=
-      write(tree.types.get(), sizeof(decltype(tree.types[0])) * tree.num_files);
-  m.size +=
-      write(tree.files.get(), sizeof(decltype(tree.files[0])) * tree.num_files);
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    auto const dep_size = tree.deps[i].size();
-    m.size += write(dep_size);
-    for (auto &&dep : tree.deps[i]) {
-      // NOTE: we have to be sure to actually do the endian swap :(
-      m.size += write(dep);
-    }
-  }
-  // fuck we also have to do endian swap here
-  m.size += write(tree.hashes.get(),
-                  sizeof(decltype(tree.hashes[0])) * tree.num_files);
-}
-
-auto Serializer::serialize(std::span<fs::path const> const span) -> void {
-  auto const span_size = span.size();
-  m.size += write(span_size);
-  for (auto i = size_t{}; i < span_size; ++i) {
-    // this this causes an issue, but we'll test it
-    serialize(std::string_view(span[i].string()));
-    // auto const &str = span[i].string();
-    // serialize(std::string_view(str));
-  }
-}
-
-auto Serializer::serialize(std::string_view const str) -> void {
-  auto const str_size = str.size();
-  m.size += write(str_size);
-  m.size += write(str.data(), str_size * sizeof(char));
-}
-
-struct Deserializer {
-  Deserializer(File &file);
-
-  template <class T> auto deserialize() -> T = delete;
-  template <> auto deserialize<builtins::Module>() -> builtins::Module;
-
-private:
-  template <>
-  auto deserialize<builtins::Module::Module_t>() -> builtins::Module::Module_t;
-  template <>
-  auto deserialize<builtins::Module::DepTree>() -> builtins::Module::DepTree;
-  template <>
-  auto deserialize<std::vector<fs::path>>() -> std::vector<fs::path>;
-  template <> auto deserialize<std::string>() -> std::string;
-  template <> auto deserialize<OwnedString>() -> OwnedString;
-
-  template <class T>
-  [[nodiscard]]
-  auto read() -> T = delete;
-
-  template <>
-  [[nodiscard]]
-  auto read<size_t>() -> size_t;
-
-  template <>
-  [[nodiscard]]
-  auto read<uint>() -> uint;
-
-  template <>
-  [[nodiscard]]
-  auto read<u8>() -> u8;
-
-  template <class T>
-  [[nodiscard]]
-  auto readv(size_t const) -> std::unique_ptr<T[]>;
-
-  auto check(size_t const, std::string_view const) const -> void;
-
-  auto constexpr buffer() const noexcept -> u8 * { return m.buf.get(); }
-
-  struct M {
-    std::unique_ptr<u8[]> buf = nullptr;
-    size_t cur = 0;
-    size_t size = 0;
-  } m;
-};
-
-Deserializer::Deserializer(File &file) : m() {
-  auto &&[size, buf] = file.dump_content();
-  m.size = size;
-  m.buf = std::move(buf);
-}
-
-template <> auto Deserializer::read<size_t>() -> size_t {
-  check(sizeof(size_t), "size_t");
-  auto res = size_t{};
-  memcpy(&res, buffer() + m.cur, sizeof(size_t));
-  // this *should* be the same as if we did an if constexpr branch
-  res = be64toh(res);
-  m.cur += sizeof(size_t);
-  return res;
-}
-
-template <> auto Deserializer::read<uint>() -> uint {
-  check(sizeof(uint), "uint");
-  auto res = uint{};
-  memcpy(&res, buffer() + m.cur, sizeof(uint));
-  // this *should* be the same as if we did an if constexpr branch
-  res = be32toh(res);
-  m.cur += sizeof(uint);
-  return res;
-}
-
-template <> auto Deserializer::read<u8>() -> u8 {
-  check(sizeof(u8), "byte");
-  auto res = u8{};
-  // could probably just static_cast<u8>(buffer() + m.cur) (?), it'd almost
-  // certainly be faster, i just don't know if it would 100% work
-  memcpy(&res, buffer() + m.cur, sizeof(u8));
-  m.cur += sizeof(u8);
-  return res;
-}
-
-template <class T>
-auto Deserializer::readv(size_t const size) -> std::unique_ptr<T[]> {
-  check(size * sizeof(T), "vectorized read");
-  auto res = std::make_unique<T[]>(size);
-  memcpy(res.get(), buffer() + m.cur, size * sizeof(T));
-  m.cur += size * sizeof(T);
-  return res;
-}
-
-auto Deserializer::check(size_t const amount, std::string_view const type) const
+auto check(ByteBuffer &bytes, size_t const amount, std::string_view const type)
     -> void {
   [[unlikely]]
-  if (m.cur + amount > m.size) {
+  if (bytes.cur + amount > bytes.cap) {
     throw std::runtime_error(std::format(
         "Attempting to read [{}] bytes for [{}], but not enough bytes "
         "available in buffer. Current position in buffer = [{}], size of "
         "buffer = [{}].",
-        amount, type, m.cur, m.size));
+        amount, type, bytes.cur, bytes.cap));
   }
 }
 
+template <class T>
+[[nodiscard]]
+auto read(ByteBuffer &) -> T = delete;
+
+// TODO: see if we can combine these into one template, like we do with read,
+// i'm not sure if we can because the return type of each is different(?)
 template <>
-auto Deserializer::deserialize<builtins::Module>() -> builtins::Module {
-  auto mod = builtins::Module();
-  mod.type = deserialize<builtins::Module::Module_t>();
-  mod.tree = deserialize<builtins::Module::DepTree>();
-  mod.roots = deserialize<std::vector<fs::path>>();
-  mod.headers = deserialize<std::vector<fs::path>>();
-  mod.includes = deserialize<std::vector<fs::path>>();
-  mod.dep_includes = deserialize<std::vector<fs::path>>();
-  mod.sys_includes = deserialize<std::vector<fs::path>>();
-  mod.linking = deserialize<std::vector<fs::path>>();
-  // TODO: deserialize pp::Interpreter
-  mod.compiler = deserialize<std::string>();
-  mod.name = deserialize<std::string>();
-  mod.install_dir = deserialize<std::string>();
-  return mod;
+[[nodiscard]]
+auto read<size_t>(ByteBuffer &bytes) -> size_t {
+  check(bytes, sizeof(size_t), "size_t");
+  auto res = size_t{};
+  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(size_t));
+  res = be64toh(res);
+  bytes.cur += sizeof(size_t);
+  return res;
 }
 
 template <>
-auto Deserializer::deserialize<builtins::Module::Module_t>()
-    -> builtins::Module::Module_t {
-  return static_cast<builtins::Module::Module_t>(
-      read<std::underlying_type_t<builtins::Module::Module_t>>());
+[[nodiscard]]
+auto read<uint>(ByteBuffer &bytes) -> uint {
+  check(bytes, sizeof(uint), "uint");
+  auto res = uint{};
+  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(uint));
+  res = be32toh(res);
+  bytes.cur += sizeof(uint);
+  return res;
 }
 
 template <>
-auto Deserializer::deserialize<builtins::Module::DepTree>()
-    -> builtins::Module::DepTree {
-  auto res = builtins::Module::DepTree();
-  res.all_paths = deserialize<OwnedString>();
-  res.num_files = read<size_t>();
-  res.types = readv<builtins::Module::DepTree::SourceFile_t>(res.num_files);
-  res.files = readv<StringViews>(res.num_files);
-  res.deps = std::make_unique<std::vector<uint>[]>(res.num_files);
-  for (auto i = size_t{}; i < res.num_files; ++i) {
-    auto const size = read<size_t>();
-    res.deps[i] = std::vector<uint>(size);
-    // res.deps[i].reserve(size);
-    for (auto j = size_t{}; j < size; ++j) {
-      res.deps[i][j] = read<uint>();
+[[nodiscard]]
+auto read<u8>(ByteBuffer &bytes) -> u8 {
+  check(bytes, sizeof(u8), "u8");
+  auto res = u8{};
+  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(u8));
+  bytes.cur += sizeof(u8);
+  return res;
+}
+
+template <class T>
+[[nodiscard]]
+auto readv(ByteBuffer &bytes, size_t const size) -> std::unique_ptr<T[]> {
+  check(bytes, size * sizeof(T), "vectorized read");
+  auto res = std::make_unique<T[]>(size);
+  memcpy(res.get(), bytes.buffer.get() + bytes.cur, size * sizeof(T));
+  bytes.cur += size * sizeof(T);
+  return res;
+}
+} // namespace
+
+// TODO: idk just move the ByteBuffer out that way we don't need to pass it to
+// every ctor
+template <class T> struct Serializer<std::span<T>> {
+  Serializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto serialize(std::span<T const>) -> void;
+  ByteBuffer &bytes;
+};
+
+template <typename T>
+  requires std::convertible_to<T, std::string_view>
+struct Serializer<T> {
+  Serializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto serialize(std::string_view const) -> void;
+  ByteBuffer &bytes;
+};
+
+template <class T>
+auto Serializer<std::span<T>>::serialize(std::span<T const> const span)
+    -> void {
+  auto const span_size = span.size();
+  write(bytes, span_size);
+  auto str_serializer = Serializer<std::string_view>(bytes);
+  for (auto i = size_t{}; i < span_size; ++i) {
+    // this this causes an issue, but we'll test it
+    str_serializer.serialize(std::string_view(span[i].string()));
+  }
+}
+
+template <class T>
+  requires std::convertible_to<T, std::string_view>
+auto Serializer<T>::serialize(std::string_view const str) -> void {
+  auto const str_size = str.size();
+  write(bytes, str_size);
+  write(bytes, str.data(), str_size * sizeof(char));
+}
+
+// NOTE: there should be a way to take these functions out of line, but i can't
+// figure out how without an error about no matching function templates
+template <> struct Serializer<builtins::Module::Module_t> {
+  Serializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto serialize(builtins::Module::Module_t const t) -> void {
+    auto const byte =
+        static_cast<std::underlying_type_t<builtins::Module::Module_t>>(t);
+    write(bytes, byte);
+  }
+  ByteBuffer &bytes;
+};
+
+template <> struct Serializer<builtins::Module::DepTree> {
+  Serializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+
+  // TODO: probably have to actually do endian swap here (?) for all of the
+  // types
+  auto serialize(builtins::Module::DepTree const &tree) -> void {
+    auto str_serializer = Serializer<std::string_view>(bytes);
+    str_serializer.serialize(tree.all_paths.view());
+    write(bytes, tree.num_files);
+    write(bytes, tree.types.get(),
+          sizeof(decltype(tree.types[0])) * tree.num_files);
+    write(bytes, tree.files.get(),
+          sizeof(decltype(tree.files[0])) * tree.num_files);
+    for (auto i = size_t{}; i < tree.num_files; ++i) {
+      auto const dep_size = tree.deps[i].size();
+      write(bytes, dep_size);
+      for (auto &&dep : tree.deps[i]) {
+        // NOTE: we have to be sure to actually do the endian swap :(
+        write(bytes, dep);
+      }
     }
+    // fuck we also have to do endian swap here
+    write(bytes, tree.hashes.get(),
+          sizeof(decltype(tree.hashes[0])) * tree.num_files);
   }
-  res.hashes = readv<size_t>(res.num_files);
-  return res;
-}
 
-template <>
-auto Deserializer::deserialize<std::vector<fs::path>>()
-    -> std::vector<fs::path> {
-  auto res = std::vector<fs::path>();
-  auto const size = read<size_t>();
-  res.reserve(size);
-  for (auto i = size_t{}; i < size; ++i) {
-    res.emplace_back(fs::path(deserialize<std::string>()));
+  ByteBuffer &bytes;
+};
+
+// NOTE: if we were writing a library, then this would be something that we
+// write in the luamake_builtins file, and we just expose an api for it, not
+// saying i won't do that, but for now we're just trying to make this work with
+// gcc
+template <> struct Serializer<builtins::Module> {
+  Serializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto serialize(builtins::Module const &mod) -> void {
+    auto type_serializer = Serializer<builtins::Module::Module_t>(bytes);
+    type_serializer.serialize(mod.type);
+
+    auto tree_serializer = Serializer<builtins::Module::DepTree>(bytes);
+    tree_serializer.serialize(mod.tree);
+
+    auto span_serializer = Serializer<std::span<fs::path>>(bytes);
+    span_serializer.serialize(mod.roots);
+    span_serializer.serialize(mod.headers);
+    span_serializer.serialize(mod.includes);
+    span_serializer.serialize(mod.dep_includes);
+    span_serializer.serialize(mod.sys_includes);
+    span_serializer.serialize(mod.linking);
+
+    auto str_serializer = Serializer<std::string_view>(bytes);
+    str_serializer.serialize(std::string_view{mod.compiler});
+    str_serializer.serialize(std::string_view{mod.name});
+    str_serializer.serialize(std::string_view{mod.install_dir});
   }
-  return res;
-}
 
-template <> auto Deserializer::deserialize<std::string>() -> std::string {
-  auto res = std::string();
-  auto const size = read<size_t>();
-  check(size * sizeof(char), "std::string");
-  res.reserve(size);
-  res.assign(buffer() + m.cur, buffer() + m.cur + size);
-  m.cur += size * sizeof(char);
-  return res;
-}
+  ByteBuffer &bytes;
+};
 
-template <> auto Deserializer::deserialize<OwnedString>() -> OwnedString {
-  auto const size = read<size_t>();
-  check(size * sizeof(char), "OwnedString");
-  auto buf = static_cast<char *>(malloc(size * sizeof(char)));
-  auto res = OwnedString(buf, size);
-  memcpy(res.buffer, buffer() + m.cur, size * sizeof(char));
-  res.size = size;
-  m.cur += size * sizeof(char);
-  return res;
-}
+template <> struct Deserializer<std::string> {
+  Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto deserialize() -> std::string {
+    auto res = std::string();
+    auto const size = read<size_t>(bytes);
+    check(bytes, size * sizeof(char), "std::string");
+    res.reserve(size);
+    res.assign(bytes.buffer.get() + bytes.cur,
+               bytes.buffer.get() + bytes.cur + size);
+    bytes.cur += size * sizeof(char);
+    return res;
+  }
+  ByteBuffer &bytes;
+};
+
+template <> struct Deserializer<std::vector<fs::path>> {
+  Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto deserialize() -> std::vector<fs::path> {
+    auto res = std::vector<fs::path>();
+    auto const size = read<size_t>(bytes);
+    res.reserve(size);
+    auto str_deserial = Deserializer<std::string>(bytes);
+    for (auto i = size_t{}; i < size; ++i) {
+      res.emplace_back(fs::path(str_deserial.deserialize()));
+    }
+    return res;
+  }
+  ByteBuffer &bytes;
+};
+
+template <> struct Deserializer<builtins::Module::Module_t> {
+  Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto deserialize() -> builtins::Module::Module_t {
+    return static_cast<builtins::Module::Module_t>(
+        read<std::underlying_type_t<builtins::Module::Module_t>>(bytes));
+  }
+  ByteBuffer &bytes;
+};
+
+template <> struct Deserializer<OwnedString> {
+  Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto deserialize() -> OwnedString {
+    auto const size = read<size_t>(bytes);
+    check(bytes, size * sizeof(char), "OwnedString");
+    auto buf = static_cast<char *>(malloc(size * sizeof(char)));
+    auto res = OwnedString(buf, size);
+    memcpy(res.buffer, bytes.buffer.get() + bytes.cur, size * sizeof(char));
+    res.size = size;
+    bytes.cur += size * sizeof(char);
+    return res;
+  }
+  ByteBuffer &bytes;
+};
+
+template <> struct Deserializer<builtins::Module::DepTree> {
+  Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto deserialize() -> builtins::Module::DepTree {
+    auto res = builtins::Module::DepTree();
+    auto owned_str_deserial = Deserializer<OwnedString>(bytes);
+    res.all_paths = owned_str_deserial.deserialize();
+    res.num_files = read<size_t>(bytes);
+    res.types =
+        readv<builtins::Module::DepTree::SourceFile_t>(bytes, res.num_files);
+    res.files = readv<StringViews>(bytes, res.num_files);
+    res.deps = std::make_unique<std::vector<uint>[]>(res.num_files);
+    for (auto i = size_t{}; i < res.num_files; ++i) {
+      auto const size = read<size_t>(bytes);
+      res.deps[i] = std::vector<uint>(size);
+      // res.deps[i].reserve(size);
+      for (auto j = size_t{}; j < size; ++j) {
+        res.deps[i][j] = read<uint>(bytes);
+      }
+    }
+    res.hashes = readv<size_t>(bytes, res.num_files);
+    return res;
+  }
+  ByteBuffer &bytes;
+};
+
+template <> struct Deserializer<builtins::Module> {
+  Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto deserialize() -> builtins::Module {
+    auto mod = builtins::Module();
+
+    auto mod_t_deserial = Deserializer<builtins::Module::Module_t>(bytes);
+    mod.type = mod_t_deserial.deserialize();
+
+    auto tree_deserial = Deserializer<builtins::Module::DepTree>(bytes);
+    mod.tree = tree_deserial.deserialize();
+
+    auto vec_deserial = Deserializer<std::vector<fs::path>>(bytes);
+    mod.roots = vec_deserial.deserialize();
+    mod.headers = vec_deserial.deserialize();
+    mod.includes = vec_deserial.deserialize();
+    mod.dep_includes = vec_deserial.deserialize();
+    mod.sys_includes = vec_deserial.deserialize();
+    mod.linking = vec_deserial.deserialize();
+
+    auto str_deserial = Deserializer<std::string>(bytes);
+    mod.compiler = str_deserial.deserialize();
+    mod.name = str_deserial.deserialize();
+    mod.install_dir = str_deserial.deserialize();
+    return mod;
+  }
+  ByteBuffer &bytes;
+};
 
 auto serialize(builtins::Module const &mod, std::filesystem::path const &path)
     -> void {
-  auto cereal = Serializer();
+  auto bytes = ByteBuffer();
+  auto cereal = Serializer<builtins::Module>(bytes);
   cereal.serialize(mod);
 
   auto outfile = File(path, File::WRITE | File::CREATE);
@@ -360,11 +377,11 @@ auto serialize(builtins::Module const &mod, std::filesystem::path const &path)
   // it's something
   if (!outfile)
     return;
-  outfile.write(cereal.buffer(), cereal.size(), 1);
+  outfile.write(cereal.bytes.buffer.get(), cereal.bytes.cur, 1);
   outfile.flush();
 #ifdef DEBUG
   std::cout << std::format("serialized file [{}] with [{}] bytes" NL,
-                           path.string(), cereal.size());
+                           path.string(), cereal.bytes.cur);
 
 #endif // DEBUG
 }
@@ -378,7 +395,9 @@ auto deserialize(fs::path const &path)
 #ifdef DEBUG
   std::cout << std::format("deserializing file [{}]" NL, path.string());
 #endif // DEBUG
-  auto decereal = Deserializer(file);
-  return decereal.deserialize<builtins::Module>();
+  auto &&[size, buffer] = file.dump_content();
+  auto bytes = ByteBuffer(std::move(buffer), size);
+  auto decereal = Deserializer<builtins::Module>(bytes);
+  return decereal.deserialize();
 }
 } // namespace luamake::spl

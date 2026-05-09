@@ -266,8 +266,8 @@ struct Module final {
     friend CompilationPool;
     friend Module;
     friend Builder;
-    friend spl::Serializer;
-    friend spl::Deserializer;
+    friend spl::Serializer<DepTree>;
+    friend spl::Deserializer<DepTree>;
   };
 
   // NOTE: we could probably use the empty space in the vector<fs::path> headers
@@ -321,8 +321,8 @@ struct Module final {
 
   friend CompilationPool;
   friend Builder;
-  friend spl::Serializer;
-  friend spl::Deserializer;
+  friend spl::Serializer<Module>;
+  friend spl::Deserializer<Module>;
 };
 
 // EXPL: the ModIndex struct is used to index into this, the top 32 bits index
