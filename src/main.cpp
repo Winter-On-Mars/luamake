@@ -139,7 +139,6 @@ auto file_exists(fs::path &&path) noexcept -> bool {
 }
 
 static auto new_proj(string_view const, proj_t const) noexcept -> exit_t;
-static auto init_proj(string_view const, proj_t const) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
 static auto build(lua_State *const) noexcept -> exit_t;
@@ -159,7 +158,6 @@ enum class Command : int {
   UNKNOWN_ARG,
   BUILD,
   NEW,
-  INIT,
   CLEAN,
   TEST,
   RUN,
@@ -190,8 +188,6 @@ auto determine_command(int argc, char **argv) noexcept -> Command {
     return Command::RUN;
   } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
     return Command::HELP;
-  } else if (strcmp(argv[1], "i") == 0 || strcmp(argv[1], "init") == 0) {
-    return Command::INIT;
   } else if (strcmp(argv[1], "cc") == 0 ||
              strcmp(argv[1], "compile_commands") == 0) {
     return Command::CC_JSON;
@@ -222,46 +218,6 @@ auto run_command(Command const command, int argc, char **argv) noexcept
       }
     }
     return new_proj(string_view{argv[2]}, project_type);
-  }
-  case Command::INIT: {
-    char const *project_root = nullptr;
-    auto project_type = proj_t::Executable;
-
-    for (int i = 0; i < argc; ++i) {
-      if (*argv[i] != '-') {
-        continue;
-      }
-      auto const len = strlen(argv[i]);
-      if (len < 5) {
-        continue;
-      }
-
-      if (strncmp(argv[i], "-type", 4) == 0) {
-        ++i;
-        if (strcmp(argv[i], "executable") == 0) {
-        } else if (strcmp(argv[i], "dynamic") == 0) {
-          project_type = proj_t::Dynamic;
-        } else if (strcmp(argv[i], "static") == 0) {
-          project_type = proj_t::Static;
-        } else {
-          ferror_message(
-              "When parsing for 'init' command line args, came across "
-              "unknown type %s",
-              argv[i]);
-          return exit_t::useage_error;
-        }
-      } else if (strncmp(argv[i], "-root", 4) == 0) {
-        ++i;
-        project_root = argv[i];
-      }
-    }
-    if (project_root == nullptr) {
-      error_message(
-          "When parsing for 'init' command line args, expected a project root "
-          "file to be given, see help message for more information");
-      return exit_t::useage_error;
-    }
-    return init_proj(project_root, project_type);
   }
   case Command::HELP:
     return help();
@@ -381,8 +337,6 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   case Command::UNKNOWN_ARG:
     [[fallthrough]];
   case Command::NEW:
-    [[fallthrough]];
-  case Command::INIT:
     [[fallthrough]];
   case Command::HELP:
     unreachable();
@@ -621,100 +575,6 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
 
   if (header != nullptr)
     fclose(header);
-
-  return exit_t::ok;
-}
-
-// TODO: update this function so that the template strings are actually correct
-static auto init_proj(string_view root, proj_t const type) noexcept -> exit_t {
-  auto *luamake_file = fopen("./luamake.lua", "w");
-  if (luamake_file == nullptr) {
-    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
-                   "with permissions, or out of space.",
-                   (fs::current_path() / "luamake.lua").c_str());
-    return exit_t::internal_error;
-  }
-
-  // TODO: update this to use std::format
-  auto luamake_content = string();
-  luamake_content.reserve(256);
-
-  // TODO: rework this to have the separated objects that are constructed
-  auto constexpr types = std::array<string_view, 3>{
-      string_view{"exe"},
-      string_view{"dlib"},
-      string_view{"slib"},
-  };
-
-  auto const project_type_string =
-      types[static_cast<std::underlying_type_t<proj_t>>(type)];
-
-  luamake_content +=
-      // clang-format off
-    string_view{
-      "function Build(builder)" NL
-           "    builder.type = \""
-    };
-  // clang-format on
-  luamake_content += project_type_string;
-  luamake_content +=
-      // clang-format off
-    string_view{"\"" NL
-        "    builder.root = \""
-    };
-  // clang-format on
-  luamake_content += root;
-  luamake_content +=
-      // clang-format off
-    string_view{"\"" NL
-        "    builder.compiler = Clang({})" NL
-        "    builder.name = \"a\"" NL // TODO: let user when calling this function specify the output name
-        NL
-        "    builder.version = \"0.0.1\"" NL
-        "    builder.description = \"TODO change me :)\"" NL
-        "end" NL
-    };
-  // clang-format on
-
-  if (type == proj_t::Executable) {
-    luamake_content +=
-        // clang-format off
-    string_view{""
-      "function Run(runner)" NL
-      "    runner.exe = \"build/a\"" NL
-      "end" NL
-      };
-    // clang-format on
-    luamake_content +=
-        // clang-format off
-    string_view{""
-      "Tests = {" NL
-      "    {" NL
-      "        fun = function(tester)" NL
-      "            tester.exe = \"build/a\"" NL
-      "            tester.args = {\"This does nothing\"}" NL
-      "        end," NL
-      "        output = {" NL
-      "            expected = \"Hello World!\\n\"," NL
-      "            from = \"stdout\"," NL
-      "        }," NL
-      "    }" NL
-      "}" NL
-    };
-    // clang-format on
-  }
-
-  if (fprintf(luamake_file, "%s", luamake_content.data()) !=
-      luamake_content.length()) {
-    ferror_message(
-        "Unable to write `luamake.lua` content into luamake file at [%s]",
-        fs::current_path().c_str());
-    fclose(luamake_file);
-    fs::remove("./luamake.lua"); // delete file for attomic rw
-    return exit_t::internal_error;
-  }
-
-  fclose(luamake_file);
 
   return exit_t::ok;
 }
