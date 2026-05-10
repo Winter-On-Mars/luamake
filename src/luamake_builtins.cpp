@@ -1787,10 +1787,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
     // TODO: have some way of keeping track of if an error occurs when
     // building a module, that way we don't try to build with extraneous
     // errors, but we still build all we can of the module for incrimental
-    // builds NOTE: this takes a lot of parameters by ref, idk if that's
-    // something that we should be doing there *might* be some issues taking
-    // exe_mod, by ref, it will point to something in static memory, but there
-    // might be some issues with it
+    // builds
     threads.add_task([mod_idx, cache_path]() -> void {
       for (auto mod_state = mods.state_at(mod_idx);
            mod_state !=
