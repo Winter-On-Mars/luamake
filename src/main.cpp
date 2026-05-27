@@ -12,6 +12,7 @@
 #include <format>
 #include <numeric>
 #include <string_view>
+#include <sys/types.h>
 #include <thread>
 #include <type_traits>
 
@@ -47,6 +48,15 @@ auto constexpr determine_type(string_view const str) noexcept -> Value_t {
   return Value_t::NIL;
 }
 
+// returns -1 if '=' char is not found
+auto constexpr find_eq(char const *str) -> ssize_t {
+  for (auto i = size_t{}; str[i] != '\0'; ++i) {
+    if (str[i] == '=')
+      return static_cast<ssize_t>(i);
+  }
+  return -1;
+}
+
 // TODO: (Winter-On-Mars) try moving the args table to be a userdata with
 // indexing operator overloaded, then just use our own hashmap/unordered_map
 // under the hood(?), it might not be faster but worth a try
@@ -62,34 +72,35 @@ auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
   }
 
   for (; start_lua_args < argc; ++start_lua_args) {
-    auto arg = string(argv[start_lua_args]);
-    auto const eq_pos = arg.find('=');
-    if (eq_pos == arg.npos) {
+    auto arg = argv[start_lua_args];
+    // auto arg = argv[start_lua_args];
+    auto const eq_pos = find_eq(argv[start_lua_args]);
+    if (eq_pos == ssize_t{-1}) {
       fwarning_message("Arguments passed to the args table should be of the "
                        "form <arg_name>=<arg_value>, here arg_value is a lua "
                        "literal value (no spaces between the '=')." NL
                        "\tIgnoring arg_name = %s",
-                       arg.c_str());
+                       arg);
       continue;
     }
-    // NOTE: we have to set this bc lua_setfield just takes in a c_str, and
-    // (probably) looks for a '\0'
+    // NOTE: (Winter-On-Mars) we have to do this bc lua_setfield internally
+    // calls strlen, looking for a '\0'
     arg[eq_pos] = '\0';
-    auto const arg_name = std::string_view(arg.data(), arg.data() + eq_pos);
-    auto const value_str =
-        std::string_view(arg.data() + eq_pos + 1, arg.data() + arg.size());
+    auto const arg_name = arg; // don't really need this, but conceptually bc we
+                               // added a \0 it's nice to have
+    auto const value_str = arg + eq_pos + 1;
     switch (determine_type(value_str)) {
     case Value_t::NUMBER: {
       // the function handles both integers and floats depending on lua lex
       // rules
-      auto val = lua_stringtonumber(state, value_str.data());
+      auto val = lua_stringtonumber(state, value_str);
       if (val == 0) {
         // idk report an error
         lua_pushnil(state);
       }
     } break;
     case Value_t::STRING:
-      lua_pushlstring(state, value_str.data(), value_str.length());
+      lua_pushstring(state, value_str);
       break;
     case Value_t::BOOL_TRUE:
       lua_pushboolean(state, true);
@@ -101,7 +112,7 @@ auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
       lua_pushnil(state);
       break;
     }
-    lua_setfield(state, -2, arg_name.data());
+    lua_setfield(state, -2, arg_name);
   }
   lua_setglobal(state, "args");
 }
@@ -170,6 +181,9 @@ auto determine_command(int argc, char **argv) noexcept -> Command {
     return Command::RUN;
   }
 
+  // TODO: (Winter-On-Mars) i'm pretty sure this is a saftey issue by not doing
+  // stringlen bounds checking, but also i don't see how that could cause an
+  // issue in this case
   if (strcmp(argv[1], "b") == 0 || strcmp(argv[1], "build") == 0) {
     return Command::BUILD;
   } else if (strcmp(argv[1], "n") == 0 || strcmp(argv[1], "new") == 0) {
@@ -240,7 +254,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
         "\tThere may be some issue with your lua lib, if "
         "not feel free to message me on discord/ open an issue on the "
         "gh");
-    return exit_t::lua_vm_error; // internal service error
+    return exit_t::lua_vm_error;
   }
   (void)lua_gc(state, LUA_GCSTOP);
 
@@ -253,6 +267,11 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     return exit_t::config_error;
   }
 
+  // TODO: (Winter-On-Mars) SECURITY concerns, gives the user access to the os,
+  // io, etc modules, allowing for arbitrary code execution at the users
+  // privilege level, also makes reproducability harder because some scripts
+  // could depend on os features that are not shared, and that we can't check
+  // exist beforehand
   luaL_openlibs(state);
   lua_register(state, "Dump", luamake::builtins::dump);
 
