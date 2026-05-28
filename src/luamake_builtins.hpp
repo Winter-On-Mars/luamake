@@ -155,6 +155,8 @@ struct Module final {
   Module(Module const &) = delete;
   Module &operator=(Module const &) = delete;
 
+  // NOTE: doesn't compare the trees bc we want to take a diff of them for
+  // incrimental builds
   auto operator==(Module const &) const noexcept -> bool;
 
   // this is kinda stupid i'm not gonna lie, but this is the only
@@ -221,6 +223,10 @@ struct Module final {
     constexpr auto size() const noexcept -> size_t {
       return num_files;
     }
+
+    auto diff_against(DepTree const &) const
+        -> std::vector<std::filesystem::path>;
+    auto vectorize() const -> std::vector<std::filesystem::path>;
 
   private:
     // a parallel array for all of the source files
