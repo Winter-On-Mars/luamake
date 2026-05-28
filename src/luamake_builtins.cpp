@@ -144,6 +144,7 @@ auto skip_ws(char const *ch) -> char const * {
   return ch;
 }
 
+// TODO: update this to sfh, check that we can
 // algorithm
 // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function#FNV-1a_hash
 auto constexpr fnv1a(std::span<u8 const> const bytes) noexcept -> size_t {
@@ -574,6 +575,207 @@ static auto default_compiler_impl(lua_State *state,
 
   return 1;
 }
+
+template <builtins::Module::Module_t mod_t>
+auto install_impl(lua_State *state) -> int {
+  if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
+    throw std::runtime_error(
+        "Currently do not support installing dynamic lib projects");
+  }
+  // mod_idx is at the top of the stack, and we'll just return it at the
+  // end, assuming everything else has gone well
+  auto const mod_idx = builtins::ModIndex(lua_tointeger(state, -1));
+  // i'm not sure if we actually need this variable now that we're using
+  // everything as an absolute path but i'm not going to test that right now
+  // and break everything :)
+  auto const &parent_path =
+      builtins::mods.get_module_path(mod_idx).parent_path();
+  auto &mod = builtins::mods.module_at(mod_idx);
+  if (mod.type != mod_t) {
+    throw std::runtime_error(std::format(
+        "Module type is not {}, found {}",
+        static_cast<std::underlying_type_t<builtins::Module::Module_t>>(mod_t),
+        static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
+            mod.type)));
+  }
+
+  // NOTE: we actually have to generate the dep tree here, because we have to
+  // make sure we have all of the dependency linking information at this
+  // point, any sooner and we run into linking errors, everybodys favorite :)
+  // TODO: try to move this into the threads structure with threads.add_task
+  auto gen_dep_tree_fut = std::async(std::launch::async, [&]() -> void {
+    return mod.tree.gen_dep_tree(mod, mod.interpreter, mod_idx);
+  });
+
+  // TODO: try to move these calls to create directory to be do when the
+  // initial project is set up, that way we don't have to worry about trying
+  // to make them everytime which will slow things down on average
+  // TODO: update these functions to throw exceptions
+  // TODO: see if there is a performance increase by checking if the
+  // directory is made and not making it if it is most of the time the
+  // directory will be there, it's just annoying because we have to check
+  // every time in case somebody changes the install_dir variable
+  auto const install_dir =
+      parent_path / fs::path(std::format("{}/{}.o", mod.install_dir, mod.name));
+  std::cout << std::format("making directory [{}]" NL, install_dir.string());
+  auto ec = std::error_code{};
+  if (fs::create_directory(install_dir, ec); ec) {
+    // TODO: update to push the ec message
+    std::cerr << ec.message() << NL;
+    lua_pushfstring(state, "Unable to create directory [%s]",
+                    install_dir.c_str());
+    return lua_error(state);
+  }
+  auto const cache_dir =
+      fs::path(std::format("{}/__luamake_cache", mod.install_dir));
+  std::cout << std::format("making directory [{}]" NL, cache_dir.string());
+  if (fs::create_directories(cache_dir, ec); ec) {
+    std::cerr << ec.message() << NL;
+    lua_pushstring(state, "Unable to create directory");
+    return lua_error(state);
+  }
+
+  auto const cache_path =
+      fs::path(std::format("{}/{}.cache", cache_dir.string(), mod.name));
+  // NOTE: we might be able to put this on a background thread, then just
+  // continue on doing things, and when this is done we do the comparison,
+  // but for now we'll have this be blocking :)
+  auto const maybe_cached_mod = spl::deserialize(cache_path);
+  auto files_to_compile = std::vector<fs::path>();
+  switch (maybe_cached_mod.index()) {
+  case 0: {
+    std::cout << std::format("Checking [{}] cache" NL, mod.name);
+    auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
+    gen_dep_tree_fut.get();
+    if (mod == cached_mod) {
+      files_to_compile = mod.tree.diff_against(cached_mod.tree);
+      if (files_to_compile.empty()) {
+        std::cout << std::format("\t[{}] already built" NL, mod.name);
+        return 1;
+      }
+    }
+  } break;
+  case 1: {
+    // TODO: update this because it's not really an error
+    auto const &error_message = std::get<std::string>(maybe_cached_mod);
+    std::cerr << std::format("[{}]" NL, error_message);
+    gen_dep_tree_fut.get();
+    // we don't have a cached tree to comp against, so we just push back
+    // everything to be compiled
+    files_to_compile = mod.tree.vectorize();
+  } break;
+  default:
+    unreachable();
+  }
+#ifdef DEBUG
+  std::cout << "[files to compile]\n\t";
+  for (auto &&path : files_to_compile)
+    std::cout << '[' << path.string() << ']';
+  std::cout << std::endl;
+  mod.tree.dump(std::cout);
+#endif // DEBUG
+
+  // TODO: use the files_to_compile variable, i.e. update these function
+  // signatures to just take in that vector and compile said files
+  threads.add_dep_tree_tasks(mod_idx);
+  // TODO: have some way of keeping track of if an error occurs when
+  // building a module, that way we don't try to build with extraneous
+  // errors, but we still build all we can of the module for incrimental
+  // builds
+  threads.add_task([mod_idx, cache_path]() -> void {
+    for (auto mod_state = builtins::mods.state_at(mod_idx);
+         mod_state != builtins::LakeModules::ModState::ready_for_final_compile;
+         mod_state = builtins::mods.state_at(mod_idx)) {
+      switch (mod_state) {
+      case luamake::builtins::LakeModules::ModState::error:
+        // idk error, bad idea to try and compile the full module
+        return;
+      case luamake::builtins::LakeModules::ModState::ready_for_final_compile:
+        break;
+      case luamake::builtins::LakeModules::ModState::compiled:
+        // idk maybe trying to compile the same module twice?
+        return;
+      case luamake::builtins::LakeModules::ModState::uninitialized:
+        std::this_thread::sleep_for(std::chrono::nanoseconds{100});
+        break;
+      }
+    }
+    // idk maybe we could just capture parent_path(?)
+    auto const &parent_path = builtins::mods.get_module_path(mod_idx);
+    auto const &mod = builtins::mods.module_at(mod_idx);
+    auto const compiled_files = builtins::mods.get_all_compiled_files(mod_idx);
+
+    // only way i could think to get this to work :) *should* be optimized away
+    auto const invoked_command = [&]() -> std::string {
+      if constexpr (mod_t == builtins::Module::Module_t::STATIC)
+        return std::format("ar crs {}/lib{}.a {}", mod.install_dir, mod.name,
+                           compiled_files);
+      else if (mod_t == builtins::Module::Module_t::EXE)
+        return std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
+                           mod.name, compiled_files, mod.format_links());
+    }();
+
+    if (builtins::cl_options.verbose) {
+      std::cout << std::format("[{}]" NL, invoked_command);
+    } else {
+      std::cout << std::format("Making archive for [{}]" NL, mod.name);
+    }
+    // NOTE: figure out how to handle errors with the lua vm, if there's
+    // internal mutex's that will stop conflicting and corrupting the stack,
+    // or if we have to worry about a mutex around the lua vm ourselves
+    // we might have to move some of the error handling into the global
+    // scope, that way we can access it across threads and communicate with
+    // it through the lua vm
+    // TODO: have a list of errors that we store for each module, then just
+    // append to said list, at the end of compiling we can dump out a
+    // summary of errors, and in verbose mode just dump out all of the
+    // errors themselves, but for now just calling lua_error should be fine
+    // :)
+    // NOTE: the lua vm is closed after all the threads have finished, so
+    // it's fine to do this, kind of, but also because this is executed
+    // async, we might no longer be in the pcall function, so we really just
+    // need to change how we store + handle errors :)
+    if (OS_CALL(invoked_command.c_str()) != 0) {
+      fprintf(stderr, "Error compiling [%s]" NL, invoked_command.c_str());
+      builtins::mods.set_state_at(mod_idx,
+                                  builtins::LakeModules::ModState::error);
+      return;
+    }
+
+    // header things that are only (currently) for static libs
+    if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
+      fs::create_directory(
+          parent_path /
+          fs::path(std::format("{}/{}", mod.install_dir, mod.name)));
+
+      auto const formatted_files = std::accumulate(
+          mod.headers.begin(), mod.headers.end(), std::string(),
+          [&parent_path](auto &&e, auto &&next) {
+            return std::format("{} {}/{}", e,
+                               parent_path.parent_path().string(),
+                               next.string());
+          });
+
+      auto const copy_headers = std::format(
+          "cp --target-directory={} {}",
+          (parent_path / mod.install_dir / mod.name).string(), formatted_files);
+      if (builtins::cl_options.verbose) {
+        std::cout << std::format("[{}]" NL, copy_headers);
+      } else {
+        std::cout << std::format("Copying [{}] headers" NL, mod.name);
+      }
+      if (OS_CALL(copy_headers.c_str()) != 0) {
+        fprintf(stderr, "Error moving headers [%s]" NL, copy_headers.c_str());
+        builtins::mods.set_state_at(mod_idx,
+                                    builtins::LakeModules::ModState::error);
+        return;
+      }
+    }
+    // if everything went well then we can serialize the file
+    spl::serialize(mod, cache_path);
+  });
+  return 1;
+}
 } // namespace
 
 namespace builtins {
@@ -744,8 +946,8 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   return fs::path(all_paths.buffer + start, all_paths.buffer + end - 1);
 }
 
-// this could (and probably should (if possible)) be rewritten to use the
-// files array(?)
+// TODO: update this to just use the num_files field, and the files array to
+// index directly into all_paths
 auto Module::DepTree::find(string_view const path) const noexcept -> size_t {
   auto const *start = all_paths.buffer;
   auto const *current = all_paths.buffer;
@@ -898,52 +1100,49 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 }
 #endif // DEBUG
 
+auto Module::DepTree::diff_against(Module::DepTree const &that) const
+    -> std::vector<fs::path> {
+  auto res = std::vector<fs::path>();
+  res.reserve(num_files);
+  for (auto i = size_t{}; i < num_files; ++i) {
+    // -1 bc otherwise it includes the null terminator
+    auto const cur_file = std::string_view{all_paths.buffer + files[i].start,
+                                           all_paths.buffer + files[i].end - 1};
+    expr_dbg(cur_file);
+    auto const that_cur_file = that.find(cur_file);
+    if (that_cur_file == NIL_IDX) {
+#ifdef DEBUG
+      std::cout << "Could not find `" << cur_file << "` pushing back\n";
+#endif // DEBUG
+      res.push_back(fs::path(cur_file));
+    } else if (that.hashes[that_cur_file] != hashes[i]) {
+#ifdef DEBUG
+      std::cout << "File `" << cur_file << "` has a different hash\n";
+#endif // DEBUG
+      res.push_back(fs::path(cur_file));
+    }
+  }
+  return res;
+}
+
+auto Module::DepTree::vectorize() const -> std::vector<fs::path> {
+  auto res = std::vector<fs::path>();
+  res.reserve(num_files);
+  for (auto i = size_t{}; i < num_files; ++i) {
+    if (types[i] == Module::DepTree::SourceFile_t::IMPL)
+      res.push_back(
+          fs::path(std::string_view{all_paths.buffer + files[i].start,
+                                    all_paths.buffer + files[i].end - 1}));
+  }
+
+  return res;
+}
+
 // TODO: optimize this, reorder equality checks, maybe in memory serialize the
 // objects and just compare the bytes(?)
 auto Module::operator==(Module const &that) const noexcept -> bool {
   if (type != that.type) {
     return false;
-  }
-
-  // tree
-  if (tree.num_files != that.tree.num_files) {
-    return false;
-  }
-
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    if (tree.hashes[i] != that.tree.hashes[i]) {
-      return false;
-    }
-  }
-  if (tree.all_paths.size != that.tree.all_paths.size) {
-    return false;
-  }
-  if (strncmp(tree.all_paths.buffer, that.tree.all_paths.buffer,
-              tree.all_paths.size)) {
-    return false;
-  }
-
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    if (tree.types[i] != that.tree.types[i]) {
-      return false;
-    }
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    if (tree.files[i].start != that.tree.files[i].start &&
-        tree.files[i].end != that.tree.files[i].end) {
-      return false;
-    }
-  }
-  for (auto i = size_t{}; i < tree.num_files; ++i) {
-    if (tree.deps[i].size() != that.tree.deps[i].size()) {
-      return false;
-    }
-
-    for (auto j = size_t{}; j < tree.deps[i].size(); ++j) {
-      if (tree.deps[i][j] != that.tree.deps[i][j]) {
-        return false;
-      }
-    }
   }
 
   // TODO: compare interpreters, i.e. the macros
@@ -1692,168 +1891,7 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-    auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
-
-    auto &exe_mod = mods.module_at(mod_idx);
-    if (exe_mod.type != builtins::Module::EXE) {
-      throw std::runtime_error(std ::format(
-          "module type is not exe, found [{}]",
-          static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
-              exe_mod.type)));
-    }
-
-    // we actually have to generate the dep tree here, because we have to make
-    // sure we have all of the dependency linking information at this point,
-    // any sooner and we run into linking errors, everybodys favorite :)
-    // TODO: put this in an async function,
-    exe_mod.tree.gen_dep_tree(exe_mod, exe_mod.interpreter, mod_idx);
-
-    // TODO: get this working
-    /*
-    auto done = false;
-    threads.add_task([&done, &exe_mod]() {
-      exe_mod.gen_dep_tree();
-      done = true;
-    });
-    */
-
-    // TODO: update these functions to throw exceptions
-    // TODO: see if there is a performance increase by checking if the
-    // directory is made and not making it if it is most of the time the
-    // directory will be there, it's just annoying because we have to check
-    // every time in case somebody changes the install_dir variable
-    auto const install_dir =
-        parent_path /
-        fs::path(std::format("{}/{}.o", exe_mod.install_dir, exe_mod.name));
-    auto ec = std::error_code{};
-    if (fs::create_directories(install_dir, ec); ec) {
-      std::cerr << ec.message() << NL;
-      lua_pushfstring(state, "Unable to create directory [%s]",
-                      install_dir.c_str());
-      return lua_error(state);
-    }
-
-    if (fs::create_directories(
-            fs::path(std::format("{}/__luamake_cache", exe_mod.install_dir)),
-            ec);
-        ec) {
-      auto const message =
-          std::format("{}/__luamake_cache", exe_mod.install_dir);
-      std::cerr << ec.message() << NL;
-      lua_pushfstring(state, "Unable to create directory [%s]",
-                      message.c_str());
-      return lua_error(state);
-    }
-
-    // rework this caching situation when the caching is actually working
-    auto const cache_path = fs::path(std::format(
-        "{}/__luamake_cache/{}.cache", exe_mod.install_dir, exe_mod.name));
-
-    // NOTE: we might be able to put this on a background thread, then just
-    // continue on doing things, and when this is done we do the comparison,
-    // but for now we'll have this be blocking :)
-    auto const maybe_cached_mod = spl::deserialize(cache_path);
-    /* compare the current mod with the cached mod */
-    switch (maybe_cached_mod.index()) {
-    case 0: {
-      std::cout << std::format("Checking [{}] cache" NL, exe_mod.name);
-      auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
-      // TODO: get this to work
-      // idk seems like the easiest way to do this kind of synchronization
-      /*
-      while (!done) {
-        std::this_thread::sleep_for(std::chrono::nanoseconds{1000});
-      }
-      */
-      if (exe_mod == cached_mod) {
-        std::cout << std::format("\t[{}] already built" NL, exe_mod.name);
-        return 1;
-      }
-    } break;
-    case 1: {
-      auto const &error_message = std::get<std::string>(maybe_cached_mod);
-      std::cerr << std::format("[{}]" NL, error_message);
-    } break;
-    default:
-      unreachable();
-    }
-
-#ifdef DEBUG
-    exe_mod.tree.dump(std::cout);
-#endif // DEBUG
-    threads.add_dep_tree_tasks(mod_idx);
-
-    // TODO: have some way of keeping track of if an error occurs when
-    // building a module, that way we don't try to build with extraneous
-    // errors, but we still build all we can of the module for incrimental
-    // builds
-    threads.add_task([mod_idx, cache_path]() -> void {
-      for (auto mod_state = mods.state_at(mod_idx);
-           mod_state !=
-           builtins::LakeModules::ModState::ready_for_final_compile;
-           mod_state = mods.state_at(mod_idx)) {
-        switch (mod_state) {
-        case builtins::LakeModules::ModState::error:
-          // idk error, bad idea to try and compile the full module
-          return;
-        case builtins::LakeModules::ModState::compiled:
-          // idk maybe trying to compile the same module twice?
-          return;
-        case builtins::LakeModules::ModState::uninitialized:
-          std::this_thread::sleep_for(std::chrono::nanoseconds{1000});
-          break;
-        case builtins::LakeModules::ModState::ready_for_final_compile:
-          break;
-        }
-      }
-      auto const &mod = mods.module_at(mod_idx);
-      auto const actually_compiled_files = mods.get_all_compiled_files(mod_idx);
-      auto const invoked_command =
-          std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
-                      mod.name, actually_compiled_files, mod.format_links());
-      if (builtins::cl_options.verbose) {
-        fprintf(stdout, "[%s]" NL, invoked_command.c_str());
-      } else {
-        // idk we can make this prettier
-        fprintf(stdout, "Building [%s]" NL, mod.name.c_str());
-      }
-      // NOTE: figure out how to handle errors with the lua vm, if there's
-      // internal mutex's that will stop conflicting and corrupting the stack,
-      // or if we have to worry about a mutex around the lua vm ourselves
-      // we might have to move some of the error handling into the global
-      // scope, that way we can access it across threads and communicate with
-      // it through the lua vm
-      // TODO: have a list of errors that we store for each module, then just
-      // append to said list, at the end of compiling we can dump out a
-      // summary of errors, and in verbose mode just dump out all of the
-      // errors themselves, but for now just calling lua_error should be fine
-      // :) NOTE: the lua vm is closed after all the threads have finished, so
-      // it's fine to do this, kind of, but also because this is executed
-      // async, we might no longer be in the pcall function, so we really just
-      // need to change how we store + handle errors :)
-      if (OS_CALL(invoked_command.c_str()) != 0) {
-        mods.set_state_at(mod_idx, LakeModules::ModState::error);
-        // lua_pushfstring(state, "Error compiling [%s]",
-        // invoked_command.c_str()); (void)lua_error(state);
-      } else {
-        // TODO: there is some issue happening when serializing, where the
-        // compiler field is written to non-deterministically, so the
-        // serialization will fail because it will think there is a different
-        // compiler field, but in reality it's the same compiler field with
-        // the arguments rotated (yes technically the arguments changing order
-        // would produce a different output, but we don't want them to) so we
-        // have to come up with some way of making sure the compiler arguments
-        // are passed in in the same way, or we have to do something to make
-        // sure that when we're comparing the modules, the differences in the
-        // fields doesn't cause an issue i think this means we would have to
-        // seperate out the compiler into the actual compiler command, and
-        // then the arguments to be passed into the compiler, because we
-        // already seperate out the includes and things like that
-        spl::serialize(mod, cache_path);
-      }
-    });
-    return 1;
+    return install_impl<builtins::Module::Module_t::EXE>(state);
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
@@ -1880,141 +1918,7 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
                     lua_typename(ret_t));
 
   try {
-    // mod_idx is at the top of the stack, and we'll just return it at the
-    // end, assuming everything else has gone well
-    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-
-    // i'm not sure if we actually need this variable now that we're using
-    // everything as an absolute path but i'm not going to test that right now
-    // and break everything :)
-    auto const &parent_path = mods.get_module_path(mod_idx).parent_path();
-
-    auto &static_mod = mods.module_at(mod_idx);
-    // TODO: better error handling with this
-    if (static_mod.type != builtins::Module::STATIC) {
-      throw std::runtime_error(std ::format(
-          "module type is not static, found [{}]",
-          static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
-              static_mod.type)));
-    }
-
-    static_mod.tree.gen_dep_tree(static_mod, static_mod.interpreter, mod_idx);
-
-    auto const install_dir =
-        parent_path / fs::path(std::format("{}/{}.o", static_mod.install_dir,
-                                           static_mod.name));
-    std::cout << std::format("making directory [{}]", install_dir.string())
-              << NL;
-    std::cout.flush();
-    auto ec = std::error_code{};
-    if (fs::create_directories(install_dir, ec); ec) {
-      lua_pushfstring(state, "Unable to create directory" NL "\t[%s]",
-                      ec.message().c_str());
-      return lua_error(state);
-    }
-
-    // TODO: try to move these calls to create directory to be do when the
-    // initial project is set up, that way we don't have to worry about trying
-    // to make them everytime which will slow things down on average
-    if (fs::create_directories(fs::path(
-            std::format("{}/__luamake_cache", static_mod.install_dir)));
-        ec) {
-      std::cerr << ec.message() << NL;
-      lua_pushstring(state, "Unable to create directory");
-      return lua_error(state);
-    }
-
-    auto const cache_path =
-        fs::path(std::format("{}/__luamake_cache/{}.cache",
-                             static_mod.install_dir, static_mod.name));
-    // NOTE: see note in install_exe
-    auto const maybe_cached_mod = spl::deserialize(cache_path);
-    switch (maybe_cached_mod.index()) {
-    case 0: {
-      auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
-      if (static_mod == cached_mod) {
-        return 1;
-      }
-    } break;
-    case 1: {
-      auto const &error_message = std::get<std::string>(maybe_cached_mod);
-      std::cerr << std::format("\t[{}]" NL, error_message);
-    } break;
-    default:
-      unreachable();
-    }
-
-    threads.add_dep_tree_tasks(mod_idx);
-    threads.add_task([mod_idx, cache_path]() -> void {
-      for (auto mod_state = mods.state_at(mod_idx);
-           mod_state !=
-           builtins::LakeModules::ModState::ready_for_final_compile;
-           mod_state = mods.state_at(mod_idx)) {
-        // NOTE: see install_exe for more info about these cases
-        switch (mod_state) {
-        case luamake::builtins::LakeModules::ModState::error:
-          return;
-        case luamake::builtins::LakeModules::ModState::ready_for_final_compile:
-          break;
-        case luamake::builtins::LakeModules::ModState::compiled:
-          return;
-        case luamake::builtins::LakeModules::ModState::uninitialized:
-          std::this_thread::sleep_for(std::chrono::nanoseconds{100});
-          break;
-        }
-      }
-      // idk maybe we could just capture parent_path(?)
-      auto const &parent_path = mods.get_module_path(mod_idx);
-      auto const &mod = mods.module_at(mod_idx);
-      auto const compiled_files = mods.get_all_compiled_files(mod_idx);
-
-      auto const invoked_command = std::format(
-          "ar crs {}/lib{}.a {}", mod.install_dir, mod.name, compiled_files);
-
-      if (cl_options.verbose) {
-        std::cout << std::format("[{}]" NL, invoked_command);
-      } else {
-        std::cout << std::format("Making archive for [{}]" NL, mod.name);
-      }
-      std::cout.flush();
-      if (OS_CALL(invoked_command.c_str()) != 0) {
-        fprintf(stderr, "Error compiling [%s]" NL, invoked_command.c_str());
-        mods.set_state_at(mod_idx, LakeModules::ModState::error);
-        return;
-      }
-
-      fs::create_directory(
-          parent_path /
-          fs::path(std::format("{}/{}", mod.install_dir, mod.name)));
-
-      auto const formatted_files = std::accumulate(
-          mod.headers.begin(), mod.headers.end(), std::string(),
-          [&parent_path](auto &&e, auto &&next) {
-            return std::format("{} {}/{}", e,
-                               parent_path.parent_path().string(),
-                               next.string());
-          });
-
-      auto const copy_headers = std::format(
-          "cp --target-directory={} {}",
-          (parent_path / mod.install_dir / mod.name).string(), formatted_files);
-      if (cl_options.verbose) {
-        std::cout << std::format("[{}]" NL, copy_headers);
-      } else {
-        std::cout << std::format("Copying [{}] headers" NL, mod.name);
-      }
-      std::cout.flush();
-      if (OS_CALL(copy_headers.c_str()) != 0) {
-        fprintf(stderr, "Error moving headers [%s]" NL, copy_headers.c_str());
-        mods.set_state_at(mod_idx, LakeModules::ModState::error);
-        return;
-      }
-
-      // if nothing goes wrong we can serialize the whole data, check the note
-      // in install_exe for more details about improvements
-      spl::serialize(mod, cache_path);
-    });
-    return 1;
+    return install_impl<Module::Module_t::STATIC>(state);
   } catch (ModuleErr const &e) {
     lua_pushstring(state, e.what().c_str());
     return lua_error(state);
