@@ -247,6 +247,11 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     break;
   }
 
+  // TODO: linear allocate this, and see if that works the docs said something
+  // about expecting the lua_Alloc function to essentially be realloc,
+  // specifically that alloc(size=0) should basically free the pointer, but a
+  // linear allocator wouldn't do that
+  // auto *state = lua_newstate(nullptr, nullptr);
   auto *state = luaL_newstate();
   if (state == nullptr) {
     error_message(
