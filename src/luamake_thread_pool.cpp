@@ -61,9 +61,6 @@ auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
   auto const &mod = builtins::mods.module_at(idx);
   auto const include_path = mod.format_includes();
 
-  // auto lock = std::unique_lock(builtins::mods.mtxs[idx.mods]);
-  // builtins::mods.remaining_files[idx.mods] = num_files_to_compile;
-
   // so ig we do this to show intent that we will want to aquire this mutex, but
   // that we won't block because we don't need it now(?)
   auto mod_lock =
@@ -80,11 +77,7 @@ auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
         continue;
       }
 
-      {
-        // auto lock = std::unique_lock(builtins::mods.mtxs[idx.mods]);
-        // builtins::mods.remaining_files[idx.mods]++;
-        ++num_remaining_files;
-      }
+      ++num_remaining_files;
 
       tasks.push([idx, include_path, compiler = mod.compiler,
                   install_dir = mod.install_dir, name = mod.name,
@@ -92,7 +85,6 @@ auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
         auto const invoked_command =
             std::format("{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path,
                         path.c_str(), install_dir, name, path.stem().c_str());
-        // idk i tried using std::cout, but there was an error :)
         if (builtins::cl_options.verbose) {
           fprintf(stdout, "[%s]" NL, invoked_command.c_str());
         } else {
