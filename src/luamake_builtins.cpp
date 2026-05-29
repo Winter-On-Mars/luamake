@@ -648,7 +648,7 @@ auto install_impl(lua_State *state) -> int {
     auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
     gen_dep_tree_fut.get();
     if (mod == cached_mod) {
-      files_to_compile = mod.tree.diff_against(cached_mod.tree);
+      files_to_compile = mod.tree.diff_against(mod_idx, cached_mod.tree);
       if (files_to_compile.empty()) {
         std::cout << std::format("\t[{}] already built" NL, mod.name);
         return 1;
@@ -672,12 +672,9 @@ auto install_impl(lua_State *state) -> int {
   for (auto &&path : files_to_compile)
     std::cout << '[' << path.string() << ']';
   std::cout << std::endl;
-  mod.tree.dump(std::cout);
 #endif // DEBUG
 
-  // TODO: use the files_to_compile variable, i.e. update these function
-  // signatures to just take in that vector and compile said files
-  threads.add_dep_tree_tasks(mod_idx);
+  threads.add_dep_tree_tasks(files_to_compile, mod_idx);
   // TODO: have some way of keeping track of if an error occurs when
   // building a module, that way we don't try to build with extraneous
   // errors, but we still build all we can of the module for incrimental
@@ -718,7 +715,11 @@ auto install_impl(lua_State *state) -> int {
     if (builtins::cl_options.verbose) {
       std::cout << std::format("[{}]" NL, invoked_command);
     } else {
-      std::cout << std::format("Making archive for [{}]" NL, mod.name);
+      if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
+        std::cout << std::format("Making archive for [{}]" NL, mod.name);
+      } else {
+        std::cout << std::format("Building [{}]" NL, mod.name);
+      }
     }
     // NOTE: figure out how to handle errors with the lua vm, if there's
     // internal mutex's that will stop conflicting and corrupting the stack,
@@ -1100,15 +1101,21 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 }
 #endif // DEBUG
 
-auto Module::DepTree::diff_against(Module::DepTree const &that) const
+auto Module::DepTree::diff_against(ModIndex const mod,
+                                   Module::DepTree const &that) const
     -> std::vector<fs::path> {
   auto res = std::vector<fs::path>();
   res.reserve(num_files);
+  // this vec will only live for this scope, so we can have these be
+  // string_views to avoid some heap allocations
+  auto already_compiled = std::vector<std::string_view>();
+  already_compiled.reserve(num_files);
   for (auto i = size_t{}; i < num_files; ++i) {
+    if (types[i] != Module::DepTree::SourceFile_t::IMPL)
+      continue;
     // -1 bc otherwise it includes the null terminator
     auto const cur_file = std::string_view{all_paths.buffer + files[i].start,
                                            all_paths.buffer + files[i].end - 1};
-    expr_dbg(cur_file);
     auto const that_cur_file = that.find(cur_file);
     if (that_cur_file == NIL_IDX) {
 #ifdef DEBUG
@@ -1120,8 +1127,18 @@ auto Module::DepTree::diff_against(Module::DepTree const &that) const
       std::cout << "File `" << cur_file << "` has a different hash\n";
 #endif // DEBUG
       res.push_back(fs::path(cur_file));
+    } else {
+      already_compiled.push_back(cur_file);
     }
   }
+#ifdef DEBUG
+  std::cout << "[already_compiled]\n\t";
+  for (auto &&f : already_compiled) {
+    std::cout << '[' << f << ']';
+  }
+  std::cout << std::endl;
+#endif // DEBUG
+  builtins::mods.unsafe_add_compiled_files_vectorized(mod, already_compiled);
   return res;
 }
 
@@ -2543,6 +2560,34 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
   // those two number(?)
   if (remaining_files[idx.mods] == 0) {
     states[idx.mods] = ModState::ready_for_final_compile;
+  }
+}
+
+auto LakeModules::unsafe_add_compiled_files_vectorized(
+    ModIndex const idx, std::span<std::string_view const> const vec) noexcept
+    -> void {
+  auto lock = std::unique_lock(mtxs[idx.mods]);
+  auto &lof = compiled_files[idx.mods];
+  auto const &mod = mods[idx.mods];
+  // NOTE: file *should* be relative to the luamake.lua file, but we just want
+  // the file name, this *should* work but is a bit of a HACK
+  for (auto &&file : vec) {
+    auto const fname = [&file]() -> std::string_view {
+      auto const pos = file.rfind('/');
+      if (pos == file.npos) {
+        return file;
+      } else {
+        // + 1 bc file[pos] == '/'
+        return std::string_view(file.cbegin() + pos + 1, file.cend());
+      }
+    }();
+#ifdef DEBUG
+    std::cout << DBG "[pushing back]" NORMAL
+              << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, fname)
+              << " to " << idx << std::endl;
+#endif // DEBUG
+    lof.emplace_back(
+        std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname));
   }
 }
 
