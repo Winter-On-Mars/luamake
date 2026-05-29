@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
+#include <span>
 #include <thread>
 
 #include <iostream>
@@ -55,8 +56,9 @@ auto CompilationPool::deinit() noexcept -> void {
 // be unlocked(?), either way it seems slower but i was about to pull out my
 // hair dealing with race conditions so i'll leave it here until somebody else
 // comes along and makes it better
-auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
-    -> void {
+auto CompilationPool::add_dep_tree_tasks(
+    std::span<std::filesystem::path const> const ftc,
+    builtins::ModIndex const idx) noexcept -> void {
   auto const parent_path = builtins::mods.get_module_path(idx).parent_path();
   auto const &mod = builtins::mods.module_at(idx);
   auto const include_path = mod.format_includes();
@@ -68,30 +70,28 @@ auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
   {
     auto task_lock = std::unique_lock(task_mtx);
     auto num_remaining_files = size_t{};
-    for (auto i = size_t{}; i < mod.tree.num_files; ++i) {
+    for (auto &&rel_path : ftc) {
+      // NOTE: rel_path is (currently) relative to its luamake.lua file, but we
+      // need it relative to the CWD
       auto const fname = std::filesystem::relative(
-          parent_path / mod.tree.get_path(i), std::filesystem::current_path());
-
-      if (builtins::Module::DepTree::determine_file_type(fname.extension()) !=
-          builtins::Module::DepTree::SourceFile_t::IMPL) {
-        continue;
-      }
-
+          parent_path / rel_path, std::filesystem::current_path());
       ++num_remaining_files;
 
       tasks.push([idx, include_path, compiler = mod.compiler,
                   install_dir = mod.install_dir, name = mod.name,
                   path = fname]() -> void {
-        auto const invoked_command =
-            std::format("{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path,
-                        path.c_str(), install_dir, name, path.stem().c_str());
+        // switched from calling .stem to make things easier when pushing back
+        // already compiled files
+        auto const invoked_command = std::format(
+            "{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path, path.c_str(),
+            install_dir, name, path.filename().c_str());
         if (builtins::cl_options.verbose) {
           fprintf(stdout, "[%s]" NL, invoked_command.c_str());
         } else {
           fprintf(stdout, "Building [%s]" NL, path.c_str());
         }
         if (OS_CALL(invoked_command.c_str()) == 0) {
-          builtins::mods.add_compiled_file(idx, path.stem().string());
+          builtins::mods.add_compiled_file(idx, path.filename().string());
         } else {
           builtins::mods.set_state_at(idx,
                                       builtins::LakeModules::ModState::error);
@@ -102,14 +102,6 @@ auto CompilationPool::add_dep_tree_tasks(builtins::ModIndex const idx) noexcept
     builtins::mods.remaining_files[idx.mods] = num_remaining_files;
   }
   waiting.notify_all();
-}
-
-auto CompilationPool::add_task(std::function<void()> &&func) noexcept -> void {
-  {
-    auto lock = std::unique_lock(task_mtx);
-    tasks.push(std::move(func));
-  }
-  waiting.notify_one();
 }
 
 auto CompilationPool::busy() noexcept -> bool {
