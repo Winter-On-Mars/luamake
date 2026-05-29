@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <ostream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -224,7 +225,7 @@ struct Module final {
       return num_files;
     }
 
-    auto diff_against(DepTree const &) const
+    auto diff_against(ModIndex const, DepTree const &) const
         -> std::vector<std::filesystem::path>;
     auto vectorize() const -> std::vector<std::filesystem::path>;
 
@@ -235,6 +236,9 @@ struct Module final {
     // clearing the memory allocator would act as the destructor
     // TODO: if performance becomes an issue, it might be good to switch this to
     // a hash set for the `find` function
+    // TODO: (Winter-On-Mars) perf check if having the paths relative to the CWD
+    // is faster than having them relative to their respective luamake.lua file
+    // (current)
     OwnedString all_paths;
     size_t num_files;
     size_t cap_files;
@@ -377,6 +381,11 @@ struct LakeModules final {
 
   auto append_module_with_path(std::filesystem::path const &,
                                Module &&) noexcept(false) -> ModIndex;
+
+  // NOTE: (Winter-On-Mars) adds files directly to the compiled files list,
+  // without increasing the number of remaining files (hence unsafe)
+  auto unsafe_add_compiled_files_vectorized(
+      ModIndex const, std::span<std::string_view const> const) noexcept -> void;
 
 #ifdef DEBUG
   auto dump_paths(std::ostream &) const noexcept -> void;
