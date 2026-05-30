@@ -11,17 +11,10 @@
 #include <span>
 #include <thread>
 
-#include <iostream>
-
 namespace luamake {
 CompilationPool threads = CompilationPool();
 
-CompilationPool::~CompilationPool() noexcept {
-  for (auto &thread : workers) {
-    if (thread.joinable()) // ?
-      thread.join();
-  }
-}
+CompilationPool::~CompilationPool() noexcept {}
 
 auto CompilationPool::init(size_t num_threads) noexcept -> void {
   workers.reserve(num_threads);
@@ -43,7 +36,7 @@ auto CompilationPool::deinit() noexcept -> void {
   lock.unlock();
   waiting.notify_all();
   for (auto &thread : workers) {
-    if (thread.joinable()) // ?
+    if (thread.joinable())
       thread.join();
   }
   workers.clear();
