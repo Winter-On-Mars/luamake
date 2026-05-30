@@ -49,8 +49,8 @@ auto CompilationPool::deinit() noexcept -> void {
 // be unlocked(?), either way it seems slower but i was about to pull out my
 // hair dealing with race conditions so i'll leave it here until somebody else
 // comes along and makes it better
-auto CompilationPool::add_dep_tree_tasks(
-    std::span<std::filesystem::path const> const ftc,
+auto CompilationPool::add_compile_tasks(
+    std::span<std::string_view const> const ftc,
     builtins::ModIndex const idx) noexcept -> void {
   auto const parent_path = builtins::mods.get_module_path(idx).parent_path();
   auto const &mod = builtins::mods.module_at(idx);
@@ -66,13 +66,14 @@ auto CompilationPool::add_dep_tree_tasks(
     for (auto &&rel_path : ftc) {
       // NOTE: rel_path is (currently) relative to its luamake.lua file, but we
       // need it relative to the CWD
-      auto const fname = std::filesystem::relative(
-          parent_path / rel_path, std::filesystem::current_path());
+      auto fname = std::filesystem::relative(parent_path / rel_path,
+                                             std::filesystem::current_path());
       ++num_remaining_files;
 
-      tasks.push([idx, include_path, compiler = mod.compiler,
-                  install_dir = mod.install_dir, name = mod.name,
-                  path = fname]() -> void {
+      tasks.push([idx, include_path, compiler = std::string_view{mod.compiler},
+                  install_dir = std::string_view{mod.install_dir},
+                  name = std::string_view{mod.name},
+                  path = std::move(fname)]() -> void {
         // switched from calling .stem to make things easier when pushing back
         // already compiled files
         auto const invoked_command = std::format(
