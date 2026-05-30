@@ -641,14 +641,15 @@ auto install_impl(lua_State *state) -> int {
   // continue on doing things, and when this is done we do the comparison,
   // but for now we'll have this be blocking :)
   auto const maybe_cached_mod = spl::deserialize(cache_path);
-  auto files_to_compile = std::vector<fs::path>();
+  auto files_to_compile = std::vector<std::string_view>();
   switch (maybe_cached_mod.index()) {
   case 0: {
     std::cout << std::format("Checking [{}] cache" NL, mod.name);
     auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
     gen_dep_tree_fut.get();
     if (mod == cached_mod) {
-      files_to_compile = mod.tree.diff_against(mod_idx, cached_mod.tree);
+      files_to_compile =
+          builtins::mods.get_tree_diff(mod_idx, mod.tree, cached_mod.tree);
       if (files_to_compile.empty()) {
         std::cout << std::format("\t[{}] already built" NL, mod.name);
         return 1;
@@ -677,11 +678,11 @@ auto install_impl(lua_State *state) -> int {
 #ifdef DEBUG
   std::cout << "[files to compile]\n\t";
   for (auto &&path : files_to_compile)
-    std::cout << '[' << path.string() << ']';
+    std::cout << '[' << path << ']';
   std::cout << std::endl;
 #endif // DEBUG
 
-  threads.add_dep_tree_tasks(files_to_compile, mod_idx);
+  threads.add_compile_tasks(files_to_compile, mod_idx);
   // TODO: have some way of keeping track of if an error occurs when
   // building a module, that way we don't try to build with extraneous
   // errors, but we still build all we can of the module for incrimental
@@ -1108,55 +1109,14 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 }
 #endif // DEBUG
 
-auto Module::DepTree::diff_against(ModIndex const mod,
-                                   Module::DepTree const &that) const
-    -> std::vector<fs::path> {
-  auto res = std::vector<fs::path>();
+auto Module::DepTree::vectorize() const -> std::vector<std::string_view> {
+  auto res = std::vector<std::string_view>();
   res.reserve(num_files);
-  // this vec will only live for this scope, so we can have these be
-  // string_views to avoid some heap allocations
-  auto already_compiled = std::vector<std::string_view>();
-  already_compiled.reserve(num_files);
   for (auto i = size_t{}; i < num_files; ++i) {
-    if (types[i] != Module::DepTree::SourceFile_t::IMPL)
-      continue;
-    // -1 bc otherwise it includes the null terminator
-    auto const cur_file = std::string_view{all_paths.buffer + files[i].start,
-                                           all_paths.buffer + files[i].end - 1};
-    auto const that_cur_file = that.find(cur_file);
-    if (that_cur_file == NIL_IDX) {
-#ifdef DEBUG
-      std::cout << "Could not find `" << cur_file << "` pushing back\n";
-#endif // DEBUG
-      res.push_back(fs::path(cur_file));
-    } else if (that.hashes[that_cur_file] != hashes[i]) {
-#ifdef DEBUG
-      std::cout << "File `" << cur_file << "` has a different hash\n";
-#endif // DEBUG
-      res.push_back(fs::path(cur_file));
-    } else {
-      already_compiled.push_back(cur_file);
+    if (types[i] == Module::DepTree::SourceFile_t::IMPL) {
+      res.push_back(std::string_view{all_paths.buffer + files[i].start,
+                                     all_paths.buffer + files[i].end - 1});
     }
-  }
-#ifdef DEBUG
-  std::cout << "[already_compiled]\n\t";
-  for (auto &&f : already_compiled) {
-    std::cout << '[' << f << ']';
-  }
-  std::cout << std::endl;
-#endif // DEBUG
-  builtins::mods.unsafe_add_compiled_files_vectorized(mod, already_compiled);
-  return res;
-}
-
-auto Module::DepTree::vectorize() const -> std::vector<fs::path> {
-  auto res = std::vector<fs::path>();
-  res.reserve(num_files);
-  for (auto i = size_t{}; i < num_files; ++i) {
-    if (types[i] == Module::DepTree::SourceFile_t::IMPL)
-      res.push_back(
-          fs::path(std::string_view{all_paths.buffer + files[i].start,
-                                    all_paths.buffer + files[i].end - 1}));
   }
 
   return res;
@@ -2570,15 +2530,51 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
   }
 }
 
-auto LakeModules::unsafe_add_compiled_files_vectorized(
-    ModIndex const idx, std::span<std::string_view const> const vec) noexcept
-    -> void {
-  auto lock = std::unique_lock(mtxs[idx.mods]);
-  auto &lof = compiled_files[idx.mods];
-  auto const &mod = mods[idx.mods];
+auto LakeModules::get_tree_diff(ModIndex const mod_idx,
+                                Module::DepTree const &tree,
+                                Module::DepTree const &cache_tree)
+    -> std::vector<std::string_view> {
+  auto files_to_compile = std::vector<std::string_view>();
+  files_to_compile.reserve(tree.num_files);
+  auto already_compiled = std::vector<std::string_view>();
+  already_compiled.reserve(tree.num_files);
+  for (auto i = size_t{}; i < tree.num_files; ++i) {
+    if (tree.types[i] != Module::DepTree::SourceFile_t::IMPL) {
+      continue;
+    }
+    // -1 bc otherwise it includes the null terminator
+    auto const cur_file =
+        std::string_view{tree.all_paths.buffer + tree.files[i].start,
+                         tree.all_paths.buffer + tree.files[i].end - 1};
+    auto const that_cur_file = cache_tree.find(cur_file);
+    if (that_cur_file == Module::DepTree::NIL_IDX) {
+#ifdef DEBUG
+      std::cout << "Could not find `" << cur_file << "` pushing back\n";
+#endif // DEBUG
+      files_to_compile.push_back(cur_file);
+    } else if (cache_tree.hashes[that_cur_file] != tree.hashes[i]) {
+#ifdef DEBUG
+      std::cout << "File `" << cur_file << "` has a different hash\n";
+#endif // DEBUG
+      files_to_compile.push_back(cur_file);
+    } else {
+      already_compiled.push_back(cur_file);
+    }
+  }
+#ifdef DEBUG
+  std::cout << "[already_compiled]\n\t";
+  for (auto &&f : already_compiled) {
+    std::cout << '[' << f << ']';
+  }
+  std::cout << std::endl;
+#endif // DEBUG
+  // vectorized unsafe add already compiled files
+  auto lock = std::unique_lock(mtxs[mod_idx.mods]);
+  auto &lof = compiled_files[mod_idx.mods];
+  auto const &mod = mods[mod_idx.mods];
   // NOTE: file *should* be relative to the luamake.lua file, but we just want
   // the file name, this *should* work but is a bit of a HACK
-  for (auto &&file : vec) {
+  for (auto &&file : already_compiled) {
     auto const fname = [&file]() -> std::string_view {
       auto const pos = file.rfind('/');
       if (pos == file.npos) {
@@ -2591,11 +2587,12 @@ auto LakeModules::unsafe_add_compiled_files_vectorized(
 #ifdef DEBUG
     std::cout << DBG "[pushing back]" NORMAL
               << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, fname)
-              << " to " << idx << std::endl;
+              << " to " << mod_idx << std::endl;
 #endif // DEBUG
     lof.emplace_back(
         std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname));
   }
+  return files_to_compile;
 }
 
 auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
