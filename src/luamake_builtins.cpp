@@ -744,7 +744,7 @@ auto install_impl(lua_State *state) -> int {
     // it's fine to do this, kind of, but also because this is executed
     // async, we might no longer be in the pcall function, so we really just
     // need to change how we store + handle errors :)
-    if (OS_CALL(invoked_command.c_str()) != 0) {
+    if (os_call(invoked_command) != 0) {
       fprintf(stderr, "Error compiling [%s]" NL, invoked_command.c_str());
       builtins::mods.set_state_at(mod_idx,
                                   builtins::LakeModules::ModState::error);
@@ -773,7 +773,7 @@ auto install_impl(lua_State *state) -> int {
       } else {
         std::cout << std::format("Copying [{}] headers" NL, mod.name);
       }
-      if (OS_CALL(copy_headers.c_str()) != 0) {
+      if (os_call(copy_headers) != 0) {
         fprintf(stderr, "Error moving headers [%s]" NL, copy_headers.c_str());
         builtins::mods.set_state_at(mod_idx,
                                     builtins::LakeModules::ModState::error);
@@ -1295,15 +1295,8 @@ auto Module::append_include_paths(string_view const compiler) -> void {
       }
       if (*end_path == 0)
         break;
-      // there's probably a better way to do this, but idk this is fine for
-      // now
-      // :)
       if (fs::exists(fs::path(string_view(start_path, end_path)))) {
         includes.emplace_back(fs::canonical(fs::path(start_path, end_path)));
-        /*
-        sys_includes.emplace_back(
-            fs::canonical(fs::path(start_path, end_path)));
-            */
       }
       start_path = skip_ws(end_path);
     }
@@ -2306,7 +2299,7 @@ auto Runner::run(lua_State *state) noexcept -> int {
     std::cout << "[" << exe_path << "]" NL;
     std::cout.flush();
 
-    OS_CALL(exe_path.c_str());
+    os_call(exe_path);
 
     return 0;
   } catch (std::exception const &e) {
