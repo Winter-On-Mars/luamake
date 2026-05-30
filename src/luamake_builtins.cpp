@@ -653,6 +653,13 @@ auto install_impl(lua_State *state) -> int {
         std::cout << std::format("\t[{}] already built" NL, mod.name);
         return 1;
       }
+    } else {
+      // if the mods are different, then we just have to compile them, the users
+      // config changed, i.e. they specified a new macro, or a different
+      // compiler, it would be nice to have additional diffing to say ok they
+      // added a new macro, but only these files actually depend on said macro
+      // so we only have to compile them, something to add later
+      files_to_compile = mod.tree.vectorize();
     }
   } break;
   case 1: {
