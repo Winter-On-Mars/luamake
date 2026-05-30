@@ -131,24 +131,6 @@ enum class proj_t : unsigned char {
   Static,
 };
 
-auto file_exists(fs::path &&path) noexcept -> bool {
-#if defined(__linux__)
-  auto file = open(path.c_str(), O_PATH);
-  close(file);
-  return file != -1;
-#elif __cplusplus >= 201703L
-  try {
-    return fs::exists(path);
-  } catch (...) {
-    return false;
-  }
-#else
-  auto *file = fopen(path.c_str(), "r");
-  fclose(file);
-  return file != nullptr;
-#endif
-}
-
 static auto new_proj(string_view const, proj_t const) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
@@ -261,9 +243,13 @@ auto run_command(Command const command, int argc, char **argv) noexcept
         "gh");
     return exit_t::lua_vm_error;
   }
+  // TODO: check if this is worth leaving around, or if letting the gc run
+  // whenever is alright
   (void)lua_gc(state, LUA_GCSTOP);
 
-  if (!file_exists(fs::current_path() / "luamake.lua")) {
+  auto lake =
+      luamake::File(fs::current_path() / "luamake.lua", luamake::File::READ);
+  if (!lake) {
     ferror_message("Unable to discover `luamake.lua` in current dir at [%s]" NL
                    "\tRun "
                    "init <proj-name> to create a initialize a new project, "
@@ -282,14 +268,17 @@ auto run_command(Command const command, int argc, char **argv) noexcept
 
   create_args(state, argc, argv);
 
-  if (luaL_dofile(state, "luamake.lua") != LUA_OK) {
+  auto &&[len, str] = lake.dump_content();
+  // basically the same thing as the luaL_dostring macro, but we just have the
+  // buffer already
+  if ((luaL_loadbufferx(state, reinterpret_cast<char const *>(str.get()), len,
+                        "luamake:root", nullptr) ||
+       lua_pcall(state, 0, 0, 0)) != LUA_OK) {
     ferror_message("unable to run the discovered `luamake.lua` file at "
                    "[%s]" NL "\tLua error message [%s]",
                    fs::current_path().c_str(), lua_tostring(state, -1));
     return exit_t::config_error;
   }
-
-  (void)lua_gc(state, LUA_GCSTOP);
 
   auto res = exit_t::ok;
 
