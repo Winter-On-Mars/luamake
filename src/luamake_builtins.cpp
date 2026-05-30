@@ -1249,22 +1249,18 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     auto includes = vector<fs::path>();
     includes.reserve(10);
     auto constexpr buffer_size = sizeof(char) * size_t{2 << 8};
-    // code is technically unsafe, bc many of the std::string functions can
-    // throw, leaking this buffer :)
-    auto *const buffer = (char *)malloc(buffer_size + 1);
+    auto const buffer = std::make_unique<char[]>(buffer_size + 1);
     if (buffer == nullptr)
       throw CAPI(strerror(errno));
-    memset(buffer, 0, buffer_size + 1);
+    memset(buffer.get(), 0, buffer_size + 1);
 
     auto search_string = string();
-    search_string.reserve(256);
-    auto amount_read = read(read_pipe, buffer, buffer_size);
+    search_string.reserve(buffer_size);
+    auto amount_read = read(read_pipe, buffer.get(), buffer_size);
     while (amount_read > 0) {
-      search_string.append(buffer, static_cast<size_t>(amount_read));
-      amount_read = read(read_pipe, buffer, buffer_size);
+      search_string.append(buffer.get(), static_cast<size_t>(amount_read));
+      amount_read = read(read_pipe, buffer.get(), buffer_size);
     }
-
-    free(buffer);
 
     if (amount_read < 0) {
       auto const err = errno;
