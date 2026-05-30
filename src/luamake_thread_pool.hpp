@@ -9,6 +9,7 @@
 #include <mutex>
 #include <queue>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -25,8 +26,8 @@ struct CompilationPool final {
   auto init(size_t num_threads) noexcept -> void;
   auto deinit() noexcept -> void;
 
-  auto add_dep_tree_tasks(std::span<std::filesystem::path const> const,
-                          builtins::ModIndex const) noexcept -> void;
+  auto add_compile_tasks(std::span<std::string_view const> const,
+                         builtins::ModIndex const) noexcept -> void;
 
   template <class T> auto add_task(T &&func) noexcept -> void {
     {
