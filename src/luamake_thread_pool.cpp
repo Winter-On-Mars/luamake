@@ -84,7 +84,7 @@ auto CompilationPool::add_compile_tasks(
         } else {
           fprintf(stdout, "Building [%s]" NL, path.c_str());
         }
-        if (OS_CALL(invoked_command.c_str()) == 0) {
+        if (os_call(invoked_command) == 0) {
           builtins::mods.add_compiled_file(idx, path.filename().string());
         } else {
           builtins::mods.set_state_at(idx,
