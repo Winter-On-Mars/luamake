@@ -294,7 +294,7 @@ struct ExprNode final {
 
   static auto constexpr readable_type(Expr_t) noexcept -> std::string_view;
   /**
-   * @throws Exception
+   * @throws std::runtime_error
    * (if a float is found)
    */
   static auto eval(string_view const,
@@ -581,8 +581,9 @@ struct Expressions final {
 
     auto expect(size_t cur_t, expr_t &&tkn) const -> void {
       if (tkns[cur_t] != tkn) {
-        throw Exception(std::format("Unexpected token, expected {}, found {}",
-                                    to_string(tkn), to_string(tkns[cur_t])));
+        throw std::runtime_error(
+            std::format("Unexpected token, expected {}, found {}",
+                        to_string(tkn), to_string(tkns[cur_t])));
       }
     }
 #ifdef DEBUG
@@ -833,19 +834,19 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       if (keyword == keywords.end()) {
         // continue to next character of interest
         i = luamake::skip_until(chars_of_interest, fcontent, i);
-        throw Exception(
+        throw std::runtime_error(
             std::format("Hash keyword [{}], is not implimented", hash_keyword));
       }
 
       switch (keyword->second) {
       case ir_t::INCLUDE: {
         if (i >= file.size())
-          throw Exception(string("Unable to parse include parameter"));
+          throw std::runtime_error(string("Unable to parse include parameter"));
 
         i = skip_ws(fcontent, i);
 
         if (i >= file.size())
-          throw Exception(string("Unable to parse include parameter"));
+          throw std::runtime_error(string("Unable to parse include parameter"));
 
         lex.types.push_back(ir_t::INCLUDE);
         switch (fcontent[i]) {
@@ -855,7 +856,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           end = luamake::skip_until('>', fcontent, i + 1);
 
           if (!(end < file.size())) {
-            throw Exception(string("Non terminated global include"));
+            throw std::runtime_error(string("Non terminated global include"));
           }
 
           lex.types.push_back(ir_t::LIT_STRING);
@@ -869,7 +870,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           end = luamake::skip_until('"', fcontent, i + 1);
 
           if (!(end < file.size())) {
-            throw Exception(string("Non terminated local include"));
+            throw std::runtime_error(string("Non terminated local include"));
           }
 
           lex.types.push_back(ir_t::LIT_STRING);
@@ -878,7 +879,8 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           lex.types.push_back(ir_t::QUOTE);
         } break;
         default:
-          throw Exception(std::format("character found = {}", fcontent[i]));
+          throw std::runtime_error(
+              std::format("character found = {}", fcontent[i]));
         }
       } break;
       case ir_t::IFDEF: {
@@ -907,8 +909,9 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           // be a function like macro
           i = lex.parse_define_args(fcontent, skip_ws(fcontent, i + 1));
           if (fcontent[i] != ')') {
-            throw Exception(std::format("Expected closing ')' when parsing "
-                                        "function macro arguments"));
+            throw std::runtime_error(
+                std::format("Expected closing ')' when parsing "
+                            "function macro arguments"));
           }
           lex.types.push_back(ir_t::RPAREN);
           // this isn't technically needed, but every example (including those
@@ -968,7 +971,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
     } break;
     case '/': {
       if (!(i + 1 < file.size())) {
-        throw Exception(string("'/' found at end of file"));
+        throw std::runtime_error(string("'/' found at end of file"));
       }
       ++i;
       switch (fcontent[i]) {
@@ -980,7 +983,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         // ends with a multi line comment, i.e. */ at the end of the file
         i = skip_until_close_multicomment(fcontent, i + 1);
         if (i == file.size())
-          throw Exception(string("Non terminated multi line comment"));
+          throw std::runtime_error(string("Non terminated multi line comment"));
       } break;
       default: // probably just an op /
         i = luamake::skip_until(chars_of_interest, fcontent, i + 1);
@@ -994,7 +997,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         i = luamake::skip_until('"', fcontent, i + 1);
         // can always check this without needing to bounds check (probably)
         if (!(i < file.size())) {
-          throw Exception(string("Non terminated string"));
+          throw std::runtime_error(string("Non terminated string"));
         }
         // to fix when we're in a string that contains \" escape character
       } while (fcontent[i - 1] == '\\' && fcontent[i - 2] != '\\');
@@ -1005,7 +1008,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       do {
         i = luamake::skip_until('\'', fcontent, i + 1);
         if (!(i < file.size())) {
-          throw Exception(string("Non terminated char"));
+          throw std::runtime_error(string("Non terminated char"));
         }
         // the case when you have '\\'
       } while (fcontent[i - 1] == '\\' && fcontent[i - 2] != '\\');
@@ -1208,7 +1211,7 @@ auto Lexer::declaration(size_t &cur_t, size_t &cur_lex)
   case ir_t::ENDIF:
     [[fallthrough]];
   default:
-    throw Exception(
+    throw std::runtime_error(
         std::format("Unexpected token [{}] found in top level scope.",
                     to_string(types[cur_t])));
   }
@@ -1239,7 +1242,7 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
     case ir_t::ELIF:
       return FoundEnd::elif;
     default:
-      throw Exception(std::format(
+      throw std::runtime_error(std::format(
           "Unexpected token [{}], found after parsing #else directive",
           to_string(types[cur_t])));
     }
@@ -1279,22 +1282,24 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
       cur = FoundEnd::endif;
       break;
     default:
-      throw Exception(
+      throw std::runtime_error(
           std::format("Unexpected token [{}] found in top level scope.",
                       to_string(types[cur_t])));
     }
   }
 
   if (cur == FoundEnd::none) {
-    throw Exception(std::format("Unterminated #ifdef directive found"));
+    throw std::runtime_error(
+        std::format("Unterminated #ifdef directive found"));
   }
 
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
       if (else_branch != nullptr) {
-        throw Exception(std::format("Found #elif directive following #else "
-                                    "directive in #ifdef directive"));
+        throw std::runtime_error(
+            std::format("Found #elif directive following #else "
+                        "directive in #ifdef directive"));
       }
       while (cur_t < types.size()) {
         if (types[cur_t] == ir_t::ELSE || types[cur_t] == ir_t::ENDIF)
@@ -1305,8 +1310,9 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
       break;
     case FoundEnd::_else:
       if (else_branch != nullptr) {
-        throw Exception("Found multiple #else directives attached to a single "
-                        "#ifdef directive");
+        throw std::runtime_error(
+            "Found multiple #else directives attached to a single "
+            "#ifdef directive");
       }
       else_branch = handle_else(cur_t, cur_lex);
       cur = determine_state(cur_t);
@@ -1328,7 +1334,7 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
   ++cur_t;
   if (types[cur_t] != ir_t::LEXEME) {
-    throw Exception(std::format("Expected lexeme following #ifdef"));
+    throw std::runtime_error(std::format("Expected lexeme following #ifdef"));
   }
   ++cur_t;
   auto lex = lexemes[cur_lex++];
@@ -1350,7 +1356,7 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
     case ir_t::ELIF:
       return FoundEnd::elif;
     default:
-      throw Exception(std::format(
+      throw std::runtime_error(std::format(
           "Unexpected token [{}], found after parsing #else directive",
           to_string(types[cur_t])));
     }
@@ -1390,22 +1396,24 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
       cur = FoundEnd::endif;
       break;
     default:
-      throw Exception(
+      throw std::runtime_error(
           std::format("Unexpected token [{}] found in top level scope.",
                       to_string(types[cur_t])));
     }
   }
 
   if (cur == FoundEnd::none) {
-    throw Exception(std::format("Unterminated #ifdef directive found"));
+    throw std::runtime_error(
+        std::format("Unterminated #ifdef directive found"));
   }
 
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
       if (else_branch != nullptr) {
-        throw Exception(std::format("Found #elif directive following #else "
-                                    "directive in #ifdef directive"));
+        throw std::runtime_error(
+            std::format("Found #elif directive following #else "
+                        "directive in #ifdef directive"));
       }
       while (cur_t < types.size() &&
              (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
@@ -1415,8 +1423,9 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
       break;
     case FoundEnd::_else:
       if (else_branch != nullptr) {
-        throw Exception("Found multiple #else directives attached to a single "
-                        "#ifdef directive");
+        throw std::runtime_error(
+            "Found multiple #else directives attached to a single "
+            "#ifdef directive");
       }
       else_branch = handle_else(cur_t, cur_lex);
       cur = determine_state(cur_t);
@@ -1439,7 +1448,7 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
   ++cur_t;
   if (types[cur_t] != ir_t::LEXEME) {
-    throw Exception(std::format("Expected lexeme following #ifndef"));
+    throw std::runtime_error(std::format("Expected lexeme following #ifndef"));
   }
   ++cur_t;
   auto lex = lexemes[cur_lex++];
@@ -1487,22 +1496,24 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
       cur = FoundEnd::endif;
       break;
     default:
-      throw Exception(
+      throw std::runtime_error(
           std::format("Unexpected token [{}] found in top level scope.",
                       to_string(types[cur_t])));
     }
   }
 
   if (cur == FoundEnd::none) {
-    throw Exception(std::format("Unterminated #ifndef directive found"));
+    throw std::runtime_error(
+        std::format("Unterminated #ifndef directive found"));
   }
 
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
       if (else_branch != nullptr) {
-        throw Exception(std::format("Found #elif directive following #else "
-                                    "directive in #ifndef directive"));
+        throw std::runtime_error(
+            std::format("Found #elif directive following #else "
+                        "directive in #ifndef directive"));
       }
       while (cur_t < types.size() &&
              (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
@@ -1511,8 +1522,9 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
       break;
     case FoundEnd::_else:
       if (else_branch != nullptr) {
-        throw Exception("Found multiple #else directives attached to a single "
-                        "#ifndef directive");
+        throw std::runtime_error(
+            "Found multiple #else directives attached to a single "
+            "#ifndef directive");
       }
       else_branch = handle_else(cur_t, cur_lex);
       break;
@@ -1570,7 +1582,7 @@ auto Lexer::handle_undef(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
   ++cur_t;
   if (types[cur_t] != ir_t::MACRO) {
-    throw Exception(
+    throw std::runtime_error(
         std::format("Expected macro in #undef preprocessor directive"));
   }
   ++cur_t;
@@ -1590,9 +1602,9 @@ auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
     return std::make_unique<LocalIncludeNode>(lexemes[cur_lex++]);
   } break;
   default: {
-    throw Exception(std::format("Malformed #include statement, "
-                                "expected '<' or '\"', found [{}]",
-                                to_string(types[cur_t])));
+    throw std::runtime_error(std::format("Malformed #include statement, "
+                                         "expected '<' or '\"', found [{}]",
+                                         to_string(types[cur_t])));
   }
   }
 }
@@ -1601,7 +1613,7 @@ auto Lexer::handle_pragma(size_t &cur_t, size_t &cur_lex)
     -> std::unique_ptr<AstNode> {
   ++cur_t;
   if (types[cur_t] != ir_t::LEXEME)
-    throw Exception(
+    throw std::runtime_error(
         std::format("Expected lexeme in #pragma preprocessor directive"));
   ++cur_t;
   auto value = lexemes[cur_lex++];
@@ -1651,7 +1663,7 @@ auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
       unreachable();
       break;
     default:
-      throw Exception(
+      throw std::runtime_error(
           std::format("Unexpected token [{}] found in top level scope.",
                       to_string(types[cur_t])));
     }
@@ -1699,7 +1711,7 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
       looping = false;
       break;
     default:
-      throw Exception(
+      throw std::runtime_error(
           std::format("Unexpected token [{}] found in top level scope.",
                       to_string(types[cur_t])));
     }
@@ -1721,12 +1733,12 @@ auto Lexer::expect(size_t cur_t, ir_t tkn, string_view calling_func) -> void {
     return;
   case FailReason::OOB:
     if (calling_func != "") {
-      throw Exception(std::format(
+      throw std::runtime_error(std::format(
           "Attempting to index out of bounds of Lexer::types "
           "array, looking for token [{}], from calling function = [{}]",
           to_string(tkn), calling_func));
     } else {
-      throw Exception(
+      throw std::runtime_error(
           std::format("Attempting to index out of bounds of Lexer::types "
                       "array, looking for token [{}]",
                       to_string(tkn)));
@@ -1734,13 +1746,14 @@ auto Lexer::expect(size_t cur_t, ir_t tkn, string_view calling_func) -> void {
     return;
   case FailReason::Unexpected:
     if (calling_func != "") {
-      throw Exception(std::format("Unexpected token, expected {}, found {}, "
-                                  "from calling function = [{}]",
-                                  to_string(tkn), to_string(types[cur_t]),
-                                  calling_func));
+      throw std::runtime_error(
+          std::format("Unexpected token, expected {}, found {}, "
+                      "from calling function = [{}]",
+                      to_string(tkn), to_string(types[cur_t]), calling_func));
     } else {
-      throw Exception(std::format("Unexpected token, expected {}, found {}",
-                                  to_string(tkn), to_string(types[cur_t])));
+      throw std::runtime_error(
+          std::format("Unexpected token, expected {}, found {}", to_string(tkn),
+                      to_string(types[cur_t])));
     }
     return;
   }
@@ -1989,8 +2002,9 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
     ++cur_t;
     auto res = expression(cur_t, cur_lex);
     if (tkns[cur_t] != RPAREN) {
-      throw Exception(std::format("While parsing a grouping expression, "
-                                  "expected a ')' to wrap the expression"));
+      throw std::runtime_error(
+          std::format("While parsing a grouping expression, "
+                      "expected a ')' to wrap the expression"));
     }
     ++cur_t;
     return ExprNode(
@@ -2016,11 +2030,11 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
   } break;
 
   default:
-    throw Exception(
+    throw std::runtime_error(
         std::format("Unexpected token [{}] found while parsing an expression",
                     to_string(tkns[cur_t])));
   }
-  throw Exception(std::format(
+  throw std::runtime_error(std::format(
       "In function {}, support for token [{}] is not currently implimented",
       __FUNCTION__, to_string(tkns[cur_t])));
 }
@@ -2127,9 +2141,10 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
       }
     } break;
     case '.':
-      throw Exception(std::format("found '.' while parsing expression [{}] in "
-                                  "a #if or #elif condition.",
-                                  str));
+      throw std::runtime_error(
+          std::format("found '.' while parsing expression [{}] in "
+                      "a #if or #elif condition.",
+                      str));
     case 'd': {
       if (i + defined_str.size() < str.size() &&
           strncmp(str.data() + i, defined_str.data(), defined_str.size()) ==
@@ -2209,7 +2224,7 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
       return int_type::OCTAL;
     default:
       if (!is_digit(ch)) {
-        throw Exception(std::format(
+        throw std::runtime_error(std::format(
             "Found char [{}], while attempting to parse an integer", ch));
       } else {
         return int_type::OCTAL;
@@ -2251,7 +2266,7 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
   while (i < str.size()) {
     if (str[i] == '\'') {
       if (!allow_quote) {
-        throw Exception(
+        throw std::runtime_error(
             std::format("When parsing a{} integer, found two ' characters "
                         "back to back, these are treated as identifiers for a "
                         "char literal, and thus a formatting error.",
@@ -2266,7 +2281,7 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
     }
     /*
     if (!is_allowed_char(int_t, str[i])) {
-      throw Exception(std::format("While parsing a{} integer, found "
+      throw std::runtime_error(std::format("While parsing a{} integer, found "
                                   "[{}], a not supported character",
                                   to_string(int_t), str[i]));
     }
@@ -2306,7 +2321,7 @@ auto Expressions::eval_impl(
   case ExprNode::NUMBER:
     [[fallthrough]];
   case ExprNode::CHARLIT:
-    throw Exception(
+    throw std::runtime_error(
         std::format("While evaluating if expression found a not integer."));
   case ExprNode::GROUPING: {
     auto const &group = std::get<ExprNode::Grouping>(e.val);
@@ -2355,7 +2370,7 @@ auto Expressions::eval_impl(
     unreachable();
   }
   case ExprNode::NONE:
-    throw Exception(
+    throw std::runtime_error(
         std::format("Attempting to evaluate an uninitialized expression."));
   }
   unreachable();
@@ -2435,7 +2450,7 @@ auto Expressions::make_integer(Expressions::expr_t tkn,
     case LIT_OCT:
       [[fallthrough]];
     case LIT_BIN:
-      throw Exception(std::format(
+      throw std::runtime_error(std::format(
           "Parsing Expr_t [{}], is not currently implimented", to_string(tkn)));
       break;
     default:
@@ -2753,10 +2768,6 @@ auto AstIncluder::visit_undef(UndefNode &u) -> void {
 
 auto AstIncluder::visit_pragma(PragmaNode &) -> void {
   return; // ? idk if there's actually anything for us to do here
-}
-
-auto Exception::what() const noexcept -> string {
-  return std::format("{}", message);
 }
 
 auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {

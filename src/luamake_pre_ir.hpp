@@ -15,15 +15,6 @@
 
 namespace luamake {
 namespace pp {
-struct Exception {
-  explicit Exception(std::string &&message) noexcept : message(message) {}
-
-  ~Exception() = default;
-  auto what() const noexcept -> std::string;
-
-  std::string message;
-};
-
 using Macro = std::string;
 
 struct Interpreter final {
@@ -39,7 +30,7 @@ struct Interpreter final {
   Interpreter(Interpreter const &) noexcept = delete;
   Interpreter &operator=(Interpreter const &) noexcept = delete;
   /**
-   * @throws Exception
+   * @throws std::runtime_error
    */
   [[nodiscard]]
   auto interpret(std::string_view const) -> std::vector<std::filesystem::path>;
