@@ -1,6 +1,8 @@
 #ifndef __LUAMAKE_COMMON_HPP
 #define __LUAMAKE_COMMON_HPP
 
+#include <string_view>
+
 // TODO: add fmt as a subproject, that way we can used their color system to
 // have color in the terminal for displaying errors on all platforms
 
@@ -99,10 +101,8 @@ using u8 = unsigned char;
 
 using uint = unsigned int;
 
-#ifndef PERF_TESTING
-#define OS_CALL(str) system(str)
-#else
-#define OS_CALL(_) 0
-#endif // DEBUG
+namespace luamake {
+auto os_call(std::string_view const) -> int;
+}
 
 #endif
