@@ -11,8 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <ostream>
-#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 extern "C" {
@@ -30,6 +30,8 @@ static auto constexpr RUNNER_OBJ = "__luamake_runner";
 static auto constexpr TESTING_MACRO = "__define_testing_macro";
 
 namespace builtins {
+// forward declare, used for friend annotations
+struct LakeModules;
 auto dump(lua_State *) noexcept -> int;
 
 auto make_builder_obj(lua_State *) noexcept -> void;
@@ -225,9 +227,7 @@ struct Module final {
       return num_files;
     }
 
-    auto diff_against(ModIndex const, DepTree const &) const
-        -> std::vector<std::filesystem::path>;
-    auto vectorize() const -> std::vector<std::filesystem::path>;
+    auto vectorize() const -> std::vector<std::string_view>;
 
   private:
     // a parallel array for all of the source files
@@ -275,6 +275,7 @@ struct Module final {
                     std::filesystem::path const &,
                     std::filesystem::path const &, size_t const) -> void;
 
+    friend LakeModules;
     friend CompilationPool;
     friend Module;
     friend Builder;
@@ -382,10 +383,10 @@ struct LakeModules final {
   auto append_module_with_path(std::filesystem::path const &,
                                Module &&) noexcept(false) -> ModIndex;
 
-  // NOTE: (Winter-On-Mars) adds files directly to the compiled files list,
-  // without increasing the number of remaining files (hence unsafe)
-  auto unsafe_add_compiled_files_vectorized(
-      ModIndex const, std::span<std::string_view const> const) noexcept -> void;
+  // ok to return a string_view bc the strings will be alive in the
+  // mod.tree.all_paths field
+  auto get_tree_diff(ModIndex const, Module::DepTree const &,
+                     Module::DepTree const &) -> std::vector<std::string_view>;
 
 #ifdef DEBUG
   auto dump_paths(std::ostream &) const noexcept -> void;
