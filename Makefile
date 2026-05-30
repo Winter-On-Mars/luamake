@@ -8,7 +8,7 @@ _cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -fno-rtti $(LAKE_CC
 _bin_name:=$(LAKE_BUILD_DIR)/$(LAKE_BIN)
 _includes:=lua
 
-.PHONY: all, dbg, ncolor, release, clean_submod, perf_testing, perf_testing_release
+.PHONY: all, dbg, ncolor, release, clean_submod, perf_testing
 
 _files:=$(LAKE_BUILD_DIR)/common.o $(LAKE_BUILD_DIR)/luamake_strings.o $(LAKE_BUILD_DIR)/luamake_pre_ir.o $(LAKE_BUILD_DIR)/luamake_file.o $(LAKE_BUILD_DIR)/luamake_builtins.o $(LAKE_BUILD_DIR)/luamake_string_manip.o $(LAKE_BUILD_DIR)/luamake_thread_pool.o $(LAKE_BUILD_DIR)/main.o $(LAKE_BUILD_DIR)/luamake_spiral.o
 _lua_a:=lua/liblua.a
@@ -30,12 +30,8 @@ release: _cc_flags+=-O3 -ffast-math -flto -march=native
 release: $(_files)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
-perf_testing: _cc_flags+=-ggdb3 -DPERF_TESTING
+perf_testing: _cc_flags+=-DPERF_TESTING -O3 -ffast-math -flto -march=native -ggdb3
 perf_testing: $(_files) $(_lua_a)
-	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
-
-perf_testing_release: _cc_flags+=-DPERF_TESTING -O3 -ffast-math -flto -march=native
-perf_testing_release: $(_files) $(_lua_a)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 build/%.o: src/%.cpp
