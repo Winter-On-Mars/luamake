@@ -89,13 +89,10 @@ namespace luamake {
 // code, so no need to mutex protect it(?)
 static auto previous_path = fs::path();
 namespace {
-using std::pair, std::array, std::string, std::string_view, std::vector,
-    std::unordered_map, std::set;
-
 // TODO: export this to the user so that they don't have to go through the
 // clang/gcc functions if they don't want to
 struct OptArgs final {
-  set<string> args;
+  std::set<std::string> args;
 };
 
 // see the lua docs about lua_type for information about how this function works
@@ -168,7 +165,7 @@ auto constexpr fnv1a(std::span<u8 const> const bytes) noexcept -> size_t {
 
 // helper function for displaying every byte of the string_view
 [[maybe_unused]]
-auto display_string_view(string_view const str) noexcept -> void {
+auto display_string_view(std::string_view const str) noexcept -> void {
   for (auto i = size_t{}; i != str.length(); ++i) {
     std::cout << str[i] << '-';
   }
@@ -195,7 +192,7 @@ auto missing_field(std::string_view const field_name) noexcept
       field_name));
 }
 
-auto unexpected_type(string_view const field_name, int expected_type,
+auto unexpected_type(std::string_view const field_name, int expected_type,
                      int found_type) noexcept -> std::runtime_error {
   return std::runtime_error(std::format(
       "Required field [{}] found, but was of type {}, "
@@ -217,8 +214,8 @@ auto capi(std::string &&message) noexcept -> std::runtime_error {
   return std::runtime_error(std::move(message));
 }
 
-static auto compiler_impl(lua_State *state, string_view const compiler_name)
-    -> int {
+static auto compiler_impl(lua_State *state,
+                          std::string_view const compiler_name) -> int {
   // idk get better error messages
   LUA_EXPECTED_ARGUMENTS(state, 1, compiler_name);
   LUA_ASSERT(state, lua_type(state, -1), LUA_TTABLE,
@@ -353,11 +350,11 @@ static auto default_compiler_impl(lua_State *state,
                     "Expected type passed into %s function to be a table",
                     compiler_name.data());
 
-  auto constexpr opt_level = string_view{"O2"};
-  auto constexpr warnings = array<string_view, 3>{{
-      string_view{"Wall"},
-      string_view{"Wconversion"},
-      string_view{"Wpedantic"},
+  auto constexpr opt_level = std::string_view{"O2"};
+  auto constexpr warnings = std::array<std::string_view, 3>{{
+      std::string_view{"Wall"},
+      std::string_view{"Wconversion"},
+      std::string_view{"Wpedantic"},
   }};
 
   auto const arg_idx = lua_absindex(state, -1);
@@ -699,7 +696,7 @@ CLOptions cl_options = CLOptions{false, -1};
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
   files = std::make_unique<StringViews[]>(num_files);
-  deps = std::make_unique<vector<unsigned int>[]>(num_files);
+  deps = std::make_unique<std::vector<unsigned int>[]>(num_files);
   hashes = std::make_unique<size_t[]>(num_files);
 
   auto const paths_size = num_files * (sizeof(char) * 15 + 1);
@@ -779,7 +776,8 @@ auto Module::DepTree::append_dep(Module const &mod,
       fcontent.get());
   auto const ftype = DepTree::determine_file_type(dep.extension());
   if (ftype == DepTree::SourceFile_t::HEADER) {
-    auto constexpr potential_extensions = array<string_view, 2>{{".cpp", ".c"}};
+    auto constexpr potential_extensions =
+        std::array<std::string_view, 2>{{".cpp", ".c"}};
     auto const potential_impl = (dep.parent_path() / dep.stem()).string();
     for (auto const &potential_extension : potential_extensions) {
       auto const possible_path =
@@ -862,7 +860,8 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
 
 // TODO: update this to just use the num_files field, and the files array to
 // index directly into all_paths
-auto Module::DepTree::find(string_view const path) const noexcept -> size_t {
+auto Module::DepTree::find(std::string_view const path) const noexcept
+    -> size_t {
   auto const *start = all_paths.buffer;
   auto const *current = all_paths.buffer;
   auto end = size_t{};
@@ -896,7 +895,7 @@ auto Module::DepTree::resize() noexcept(false) -> void {
   auto n_hashes = std::make_unique<size_t[]>(next_cap);
   std::memmove(n_hashes.get(), hashes.get(), sizeof(size_t) * cap_files);
 
-  auto n_deps = std::make_unique<vector<unsigned int>[]>(next_cap);
+  auto n_deps = std::make_unique<std::vector<unsigned int>[]>(next_cap);
   for (auto i = size_t{}; i < cap_files; ++i) {
     n_deps[i] = std::move(deps[i]);
   }
@@ -918,7 +917,7 @@ auto Module::DepTree::reserve(size_t min) noexcept(false) -> void {
   auto n_types = std::make_unique<SourceFile_t[]>(min);
   auto n_files = std::make_unique<StringViews[]>(min);
   auto n_hashes = std::make_unique<size_t[]>(min);
-  auto n_deps = std::make_unique<vector<unsigned int>[]>(min);
+  auto n_deps = std::make_unique<std::vector<unsigned int>[]>(min);
 
   std::memmove(n_types.get(), types.get(), sizeof(SourceFile_t) * cap_files);
   std::memmove(n_files.get(), files.get(), sizeof(StringViews) * cap_files);
@@ -938,7 +937,7 @@ auto Module::DepTree::reserve(size_t min) noexcept(false) -> void {
 #ifdef DEBUG
 auto Module::DepTree::display(std::ostream &out,
                               unsigned int const depth) const noexcept -> void {
-  out << "All string = [" << string_view{all_paths.buffer, all_paths.size}
+  out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
       << "]" NL;
   out.flush();
   out << std::hex;
@@ -947,7 +946,7 @@ auto Module::DepTree::display(std::ostream &out,
 }
 
 auto Module::DepTree::dump(std::ostream &out) const noexcept -> void {
-  out << "All string = [" << string_view{all_paths.buffer, all_paths.size}
+  out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
       << "]" NL;
   out << std::format("num_files = [{}]" NL, num_files);
   out << std::format("cap_files = [{}]" NL, cap_files);
@@ -975,7 +974,7 @@ auto Module::DepTree::dump(std::ostream &out) const noexcept -> void {
 auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
                                    unsigned int const idx) const noexcept
     -> void {
-  auto const indents = string(depth, '\t');
+  auto const indents = std::string(depth, '\t');
 
   out << indents << "{" NL;
   out << indents << "\"type\":\"";
@@ -996,8 +995,8 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
   out << "\"," NL;
 
   out << indents << "\"path\":\""
-      << string_view{all_paths.buffer + files[idx].start,
-                     all_paths.buffer + files[idx].end}
+      << std::string_view{all_paths.buffer + files[idx].start,
+                          all_paths.buffer + files[idx].end}
       << "\"," NL;
 
   out << indents << "\"hash\":" << hashes[idx] << "," NL;
@@ -1103,14 +1102,14 @@ auto Module::display(std::ostream &out) const noexcept -> void {
 #endif // DEBUG
 
 static auto include_path_cache =
-    std::unordered_map<std::string_view, vector<fs::path>>();
+    std::unordered_map<std::string, std::vector<fs::path>>();
 // TODO: i think i'm not properly handling child procs, so see about fixing it
 // in these two functions :)
 // from some basic perf testing, these two functions seem to be the biggest
 // slow downs, they should be run in parallel (or just in the background)
 // which will help speed things up. We could rework the thread pool to allow
 // for arbitrary functions to be run(?)
-auto Module::append_include_paths(string_view const compiler) -> void {
+auto Module::append_include_paths(std::string const &compiler) -> void {
   // TODO: see if we need to cache the whole compiler string, or if it's
   // enough to just cache the path to the binary, i.e. if we can get away with
   // just caching /usr/bin/clang, then we can use the cache more, and don't
@@ -1120,7 +1119,7 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     sys_includes = includes->second;
     return;
   }
-  auto _pipes = array<int, 2>{};
+  auto _pipes = std::array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
     throw capi(strerror(errno));
   }
@@ -1151,7 +1150,7 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     // straightforward way i can think of
     close(write_pipe);
 
-    auto includes = vector<fs::path>();
+    auto includes = std::vector<fs::path>();
     includes.reserve(10);
     auto constexpr buffer_size = sizeof(char) * size_t{2 << 8};
     auto const buffer = std::make_unique<char[]>(buffer_size + 1);
@@ -1159,7 +1158,7 @@ auto Module::append_include_paths(string_view const compiler) -> void {
       throw capi(strerror(errno));
     memset(buffer.get(), 0, buffer_size + 1);
 
-    auto search_string = string();
+    auto search_string = std::string();
     search_string.reserve(buffer_size);
     auto amount_read = read(read_pipe, buffer.get(), buffer_size);
     while (amount_read > 0) {
@@ -1192,15 +1191,15 @@ auto Module::append_include_paths(string_view const compiler) -> void {
     ASSERT_ERROR(*start_path == 0);
 
     start_path = skip_ws(start_path);
-    for (auto end_path = start_path; string_view{start_path, end_path} !=
-                                     string_view{"End of search list."};
+    for (auto end_path = start_path; std::string_view{start_path, end_path} !=
+                                     std::string_view{"End of search list."};
          end_path = start_path) {
       while (*end_path != 0 && *end_path != '\n') {
         ++end_path;
       }
       if (*end_path == 0)
         break;
-      if (fs::exists(fs::path(string_view(start_path, end_path)))) {
+      if (fs::exists(fs::path(std::string_view(start_path, end_path)))) {
         includes.emplace_back(fs::canonical(fs::path(start_path, end_path)));
       }
       start_path = skip_ws(end_path);
@@ -1215,17 +1214,17 @@ auto Module::append_include_paths(string_view const compiler) -> void {
 // TODO: add another field for function macros, so that they can be added more
 // easily, and (if needed) evaluated easier
 static auto predefined_macros_cache =
-    std::unordered_map<std::string_view,
+    std::unordered_map<std::string,
                        std::pair<std::unordered_map<std::string, pp::Macro>,
                                  std::unordered_set<std::string>>>();
-auto Module::append_predefined_macros(string_view const compiler)
+auto Module::append_predefined_macros(std::string const &compiler)
     -> std::pair<std::unordered_map<std::string, pp::Macro>,
                  std::unordered_set<std::string>> {
   if (auto macros = predefined_macros_cache.find(compiler);
       macros != predefined_macros_cache.end()) {
     return macros->second;
   }
-  auto _pipes = array<int, 2>{};
+  auto _pipes = std::array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
     throw capi(strerror(errno));
   }
@@ -1269,14 +1268,14 @@ auto Module::append_predefined_macros(string_view const compiler)
     auto amount_read = getline(&buffer, &buffer_size, read_me);
     for (; amount_read > 0;
          amount_read = getline(&buffer, &buffer_size, read_me)) {
-      auto constexpr header = string_view{"#define "};
+      auto constexpr header = std::string_view{"#define "};
       if (strncmp(buffer, header.data(), header.size()) != 0) {
         fclose(read_me);
         free(buffer);
         close(read_pipe);
         throw misformatted_output(
             std::format("echo | {} -dM -E -",
-                        string_view{compiler.data(), compiler.find(' ')}));
+                        std::string_view{compiler.data(), compiler.find(' ')}));
       }
 
       auto macro_start = header.size();
@@ -1296,7 +1295,7 @@ auto Module::append_predefined_macros(string_view const compiler)
       }
 
       auto const macro_name =
-          string_view{buffer + macro_start, buffer + macro_cur};
+          std::string_view{buffer + macro_start, buffer + macro_cur};
 
       if (buffer[macro_cur] != ' ') {
         fclose(read_me);
@@ -1317,8 +1316,8 @@ auto Module::append_predefined_macros(string_view const compiler)
         ++macro_cur;
       }
 
-      macros.emplace(macro_name, pp::Macro{string(buffer + macro_start,
-                                                  buffer + macro_cur)});
+      macros.emplace(macro_name, pp::Macro{std::string(buffer + macro_start,
+                                                       buffer + macro_cur)});
     }
 
     if (errno != 0) {
@@ -1412,14 +1411,15 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   // if the compiler string doesn't contain a space then it *should* just be the
   // path to the compiler, so just use the whole length
-  auto const compiler_command = std::string_view{
-      compiler.data(), compiler.find(' ') != compiler.npos ? compiler.find(' ')
-                                                           : compiler.length()};
-
-  auto res = std::async(std::launch::async, [this, compiler_command]() {
+  auto const compiler_space = compiler.find(' ') != compiler.npos
+                                  ? compiler.find(' ')
+                                  : compiler.length();
+  auto res = std::async(std::launch::async, [this, compiler_space]() {
+    auto const compiler_command = std::string(compiler.data(), compiler_space);
     this->append_include_paths(compiler_command);
   });
-  auto macros_res = std::async(std::launch::async, [this, compiler_command]() {
+  auto macros_res = std::async(std::launch::async, [this, compiler_space]() {
+    auto const compiler_command = std::string(compiler.data(), compiler_space);
     return this->append_predefined_macros(compiler_command);
   });
 
@@ -1545,7 +1545,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
       if (value_t != LUA_TSTRING) {
         throw unexpected_type("macros[i]", LUA_TSTRING, value_t);
       }
-      auto mac = string(lua_tolstring(state, -1, nullptr));
+      auto mac = std::string(lua_tolstring(state, -1, nullptr));
       if (mac.find('=') != mac.npos) {
         // TODO: parse macro being set to value
       } else {
@@ -1595,7 +1595,7 @@ auto Module::format_includes() const -> std::string {
 auto Module::format_links() const -> std::string {
   // when we add dynamic library support, we'll have to worry about the -L
   // flag and shit
-  auto res = string();
+  auto res = std::string();
   res.reserve(256); // idk random number can def be optimized :)
   for (auto const &path : linking) {
     res += std::format("{} ", path.string());
@@ -1606,8 +1606,8 @@ auto Module::format_links() const -> std::string {
 // TODO: double check that it's actually fine to throw an exception here and
 // that this won't cause a memory leak, ig it's fine if it does cause a memory
 // leak because this errors out to the top, but it's still a concern
-auto Module::parse_compiler_table(lua_State *state) -> string {
-  auto str = string();
+auto Module::parse_compiler_table(lua_State *state) -> std::string {
+  auto str = std::string();
 
   auto const compiler_idx = lua_absindex(state, -1);
 

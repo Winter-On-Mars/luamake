@@ -318,12 +318,12 @@ struct Module final {
   /**
    * @throws CAPI
    */
-  auto append_include_paths(std::string_view const) -> void;
+  auto append_include_paths(std::string const &) -> void;
   /**
    * @throws CAPI
    */
   [[nodiscard]]
-  auto append_predefined_macros(std::string_view const)
+  auto append_predefined_macros(std::string const &)
       -> std::pair<std::unordered_map<std::string, pp::Macro>,
                    std::unordered_set<std::string>>;
 
