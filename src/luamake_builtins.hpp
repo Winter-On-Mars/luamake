@@ -195,13 +195,13 @@ struct Module final {
     auto gen_dep_tree(Module const &mod, pp::Interpreter &,
                       ModIndex const) noexcept(false) -> void;
 
-#ifdef DEBUG
+#ifdef DEBUG_MOD
     // displays the function in a pseudo json format
     auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
         -> void;
 
     auto dump(std::ostream &out) const noexcept -> void;
-#endif // DEBUG
+#endif // DEBUG_MOD
 
     [[nodiscard]]
     static auto determine_file_type(std::filesystem::path &&ext) noexcept
@@ -263,10 +263,10 @@ struct Module final {
     // the root index, because that's where the root index *should* be
     static constexpr auto NIL_IDX = static_cast<size_t>(-1);
 
-#ifdef DEBUG
+#ifdef DEBUG_MOD
     auto display_impl(std::ostream &out, unsigned int const depth,
                       unsigned int const idx) const noexcept -> void;
-#endif // DEBUG
+#endif // DEBUG_MOD
 
     /**
      * @throws DepTreeErr
@@ -311,9 +311,9 @@ struct Module final {
       : type(), tree(), roots(), headers(), includes(), sys_includes(),
         linking(), interpreter({}, {}), compiler(), name(), install_dir() {}
 
-#ifdef DEBUG
+#ifdef DEBUG_MOD
   auto display(std::ostream &) const noexcept -> void;
-#endif // DEBUG
+#endif // DEBUG_MOD
 
   /**
    * @throws CAPI
@@ -388,10 +388,10 @@ struct LakeModules final {
   auto get_tree_diff(ModIndex const, Module::DepTree const &,
                      Module::DepTree const &) -> std::vector<std::string_view>;
 
-#ifdef DEBUG
+#ifdef DEBUG_MOD
   auto dump_paths(std::ostream &) const noexcept -> void;
   auto dump_modules(std::ostream &) const noexcept -> void;
-#endif // DEBUG
+#endif // DEBUG_MOD
 
   struct Iterator final {
     constexpr Iterator(ModIndex const idx, Module *mods) noexcept

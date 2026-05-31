@@ -577,12 +577,12 @@ auto install_impl(lua_State *state) -> int {
   default:
     unreachable();
   }
-#ifdef DEBUG
+#ifdef DEBUG_MOD
   std::cout << "[files to compile]\n\t";
   for (auto &&path : files_to_compile)
     std::cout << '[' << path << ']';
   std::cout << std::endl;
-#endif // DEBUG
+#endif // DEBUG_MOD
 
   threads.add_compile_tasks(files_to_compile, mod_idx);
   // TODO: have some way of keeping track of if an error occurs when
@@ -726,10 +726,10 @@ auto Module::DepTree::append_path(fs::path const &path) -> StringViews {
         "of the StringViews class?",
         std::numeric_limits<unsigned int>::max()));
   }
-#ifdef DEBUG
+#ifdef DEBUG_MOD
   std::cout << std::format("File not found yet, so returning str = ({}, {})" NL,
                            start, end);
-#endif // DEBUG
+#endif // DEBUG_MOD
   return StringViews{static_cast<unsigned int>(start),
                      static_cast<unsigned int>(end)};
 }
@@ -746,11 +746,11 @@ auto Module::DepTree::append_dep(Module const &mod,
 
   auto const possible_idx = find(dep.string());
   if (possible_idx != DepTree::NIL_IDX) {
-#ifdef DEBUG
+#ifdef DEBUG_MOD
     std::cout << std::format(
         "Already found dep [{}], pushing back it's info and returning" NL,
         dep.string());
-#endif // DEBUG
+#endif // DEBUG_MOD
     if (parent_idx != DepTree::NIL_IDX) {
       deps[parent_idx].push_back(static_cast<uint>(possible_idx));
     }
@@ -798,7 +798,7 @@ auto Module::DepTree::append_dep(Module const &mod,
   auto const files_deps = interpreter.interpret(
       std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
 
-#ifdef DEBUG
+#ifdef DEBUG_MOD
   std::cout << std::format("Possible includes for {}: {{" NL, dep.string());
   for (auto &&include : files_deps) {
     std::cout << std::format("\t{}" NL, include.string());
@@ -807,7 +807,7 @@ auto Module::DepTree::append_dep(Module const &mod,
   std::cout.flush();
 
   mods.dump_paths(std::cout);
-#endif // DEBUG
+#endif // DEBUG_MOD
 
   auto ec = std::error_code{};
   for (auto &&file : files_deps) {
@@ -934,7 +934,7 @@ auto Module::DepTree::reserve(size_t min) noexcept(false) -> void {
   cap_files = min;
 }
 
-#ifdef DEBUG
+#ifdef DEBUG_MOD
 auto Module::DepTree::display(std::ostream &out,
                               unsigned int const depth) const noexcept -> void {
   out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
@@ -1011,7 +1011,7 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 
   out << indents << "}" NL;
 }
-#endif // DEBUG
+#endif // DEBUG_MOD
 
 auto Module::DepTree::vectorize() const -> std::vector<std::string_view> {
   auto res = std::vector<std::string_view>();
@@ -1051,7 +1051,7 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
   return true;
 }
 
-#ifdef DEBUG
+#ifdef DEBUG_MOD
 auto Module::display(std::ostream &out) const noexcept -> void {
   auto _display = [&](auto x) { out << x << ", "; };
 
@@ -1099,7 +1099,7 @@ auto Module::display(std::ostream &out) const noexcept -> void {
   out << "install_dir = " << install_dir << NL;
   out.flush();
 }
-#endif // DEBUG
+#endif // DEBUG_MOD
 
 static auto include_path_cache =
     std::unordered_map<std::string, std::vector<fs::path>>();
@@ -2312,9 +2312,9 @@ auto LakeModules::new_module(fs::path const &path) noexcept -> void {
   if (num_paths >= paths_cap)
     resize_paths();
   luamake_paths[num_paths++] = path;
-#ifdef DEBUG
+#ifdef DEBUG_MOD
   dump_paths(std::cout);
-#endif // DEBUG
+#endif // DEBUG_MOD
 }
 
 auto LakeModules::get_module_path(ModIndex const idx) const noexcept
@@ -2346,11 +2346,11 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
   auto lock = std::unique_lock(mtxs[idx.mods]);
   auto &lof = compiled_files[idx.mods];
   auto const &mod = mods[idx.mods];
-#ifdef DEBUG
+#ifdef DEBUG_MOD
   std::cout << DBG "[pushing back]" NORMAL
             << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
             << " to " << idx << std::endl;
-#endif // DEBUG
+#endif // DEBUG_MOD
   lof.emplace_back(
       std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
   remaining_files[idx.mods]--;
@@ -2383,26 +2383,26 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
                          tree.all_paths.buffer + tree.files[i].end - 1};
     auto const that_cur_file = cache_tree.find(cur_file);
     if (that_cur_file == Module::DepTree::NIL_IDX) {
-#ifdef DEBUG
+#ifdef DEBUG_MOD
       std::cout << "Could not find `" << cur_file << "` pushing back\n";
-#endif // DEBUG
+#endif // DEBUG_MOD
       files_to_compile.push_back(cur_file);
     } else if (cache_tree.hashes[that_cur_file] != tree.hashes[i]) {
-#ifdef DEBUG
+#ifdef DEBUG_MOD
       std::cout << "File `" << cur_file << "` has a different hash\n";
-#endif // DEBUG
+#endif // DEBUG_MOD
       files_to_compile.push_back(cur_file);
     } else {
       already_compiled.push_back(cur_file);
     }
   }
-#ifdef DEBUG
+#ifdef DEBUG_MOD
   std::cout << "[already_compiled]\n\t";
   for (auto &&f : already_compiled) {
     std::cout << '[' << f << ']';
   }
   std::cout << std::endl;
-#endif // DEBUG
+#endif // DEBUG_MOD
   // vectorized unsafe add already compiled files
   auto lock = std::unique_lock(mtxs[mod_idx.mods]);
   auto &lof = compiled_files[mod_idx.mods];
@@ -2419,11 +2419,11 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
         return std::string_view(file.cbegin() + pos + 1, file.cend());
       }
     }();
-#ifdef DEBUG
+#ifdef DEBUG_MOD
     std::cout << DBG "[pushing back]" NORMAL
               << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, fname)
               << " to " << mod_idx << std::endl;
-#endif // DEBUG
+#endif // DEBUG_MOD
     lof.emplace_back(
         std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname));
   }
@@ -2454,9 +2454,9 @@ auto LakeModules::append_module_with_path(fs::path const &path, Module &&mod)
     }
   }
   if (files == ModIndex::not_found) {
-#ifdef DEBUG
+#ifdef DEBUG_MOD
     dump_paths(std::cout);
-#endif // DEBUG
+#endif // DEBUG_MOD
     throw std::runtime_error(
         std::format("Unable to associate module with path [{}], path in the "
                     "known luamake paths",
@@ -2519,7 +2519,7 @@ auto LakeModules::resize_paths() -> void {
   }
 }
 
-#ifdef DEBUG
+#ifdef DEBUG_MOD
 auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
   out << "modules.paths = {" NL;
   for (auto i = uint{0}; i < num_paths; ++i) {
@@ -2539,7 +2539,7 @@ auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
   out << "}" NL;
   out.flush();
 }
-#endif // DEBUG
+#endif // DEBUG_MOD
 
 } // namespace builtins
 } // namespace luamake
