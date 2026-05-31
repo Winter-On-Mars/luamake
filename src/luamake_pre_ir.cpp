@@ -24,9 +24,9 @@
 #include <variant>
 #include <vector>
 
-#ifdef DEBUG
+#ifdef DEBUG_CPP
 #include <iostream>
-#endif // DEBUG
+#endif // DEBUG_CPP
 
 namespace fs = std::filesystem;
 
@@ -161,9 +161,9 @@ struct Lexer final {
    */
   auto ast() -> Ast;
 
-#ifdef DEBUG
+#ifdef DEBUG_CPP
   auto display(std::ostream &) const noexcept -> std::ostream &;
-#endif
+#endif // DEBUG_CPP
 
   Lexer() = default;
 
@@ -586,9 +586,9 @@ struct Expressions final {
                         to_string(tkn), to_string(tkns[cur_t])));
       }
     }
-#ifdef DEBUG
+#ifdef DEBUG_CPP
     auto display(std::ostream &) const noexcept -> std::ostream &;
-#endif // DEBUG
+#endif // DEBUG_CPP
   };
 
   // TODO: maybe compress these into one function(?)
@@ -663,7 +663,7 @@ auto PragmaNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_pragma(*this);
 }
 
-#ifdef DEBUG
+#ifdef DEBUG_CPP
 struct AstPrinter final : AstVisitor {
   std::ostream &out;
   // i really love that in c++ this is a thing you can do :)
@@ -693,7 +693,7 @@ struct AstPrinter final : AstVisitor {
   auto visit_undef(UndefNode &) -> void final;
   auto visit_pragma(PragmaNode &) -> void final;
 };
-#endif
+#endif // DEBUG_CPP
 
 // TODO: rewrite this implimentation so that the vector of paths is just
 // returned instead of being a part of this struct
@@ -961,10 +961,10 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         i = skip_ws(fcontent, i);
         break;
       default:
-#ifdef DEBUG
+#ifdef DEBUG_CPP
         std::cerr << WARNING "Unknown ir_t preprocessor directive ["
                   << to_string(keyword->second) << "]" NORMAL NL;
-#endif // DEBUG
+#endif // DEBUG_CPP
         lex.types.push_back(keyword->second);
         break;
       }
@@ -1019,10 +1019,10 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       break;
     }
   }
-#ifdef DEBUG
+#ifdef DEBUG_CPP
   std::cout << "Lexer:" NL;
   lex.display(std::cout).flush();
-#endif // DEBUG
+#endif // DEBUG_CPP
   return lex;
 }
 
@@ -1759,7 +1759,7 @@ auto Lexer::expect(size_t cur_t, ir_t tkn, string_view calling_func) -> void {
   }
 }
 
-#ifdef DEBUG
+#ifdef DEBUG_CPP
 auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
   out << "Types:" NL "\t";
   for (auto const &type : types) {
@@ -1773,7 +1773,7 @@ auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
   out << NL;
   return out;
 }
-#endif
+#endif // DEBUG_CPP
 
 auto ExprNode::make_defined(string &&str) noexcept -> ExprNode {
   return ExprNode(ExprNode::DEFINED, Defined{std::move(str)});
@@ -2039,7 +2039,7 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
       __FUNCTION__, to_string(tkns[cur_t])));
 }
 
-#ifdef DEBUG
+#ifdef DEBUG_CPP
 auto Expressions::ExprLexer::display(std::ostream &out) const noexcept
     -> std::ostream & {
   out << "Tokens:" NL "\t";
@@ -2054,7 +2054,7 @@ auto Expressions::ExprLexer::display(std::ostream &out) const noexcept
   out << NL;
   return out;
 }
-#endif // DEBUG
+#endif // DEBUG_CPP
 
 auto Expressions::lex(string_view const str) -> ExprLexer {
   auto constexpr defined_str = string_view{"defined"};
@@ -2550,7 +2550,7 @@ auto Expressions::expand_macro(
   return ExprLexer{tkns, lexes};
 }
 
-#ifdef DEBUG
+#ifdef DEBUG_CPP
 auto AstPrinter::visit_if(IfNode &i) -> void {
   out << get_indents() << "(if (" << i.condition << ")" NL;
   ++depth;
@@ -2654,7 +2654,7 @@ auto AstPrinter::visit_undef(UndefNode &u) -> void {
 auto AstPrinter::visit_pragma(PragmaNode &p) -> void {
   out << get_indents() << "(pragma {" << p.value << "})" NL;
 }
-#endif // DEBUG
+#endif // DEBUG_CPP
 
 auto AstIncluder::visit_if(IfNode &i) -> void {
   if (ExprNode::eval(i.condition, macros, def_macros) != 0) {
@@ -2773,16 +2773,16 @@ auto AstIncluder::visit_pragma(PragmaNode &) -> void {
 auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {
   auto ast = Lexer::lex(file).ast();
   auto vec = vector<fs::path>();
-#ifdef DEBUG
+#ifdef DEBUG_CPP
   auto ast_p = AstPrinter(std::cout);
   ast_p.print(ast);
-#endif // DEBUG
+#endif // DEBUG_CPP
   auto includer = AstIncluder(vec, macros, def_macros);
   includer.get_includes(ast);
   return vec;
 }
 
-#ifdef DEBUG
+#ifdef DEBUG_CPP
 auto Interpreter::dump_macros(std::ostream &out) noexcept -> void {
   out << "macros = {" NL;
   for (auto &&[name, value] : macros) {
@@ -2797,6 +2797,6 @@ auto Interpreter::dump_macros(std::ostream &out) noexcept -> void {
   }
   out << "}" NL;
 }
-#endif // DEBUG
+#endif // DEBUG_CPP
 } // namespace pp
 } // namespace luamake

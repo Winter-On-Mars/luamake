@@ -7,11 +7,14 @@
 // fast, so hopefully it will be, something worth trying
 
 #include <filesystem>
-#include <ostream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#ifdef DEBUG_CPP
+#include <ostream>
+#endif // DEBUG_CPP
 
 namespace luamake {
 namespace pp {
@@ -35,10 +38,9 @@ struct Interpreter final {
   [[nodiscard]]
   auto interpret(std::string_view const) -> std::vector<std::filesystem::path>;
 
-#ifdef DEBUG
+#ifdef DEBUG_CPP
   auto dump_macros(std::ostream &) noexcept -> void;
-
-#endif // DEBUG
+#endif // DEBUG_CPP
 
 private:
   std::unordered_map<std::string, Macro> macros;
