@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include "luamake_allocator.hpp"
 #include "luamake_builtins.hpp"
 #include "luamake_file.hpp"
 #include "luamake_thread_pool.hpp"
@@ -29,16 +30,14 @@ extern "C" {
 
 namespace fs = std::filesystem;
 
-using std::array, std::pair, std::string, std::string_view;
-
 namespace {
 enum class Value_t { NUMBER, STRING, BOOL_TRUE, BOOL_FALSE, NIL };
-auto constexpr determine_type(string_view const str) noexcept -> Value_t {
-  if (str.length() == 0 || str == string_view{"nil"}) {
+auto constexpr determine_type(std::string_view const str) noexcept -> Value_t {
+  if (str.length() == 0 || str == std::string_view{"nil"}) {
     return Value_t::NIL; // i don't know if this is actually what we want to do?
-  } else if (str == string_view{"true"}) {
+  } else if (str == std::string_view{"true"}) {
     return Value_t::BOOL_TRUE;
-  } else if (str == string_view{"false"}) {
+  } else if (str == std::string_view{"false"}) {
     return Value_t::BOOL_FALSE;
   } else if (isalpha(str[0])) {
     return Value_t::STRING;
@@ -117,6 +116,20 @@ auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
   lua_setglobal(state, "args");
 }
 
+struct LuaError final {
+  std::string message;
+};
+
+[[noreturn]]
+auto throw_panic(lua_State *state) -> int {
+  const char *msg = (lua_type(state, -1) == LUA_TSTRING)
+                        ? lua_tostring(state, -1)
+                        : "error object is not a string";
+  throw LuaError{
+      std::format("PANIC: unprotected error in call to Lua API ({})\n", msg)};
+  // return 0; /* return to Lua to abort */
+}
+
 enum class exit_t : unsigned char {
   ok,
   internal_error,
@@ -131,7 +144,7 @@ enum class proj_t : unsigned char {
   Static,
 };
 
-static auto new_proj(string_view const, proj_t const) noexcept -> exit_t;
+static auto new_proj(std::string_view const, proj_t const) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
 static auto build(lua_State *const) noexcept -> exit_t;
@@ -213,7 +226,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
         break;
       }
     }
-    return new_proj(string_view{argv[2]}, project_type);
+    return new_proj(std::string_view{argv[2]}, project_type);
   }
   case Command::HELP:
     return help();
@@ -229,12 +242,15 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     break;
   }
 
-  // TODO: linear allocate this, and see if that works the docs said something
-  // about expecting the lua_Alloc function to essentially be realloc,
-  // specifically that alloc(size=0) should basically free the pointer, but a
-  // linear allocator wouldn't do that
-  // auto *state = lua_newstate(nullptr, nullptr);
-  auto *state = luaL_newstate();
+  // TODO: there's some issue when it comes to copying strings, specifically
+  // strings that have been malloc'd/new'd, into here, it's causing the lua
+  // parser to not get certain keywords that it should :), i have no fucking
+  // clue how to fix this issue, i'm starting to hate the lua vm bc why the fuck
+  // would this even be a fucking issue
+  [[maybe_unused]]
+  auto page_allocator = luamake::allocator::Page();
+  auto *state = // lua_newstate(page_allocator.to_lua_alloc(), &page_allocator);
+      luaL_newstate();
   if (state == nullptr) {
     error_message(
         "Unable to init luavm." NL
@@ -243,10 +259,8 @@ auto run_command(Command const command, int argc, char **argv) noexcept
         "gh");
     return exit_t::lua_vm_error;
   }
-  // TODO: check if this is worth leaving around, or if letting the gc run
-  // whenever is alright
-  (void)lua_gc(state, LUA_GCSTOP);
-
+  // can probably remove this after we get things working
+  lua_atpanic(state, &throw_panic);
   auto lake =
       luamake::File(fs::current_path() / "luamake.lua", luamake::File::READ);
   if (!lake) {
@@ -257,27 +271,36 @@ auto run_command(Command const command, int argc, char **argv) noexcept
                    fs::current_path().c_str());
     return exit_t::config_error;
   }
+  // TODO: check if this is worth leaving around, or if letting the gc run
+  // whenever is alright
+  (void)lua_gc(state, LUA_GCSTOP);
 
   // TODO: (Winter-On-Mars) SECURITY concerns, gives the user access to the os,
   // io, etc modules, allowing for arbitrary code execution at the users
   // privilege level, also makes reproducability harder because some scripts
   // could depend on os features that are not shared, and that we can't check
   // exist beforehand
-  luaL_openlibs(state);
-  lua_register(state, "Dump", luamake::builtins::dump);
+  try {
+    luaL_openlibs(state);
+    lua_register(state, "Dump", luamake::builtins::dump);
 
-  create_args(state, argc, argv);
+    create_args(state, argc, argv);
 
-  auto &&[len, str] = lake.dump_content();
-  // basically the same thing as the luaL_dostring macro, but we just have the
-  // buffer already
-  if ((luaL_loadbufferx(state, reinterpret_cast<char const *>(str.get()), len,
-                        "luamake:root", nullptr) ||
-       lua_pcall(state, 0, 0, 0)) != LUA_OK) {
-    ferror_message("unable to run the discovered `luamake.lua` file at "
-                   "[%s]" NL "\tLua error message [%s]",
-                   fs::current_path().c_str(), lua_tostring(state, -1));
-    return exit_t::config_error;
+    auto &&[len, str] = lake.dump_content();
+    // basically the same thing as the luaL_dostring macro, but we just have the
+    // buffer already
+    std::cout << std::format("\tLoading Buffer") << std::endl;
+    if ((luaL_loadbufferx(state, reinterpret_cast<char const *>(str.get()), len,
+                          "luamake:root", nullptr) ||
+         lua_pcall(state, 0, 0, 0)) != LUA_OK) {
+      ferror_message("unable to run the discovered `luamake.lua` file at "
+                     "[%s]" NL "\tLua error message [%s]",
+                     fs::current_path().c_str(), lua_tostring(state, -1));
+      return exit_t::config_error;
+    }
+  } catch (LuaError const &err) {
+    std::cerr << err.message << std::endl;
+    return exit_t::lua_vm_error;
   }
 
   auto res = exit_t::ok;
@@ -360,8 +383,8 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   return res;
 }
 
-static auto new_proj(string_view const project_name, proj_t const type) noexcept
-    -> exit_t {
+static auto new_proj(std::string_view const project_name,
+                     proj_t const type) noexcept -> exit_t {
   auto const project_root = fs::current_path() / project_name;
 
   if (fs::exists(project_root)) {
@@ -389,43 +412,43 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
   }
 
   // these are all format strings, so they need to be passed to std::format
-  auto constexpr lua_f_content = std::array<string_view, 3>{
+  auto constexpr lua_f_content = std::array<std::string_view, 3>{
       // clang-format off
-      string_view{"function Build(b)" NL
-                  "    local exe = b:new_exe({{" NL
-                  "        name = \"{0}\"," NL
-                  "        root = \"src/main.cpp\"," NL
-                  "        compiler = b.clang({{}})," NL
-                  "        version = \"0.0.1\"," NL
-                  "        install_dir = \"build\"," NL
-                  "    }})" NL
-                  NL
-                  "    return b.install_exe(exe)" NL
-                  "end" NL
-                  NL
-                  "function Run(r)" NL
-                  "    local exe = {{" NL
-                  "        name = \"{0}\"," NL
-                  "        path = \"build/{0}\"," NL
-                  "        args = {{}}," NL
-                  "    }}" NL
-                  NL
-                  "    r.run(exe)" NL
-                  "end" NL
-                  NL
-                  "Tests = {{" NL
-                  "    {{" NL
-                  "        fun = function(t)" NL
-                  "            t.exe = \"build/{0}\"" NL
-                  "            t.args = {{\"This does nothing\"}}" NL
-                  "        end," NL
-                  "        output = {{" NL
-                  "            expected = \"Hello World!\\n\"," NL
-                  "            from = \"stdout\"," NL
-                  "        }}," NL
-                  "    }}" NL
-                  "}}" NL},
-      string_view{"local function Build(b)" NL
+    std::string_view{"function Build(b)" NL
+                     "    local exe = b:new_exe({{" NL
+                     "        name = \"{0}\"," NL
+                     "        root = \"src/main.cpp\"," NL
+                     "        compiler = b.clang({{}})," NL
+                     "        version = \"0.0.1\"," NL
+                     "        install_dir = \"build\"," NL
+                     "    }})" NL
+                     NL
+                     "    return b.install_exe(exe)" NL
+                     "end" NL
+                     NL
+                     "function Run(r)" NL
+                     "    local exe = {{" NL
+                     "        name = \"{0}\"," NL
+                     "        path = \"build/{0}\"," NL
+                     "        args = {{}}," NL
+                     "    }}" NL
+                     NL
+                     "    r.run(exe)" NL
+                     "end" NL
+                     NL
+                     "Tests = {{" NL
+                     "    {{" NL
+                     "        fun = function(t)" NL
+                     "            t.exe = \"build/{0}\"" NL
+                     "            t.args = {{\"This does nothing\"}}" NL
+                     "        end," NL
+                     "        output = {{" NL
+                     "            expected = \"Hello World!\\n\"," NL
+                     "            from = \"stdout\"," NL
+                     "        }}," NL
+                     "    }}" NL
+                     "}}" NL},
+      std::string_view{"local function Build(b)" NL
                   "    local dlib = b:new_dynamic({{" NL
                   "        roots = {{ \"src/dyn.cpp\" }}," NL
                   "        headers = {{ \"src/dyn.hpp\" }}," NL
@@ -441,7 +464,7 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
                   "    Build = Build" NL
                   "}}"
                   },
-      string_view{"local function Build(b)" NL
+      std::string_view{"local function Build(b)" NL
                   "    local slib = b:new_static({{" NL
                   "        roots = {{ \"src/static.cpp\" }}," NL
                   "        headers = {{ \"src/static.hpp\" }}," NL
@@ -474,40 +497,42 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
 
   luamake_lua.flush();
 
-  auto constexpr file_paths = array<pair<string_view, string_view>, 3>{
-      pair("", "src/main.cpp"),
-      pair("src/dyn.hpp", "src/dyn.cpp"),
-      pair("src/static.hpp", "src/static.cpp"),
-  };
+  auto constexpr file_paths =
+      std::array<std::pair<std::string_view, std::string_view>, 3>{
+          std::pair("", "src/main.cpp"),
+          std::pair("src/dyn.hpp", "src/dyn.cpp"),
+          std::pair("src/static.hpp", "src/static.cpp"),
+      };
 
-  auto constexpr hpp_cpp_f_content = array<pair<string_view, string_view>, 3>{
-      pair(string_view{""},
-           string_view{
-               ""
-               // clang-format off
+  auto constexpr hpp_cpp_f_content =
+      std::array<std::pair<std::string_view, std::string_view>, 3>{
+          std::pair(std::string_view{""},
+                    std::string_view{
+                        ""
+                        // clang-format off
                "#include <iostream>" NL
                NL
                "auto main() -> int {" NL
                "    using std::cout;" NL
                "    cout << \"Hello World!\" << std::endl;" NL
                "}" NL
-               // clang-format on
-           }),
-      pair(
-          string_view{
-              ""
-              // clang-format off
+                        // clang-format on
+                    }),
+          std::pair(
+              std::string_view{
+                  ""
+                  // clang-format off
               "#pragma once" NL
               NL
               "namespace dlib {" NL
               "[[nodiscard]]" NL
               "auto call_me(int) noexcept -> int;" NL
               "}" NL
-              // clang-format on
-          },
-          string_view{
-              ""
-              // clang-format off
+                  // clang-format on
+              },
+              std::string_view{
+                  ""
+                  // clang-format off
               "#include \"dyn.hpp\"" NL
               NL
               "namespace dlib {" NL
@@ -516,23 +541,23 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
               "    return i + 1;" NL
               "}" NL
               "}" NL
-              // clang-format on
-          }),
-      pair(
-          string_view{
-              ""
-              // clang-format off
+                  // clang-format on
+              }),
+          std::pair(
+              std::string_view{
+                  ""
+                  // clang-format off
               "#pragma once" NL
               NL
               "namespace slib {" NL
               "[[nodiscard]]" NL
               "auto call_me(int) noexcept -> int;" NL
               "}" NL
-              // clang-format on
-          },
-          string_view{
-              ""
-              // clang-format off
+                  // clang-format on
+              },
+              std::string_view{
+                  ""
+                  // clang-format off
               "#include \"static.hpp\"" NL
               NL
               "namespace slib {" NL
@@ -541,9 +566,9 @@ static auto new_proj(string_view const project_name, proj_t const type) noexcept
               "    return i + 1;" NL
               "}" NL
               "}" NL
-              // clang-format on
-          }),
-  };
+                  // clang-format on
+              }),
+      };
 
   auto &&[header_f_name, impl_f_name] =
       file_paths[static_cast<std::underlying_type_t<proj_t>>(type)];
@@ -745,8 +770,8 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
 
   for (auto &&mod : luamake::builtins::mods) {
     auto const &directory = mod.install_dir;
-    auto const arguments = [&]() -> string {
-      auto res = string();
+    auto const arguments = [&]() -> std::string {
+      auto res = std::string();
       res.reserve(1024);
       auto prev = size_t{};
       auto i = size_t{};
