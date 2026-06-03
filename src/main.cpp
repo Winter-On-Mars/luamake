@@ -120,7 +120,9 @@ struct LuaError final {
   std::string message;
 };
 
-[[noreturn]]
+// TODO: update this to throw, we then need to update our api functions to
+// accept thrown objects
+[[maybe_unused]] [[noreturn]]
 auto throw_panic(lua_State *state) -> int {
   const char *msg = (lua_type(state, -1) == LUA_TSTRING)
                         ? lua_tostring(state, -1)
@@ -128,6 +130,16 @@ auto throw_panic(lua_State *state) -> int {
   throw LuaError{
       std::format("PANIC: unprotected error in call to Lua API ({})\n", msg)};
   // return 0; /* return to Lua to abort */
+}
+
+// from lua/lauxlib.c 1041
+auto std_panic(lua_State *L) -> int {
+  const char *msg = (lua_type(L, -1) == LUA_TSTRING)
+                        ? lua_tostring(L, -1)
+                        : "error object is not a string";
+  lua_writestringerror("PANIC: unprotected error in call to Lua API (%s)\n",
+                       msg);
+  return 0; /* return to Lua to abort */
 }
 
 enum class exit_t : unsigned char {
@@ -249,8 +261,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   // would this even be a fucking issue
   [[maybe_unused]]
   auto page_allocator = luamake::allocator::Page();
-  auto *state = // lua_newstate(page_allocator.to_lua_alloc(), &page_allocator);
-      luaL_newstate();
+  auto *state = lua_newstate(page_allocator.to_lua_alloc(), &page_allocator);
   if (state == nullptr) {
     error_message(
         "Unable to init luavm." NL
@@ -260,7 +271,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     return exit_t::lua_vm_error;
   }
   // can probably remove this after we get things working
-  lua_atpanic(state, &throw_panic);
+  lua_atpanic(state, &std_panic);
   auto lake =
       luamake::File(fs::current_path() / "luamake.lua", luamake::File::READ);
   if (!lake) {
@@ -280,27 +291,21 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   // privilege level, also makes reproducability harder because some scripts
   // could depend on os features that are not shared, and that we can't check
   // exist beforehand
-  try {
-    luaL_openlibs(state);
-    lua_register(state, "Dump", luamake::builtins::dump);
+  luaL_openlibs(state);
+  lua_register(state, "Dump", luamake::builtins::dump);
 
-    create_args(state, argc, argv);
+  create_args(state, argc, argv);
 
-    auto &&[len, str] = lake.dump_content();
-    // basically the same thing as the luaL_dostring macro, but we just have the
-    // buffer already
-    std::cout << std::format("\tLoading Buffer") << std::endl;
-    if ((luaL_loadbufferx(state, reinterpret_cast<char const *>(str.get()), len,
-                          "luamake:root", nullptr) ||
-         lua_pcall(state, 0, 0, 0)) != LUA_OK) {
-      ferror_message("unable to run the discovered `luamake.lua` file at "
-                     "[%s]" NL "\tLua error message [%s]",
-                     fs::current_path().c_str(), lua_tostring(state, -1));
-      return exit_t::config_error;
-    }
-  } catch (LuaError const &err) {
-    std::cerr << err.message << std::endl;
-    return exit_t::lua_vm_error;
+  auto &&[len, str] = lake.dump_content();
+  // basically the same thing as the luaL_dostring macro, but we just have the
+  // buffer already
+  if ((luaL_loadbufferx(state, reinterpret_cast<char const *>(str.get()), len,
+                        "luamake:root", nullptr) ||
+       lua_pcall(state, 0, 0, 0)) != LUA_OK) {
+    ferror_message("unable to run the discovered `luamake.lua` file at "
+                   "[%s]" NL "\tLua error message [%s]",
+                   fs::current_path().c_str(), lua_tostring(state, -1));
+    return exit_t::config_error;
   }
 
   auto res = exit_t::ok;
