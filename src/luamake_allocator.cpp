@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <format>
 #include <iostream>
@@ -33,22 +34,19 @@ auto Page::to_lua_alloc() -> lua_Alloc { return lua_alloc; }
 auto Page::lua_alloc(void *ud, void *ptr, size_t o_size, size_t n_size)
     -> void * {
   // don't have to do any work
-  if (n_size == 0) {
-#ifdef DEBUG_ALLOCATOR
-    std::cout << std::format("Freeing [@{:0<12}]\n", ptr);
-#endif // DEBUG_ALLOCATOR
+  if (n_size == 0)
     return nullptr;
-  }
-  // this is to make our allocator behave like realloc, in particular when they
-  // want us to realloc
   if (ptr != nullptr && o_size != 0 && n_size != 0) {
-#ifdef DEBUG_ALLOCATOR
-    std::cout << std::format(
-        "Reallocating [@{:0<12}], from [{}] bytes to [{}] bytes\n", ptr, o_size,
-        n_size);
-#endif // DEBUG_ALLOCATOR
     if (n_size > o_size) {
-      return static_cast<Page *>(ud)->alloc(n_size);
+      // realloc, i.e. memcpy
+      auto *page = static_cast<Page *>(ud);
+      auto ret_ptr = page->alloc(n_size);
+#ifdef DEBUG_ALLOCATOR
+      page->wasted_space += o_size;
+#endif // DEBUG_ALLOCATOR
+      // realloc
+      memcpy(ret_ptr, ptr, o_size);
+      return ret_ptr;
     }
     return ptr;
   }
@@ -61,7 +59,6 @@ auto Page::alloc(size_t n_bytes) -> void * {
 #endif // DEBUG_ALLOCATOR
   n_bytes = get_alignment(n_bytes);
 #ifdef DEBUG_ALLOCATOR
-  std::cout << std::format("Allocating [{}] bytes\n", n_bytes);
   amount_alloc += n_bytes;
 #endif // DEBUG_ALLOCATOR
   [[unlikely]]
@@ -84,9 +81,6 @@ auto Page::alloc(size_t n_bytes) -> void * {
 }
 
 auto Page::get_new_page() -> void {
-#ifdef DEBUG_ALLOCATOR
-  std::cout << std::format("\tNew page\n");
-#endif // DEBUG_ALLOCATOR
   cur_page->next = static_cast<Header *>(malloc(SIZE));
   if (cur_page->next == nullptr)
     throw std::runtime_error("Unable to allocate new page of memory");
@@ -98,15 +92,18 @@ auto Page::get_new_page() -> void {
 
 #ifdef DEBUG_ALLOCATOR
 auto Page::dump_stats(std::ostream &out) -> std::ostream & {
-  std::cout << std::format(
-      "Allocated [{:*>8}] bytes, wasted [{:*>8}] bytes, took [{}] pages\n",
-      amount_alloc, wasted_space, [&]() {
-        auto num_pages = size_t{};
-        for (auto page = &start; page; page = page->next) {
-          ++num_pages;
-        }
-        return num_pages;
-      }());
+  std::cout << std::format("Allocated [{:*>8}] bytes, wasted [{:*>8}] bytes, "
+                           "ratio [{:.2f}%], took [{}] pages\n",
+                           amount_alloc, wasted_space,
+                           static_cast<double>(amount_alloc) /
+                               static_cast<double>(wasted_space),
+                           [&]() {
+                             auto num_pages = size_t{};
+                             for (auto page = &start; page; page = page->next) {
+                               ++num_pages;
+                             }
+                             return num_pages;
+                           }());
   return out;
 }
 #endif // DEBUG_ALLOCATOR
