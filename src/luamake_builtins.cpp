@@ -494,11 +494,6 @@ auto install_impl(lua_State *state) -> int {
         "when the module has been previously defined, see documentation on "
         "`new_(exe|static|dynamic)`, and/or `Git` for more information.");
   }
-  // i'm not sure if we actually need this variable now that we're using
-  // everything as an absolute path but i'm not going to test that right now
-  // and break everything :)
-  auto const &parent_path =
-      builtins::mods.get_module_path(mod_idx).parent_path();
   auto &mod = builtins::mods.module_at(mod_idx);
   if (mod.type != mod_t) {
     throw std::runtime_error(std::format(
@@ -507,6 +502,11 @@ auto install_impl(lua_State *state) -> int {
         static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
             mod.type)));
   }
+  // i'm not sure if we actually need this variable now that we're using
+  // everything as an absolute path but i'm not going to test that right now
+  // and break everything :)
+  auto const &parent_path =
+      builtins::mods.get_module_path(mod_idx).parent_path();
 
   // NOTE: we actually have to generate the dep tree here, because we have to
   // make sure we have all of the dependency linking information at this
@@ -692,6 +692,35 @@ auto install_impl(lua_State *state) -> int {
     // if everything went well then we can serialize the file
     spl::serialize(mod, cache_path);
   });
+  return 1;
+}
+
+// is used for functions that don't need to actually generate the dep tree, nor
+// actually call into the thread pool (i.e. cleaning up, generating the
+// compile_commands.json, etc)
+template <builtins::Module::Module_t mod_t>
+auto install_dummy_impl(lua_State *state) -> int {
+  if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
+    throw std::runtime_error(
+        "Currently do not support installing dynamic lib projects");
+  }
+  auto const mod_idx = builtins::ModIndex(lua_tointeger(state, -1));
+  if (!builtins::mods.has_module_at(mod_idx)) {
+    throw std::runtime_error(
+        "Attempting to install module that the system does not know "
+        "about." NL DBG "Hint" NORMAL ": installing a module only works "
+        "when the module has been previously defined, see documentation on "
+        "`new_(exe|static|dynamic)`, and/or `Git` for more information.");
+  }
+  auto &mod = builtins::mods.module_at(mod_idx);
+  if (mod.type != mod_t) {
+    throw std::runtime_error(std::format(
+        "Module type is not {}, found {}",
+        static_cast<std::underlying_type_t<builtins::Module::Module_t>>(mod_t),
+        static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
+            mod.type)));
+  }
+  (void)mod.tree.gen_dep_tree(mod, mod.interpreter, mod_idx);
   return 1;
 }
 } // namespace
@@ -2042,31 +2071,14 @@ auto Builder::get_os(lua_State *state) noexcept -> int {
   }
 }
 
-// probably shouldn't call it a thunk, but basically just a dummy function
-// that doesn't run any commands, nor make any directories, just varifies that
-// there is a module there, and that the module is an exe mod
-// TODO: have an impl version of this to unify all of the versions under the
-// same code, and do the proper checks to make sure that the module actually
-// exists
-auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
+auto Builder::install_exe_dummy(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, install_exe)
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
                     "Expected type of argument to `install_exe` to be of type "
                     "integer, found [%s]",
                     lua_typename(ret_t));
-
   try {
-    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-
-    auto &exe_mod = mods.module_at(mod_idx);
-    if (exe_mod.type != builtins::Module::EXE) {
-      throw std::runtime_error(std ::format(
-          "module type is not exe, found [{}]",
-          static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
-              exe_mod.type)));
-    }
-    exe_mod.tree.gen_dep_tree(exe_mod, exe_mod.interpreter, mod_idx);
-    return 1;
+    return install_dummy_impl<builtins::Module::Module_t::EXE>(state);
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
@@ -2076,30 +2088,15 @@ auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
   }
 }
 
-// probably shouldn't call it a thunk, but basically just a dummy function
-// that doesn't run any commands, nor make any directories, just varifies that
-// there is a module there, and that the module is a static mod
-auto Builder::install_static_thunk(lua_State *state) noexcept -> int {
+auto Builder::install_static_dummy(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, install_static)
   LUA_ASSERT_FORMAT(
       state, ret_t, lua_type(state, -1), LUA_TNUMBER,
       "Expected type of argument to `install_static` to be of type "
       "integer, found [%s]",
       lua_typename(ret_t));
-
   try {
-    auto const mod_idx = ModIndex(lua_tointeger(state, -1));
-
-    auto &static_mod = mods.module_at(mod_idx);
-    if (static_mod.type != builtins::Module::STATIC) {
-      throw std::runtime_error(std ::format(
-          "module type is not static, found [{}]",
-          static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
-              static_mod.type)));
-    }
-
-    static_mod.tree.gen_dep_tree(static_mod, static_mod.interpreter, mod_idx);
-    return 1;
+    return install_dummy_impl<builtins::Module::Module_t::STATIC>(state);
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
@@ -2237,7 +2234,7 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
   lua_setfield(state, -2, "run");
 }
 
-auto make_builder_thunk(lua_State *state) noexcept -> void {
+auto make_builder_dummy(lua_State *state) noexcept -> void {
   lua_createtable(state, 0, 11);
 
   lua_pushcfunction(state, &Builder::clang);
@@ -2258,10 +2255,10 @@ auto make_builder_thunk(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::new_static);
   lua_setfield(state, -2, "new_static");
 
-  lua_pushcfunction(state, &Builder::install_exe_thunk);
+  lua_pushcfunction(state, &Builder::install_exe_dummy);
   lua_setfield(state, -2, "install_exe");
 
-  lua_pushcfunction(state, &Builder::install_static_thunk);
+  lua_pushcfunction(state, &Builder::install_static_dummy);
   lua_setfield(state, -2, "install_static");
 
   lua_pushcfunction(state, &Builder::require);
