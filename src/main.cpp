@@ -720,7 +720,7 @@ static auto clean(lua_State *const state, bool const rm_everything) noexcept
   // normally we need to get the builder object from the global, but in this
   // case there's no other point that can call this function, so we just need to
   // make a builder object
-  luamake::builtins::make_builder_thunk(state);
+  luamake::builtins::make_builder_dummy(state);
   if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
     ferror_message("While in the lua vm, Build function" NL "\t[%s]",
@@ -765,7 +765,7 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
   // normally we need to get the builder object from the global, but in this
   // case there's no other point that can call this function, so we just need to
   // make a builder object
-  luamake::builtins::make_builder_thunk(state);
+  luamake::builtins::make_builder_dummy(state);
   if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
     ferror_message("While in the lua vm, Build function" NL "\t[%s]",

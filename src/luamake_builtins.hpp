@@ -36,12 +36,8 @@ auto dump(lua_State *) noexcept -> int;
 
 auto make_builder_obj(lua_State *) noexcept -> void;
 auto make_runner_obj(lua_State *) noexcept -> void;
-auto make_builder_thunk(lua_State *const) noexcept -> void;
+auto make_builder_dummy(lua_State *const) noexcept -> void;
 
-// TODO: add more functions like clang, one for gcc, and a default one that just
-// uses the systems cc++ command; also see todo in the function implimenation
-// about linking against stdc++, and how we compile c code, bc it's considered
-// deprecated to compile c code like it's c++
 class Builder final {
   static auto new_exe(lua_State *) noexcept -> int;
   static auto new_static(lua_State *) noexcept -> int;
@@ -58,13 +54,11 @@ class Builder final {
 
   static auto get_os(lua_State *) noexcept -> int;
 
-  // used with some of the build commands that want to turn off actually running
-  // the compiler
-  static auto install_exe_thunk(lua_State *) noexcept -> int;
-  static auto install_static_thunk(lua_State *) noexcept -> int;
+  static auto install_exe_dummy(lua_State *) noexcept -> int;
+  static auto install_static_dummy(lua_State *) noexcept -> int;
 
   friend auto make_builder_obj(lua_State *) noexcept -> void;
-  friend auto make_builder_thunk(lua_State *) noexcept -> void;
+  friend auto make_builder_dummy(lua_State *) noexcept -> void;
 };
 
 class Runner final {
