@@ -361,12 +361,11 @@ struct LakeModules final {
   auto init(size_t const cap = 4) -> void;
   auto deinit() -> void;
 
+  auto has_module_at(ModIndex const) const noexcept -> bool;
+
   // TODO: maybe have this take ownership, to avoid the copy
   auto new_module(std::filesystem::path const &) noexcept -> void;
-  /*
-  auto add_mod_to(std::filesystem::path const &, Module &&) noexcept(false)
-      -> ModIndex;
-      */
+
   auto get_module_path(ModIndex const) const noexcept -> std::filesystem::path;
 
   auto emplace_at(ModIndex, Module &&) -> void;

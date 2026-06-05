@@ -487,6 +487,13 @@ auto install_impl(lua_State *state) -> int {
   // mod_idx is at the top of the stack, and we'll just return it at the
   // end, assuming everything else has gone well
   auto const mod_idx = builtins::ModIndex(lua_tointeger(state, -1));
+  if (!builtins::mods.has_module_at(mod_idx)) {
+    throw std::runtime_error(
+        "Attempting to install module that the system does not know "
+        "about." NL DBG "Hint" NORMAL ": installing a module only works "
+        "when the module has been previously defined, see documentation on "
+        "`new_(exe|static|dynamic)`, and/or `Git` for more information.");
+  }
   // i'm not sure if we actually need this variable now that we're using
   // everything as an absolute path but i'm not going to test that right now
   // and break everything :)
@@ -2038,6 +2045,9 @@ auto Builder::get_os(lua_State *state) noexcept -> int {
 // probably shouldn't call it a thunk, but basically just a dummy function
 // that doesn't run any commands, nor make any directories, just varifies that
 // there is a module there, and that the module is an exe mod
+// TODO: have an impl version of this to unify all of the versions under the
+// same code, and do the proper checks to make sure that the module actually
+// exists
 auto Builder::install_exe_thunk(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, install_exe)
   LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
@@ -2306,6 +2316,10 @@ auto LakeModules::deinit() -> void {
   compiled_files = nullptr;
   luamake_paths = nullptr;
   mods = nullptr;
+}
+
+auto LakeModules::has_module_at(ModIndex const idx) const noexcept -> bool {
+  return num_mods > idx.mods && num_paths > idx.files;
 }
 
 auto LakeModules::new_module(fs::path const &path) noexcept -> void {
