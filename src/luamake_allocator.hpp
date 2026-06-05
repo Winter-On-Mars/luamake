@@ -16,7 +16,9 @@ extern "C" {
 
 namespace luamake::allocator {
 struct Page final {
-  static auto constexpr SIZE = size_t{2 << 12};
+  // TODO: expose this as a compilation parameter, this number seems to work the
+  // best for my machine in terms of a boost in performance
+  static auto constexpr SIZE = size_t{2 << 16};
   Page() noexcept;
   ~Page() noexcept;
   // not technically required, but ensures that the allocator is initialized
