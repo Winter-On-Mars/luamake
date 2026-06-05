@@ -1925,6 +1925,9 @@ auto Builder::require(lua_State *state) noexcept -> int {
                     lua_typename(arg_t));
   try {
     auto const parent_path = previous_path;
+    // TODO: if the path doesn't exist, this throws, that's fine, but the error
+    // message sucks, so we should check ourselves, and throw our own error if
+    // that's the case
     auto const luamake_path = fs::canonical(
         parent_path /
         fs::path(std::string(lua_tolstring(state, -1, nullptr)) + ".lua"));
@@ -2014,8 +2017,22 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
                     "Expected integer to `link_lib` function, found [%s]",
                     lua_typename(arg_t));
   try {
+    // TODO: check that the type of the modules is correct, we can link a static
+    // to an exe, but we can't go the other ways, we can (when we get to dynamic
+    // libs) link a static to a dynamic lib, but we have to make sure that the
+    // static lib is compiled with pic (or something like that look into it),
+    // etc
     auto const lib_to_be_linked = ModIndex(lua_tointeger(state, -2));
+    // TODO: rename this
     auto const lib_getting_diddled = ModIndex(lua_tointeger(state, -1));
+
+    if (!mods.has_module_at(lib_to_be_linked)) {
+      throw std::runtime_error("link_lib: Attempting to link an "
+                               "unknown module to another module");
+    } else if (!mods.has_module_at(lib_getting_diddled)) {
+      throw std::runtime_error(
+          "link_lib: Attempting to link a known module to an unknown module");
+    }
 
     auto const &mod_linked = mods.module_at(lib_to_be_linked);
     auto &mod_d = mods.module_at(lib_getting_diddled);
