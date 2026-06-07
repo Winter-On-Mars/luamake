@@ -254,11 +254,6 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     break;
   }
 
-  // TODO: there's some issue when it comes to copying strings, specifically
-  // strings that have been malloc'd/new'd, into here, it's causing the lua
-  // parser to not get certain keywords that it should :), i have no fucking
-  // clue how to fix this issue, i'm starting to hate the lua vm bc why the fuck
-  // would this even be a fucking issue
   [[maybe_unused]]
   auto page_allocator = luamake::allocator::Page();
   auto *state = lua_newstate(page_allocator.to_lua_alloc(), &page_allocator);
@@ -272,6 +267,8 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   }
   // can probably remove this after we get things working
   lua_atpanic(state, &std_panic);
+  // NOTE: there's some bug with -fsanitize=memory and fs::current_path, known
+  // bug, says it's fixed in clang21(?) but that's what i'm testing on so idk
   auto lake =
       luamake::File(fs::current_path() / "luamake.lua", luamake::File::READ);
   if (!lake) {
