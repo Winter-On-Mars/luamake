@@ -116,6 +116,7 @@ auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
   lua_setglobal(state, "args");
 }
 
+// <lua vm stuff>
 struct LuaError final {
   std::string message;
 };
@@ -141,6 +142,37 @@ auto std_panic(lua_State *L) -> int {
                        msg);
   return 0; /* return to Lua to abort */
 }
+
+// TODO: (Winter-On-Mars) SECURITY concerns, review each module and see if there
+// are any that we **need** to get rid of, and if so, if there are some features
+// that can be useful that we should provide though our own mock std lib
+auto constexpr supported_libs = std::array<luaL_Reg, 8>{
+    luaL_Reg{LUA_GNAME, luaopen_base},
+    luaL_Reg{LUA_LOADLIBNAME, luaopen_package},
+    luaL_Reg{LUA_COLIBNAME,
+             luaopen_coroutine}, // this might cause some issues, because we
+                                 // haven't really thought about what will
+                                 // happen when coroutines are running, but for
+                                 // now i'll leave it in
+    luaL_Reg{LUA_TABLIBNAME, luaopen_table},
+    luaL_Reg{LUA_IOLIBNAME, luaopen_io}, // should probably remove(?)
+    // big security issue, though we should probably expose some of these, like
+    // os.clock
+    // {LUA_OSLIBNAME, luaopen_os},
+    luaL_Reg{LUA_STRLIBNAME, luaopen_string},
+    luaL_Reg{LUA_MATHLIBNAME, luaopen_math},
+    luaL_Reg{LUA_UTF8LIBNAME, luaopen_utf8},
+    //  {LUA_DBLIBNAME, luaopen_debug},
+    // luaL_Reg{NULL, NULL}
+};
+// see linit.c 57
+auto open_libs(lua_State *state) -> void {
+  for (auto &&[name, func] : supported_libs) {
+    luaL_requiref(state, name, func, 1);
+    lua_pop(state, 1); // remove lib
+  }
+}
+// </lua vm stuff>
 
 enum class exit_t : unsigned char {
   ok,
@@ -254,7 +286,6 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     break;
   }
 
-  [[maybe_unused]]
   auto page_allocator = luamake::allocator::Page();
   auto *state = lua_newstate(page_allocator.to_lua_alloc(), &page_allocator);
   if (state == nullptr) {
@@ -283,12 +314,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   // whenever is alright
   (void)lua_gc(state, LUA_GCSTOP);
 
-  // TODO: (Winter-On-Mars) SECURITY concerns, gives the user access to the os,
-  // io, etc modules, allowing for arbitrary code execution at the users
-  // privilege level, also makes reproducability harder because some scripts
-  // could depend on os features that are not shared, and that we can't check
-  // exist beforehand
-  luaL_openlibs(state);
+  open_libs(state);
   lua_register(state, "Dump", luamake::builtins::dump);
 
   create_args(state, argc, argv);
