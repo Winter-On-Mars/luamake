@@ -20,7 +20,6 @@
 #include <type_traits>
 #include <unistd.h>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -233,13 +232,13 @@ struct ExprNode final {
   struct Number final {
     double f;
   };
-  // TODO: switch these to string_views
+  // NOTE: these strings are not required to be null terminated, be sure to use
+  // the right apis
   struct Defined final {
     std::string_view str;
-    // std::string str;
   };
   struct CharLit final {
-    std::string str;
+    std::string_view str;
   };
   struct Grouping final {
     std::unique_ptr<ExprNode> expr;
@@ -276,7 +275,6 @@ struct ExprNode final {
     UNARY,
     NONE,
   };
-  // TODO: write all of these :)
   ExprNode() noexcept;
   ExprNode(Integer &&) noexcept;
   ExprNode(Number &&) noexcept;
@@ -327,7 +325,9 @@ private:
   // 24 bytes should be enough(?)
   // this should be a fine alignment(?)
   static auto constexpr STORAGE_SIZE = size_t{24};
-  alignas(size_t) char storage[STORAGE_SIZE] = {};
+  // -1 to hold the byte for if the string is sso
+  static auto constexpr SMALL_STRING_AMOUNT = STORAGE_SIZE - sizeof(Expr_t) - 1;
+  alignas(size_t) u8 storage[STORAGE_SIZE] = {};
 };
 
 // TODO: devirtualize this if this becomes a perf issue
@@ -1835,7 +1835,7 @@ ExprNode::ExprNode() noexcept {
   // TODO: we should be able to remove this step, assuming we've done everything
   // correct, we'll leave it in debug mode ig(?)
   std::memset(storage, 0, STORAGE_SIZE);
-  auto *_ = new (storage) Expr_t(Expr_t::NONE);
+  new (storage) Expr_t(Expr_t::NONE);
 }
 
 ExprNode::ExprNode(ExprNode::Integer &&i) noexcept {
@@ -1852,11 +1852,78 @@ ExprNode::ExprNode(ExprNode::Number &&n) noexcept {
   new (storage + sizeof(size_t)) ExprNode::Number(std::move(n));
 }
 
+// TODO: check these, there's no way this is working properly
 ExprNode::ExprNode(ExprNode::Defined &&def) noexcept {
   std::memset(storage, 0, STORAGE_SIZE);
-  new (storage) Expr_t(Expr_t::NUMBER);
-  // alignment
-  new (storage + sizeof(size_t)) ExprNode::Number(std::move(n));
+  new (storage) Expr_t(Expr_t::DEFINED);
+  if (def.str.size() < SMALL_STRING_AMOUNT) {
+    storage[sizeof(Expr_t)] = 0xbe;
+    memcpy(storage + sizeof(Expr_t) + 1, def.str.data(), def.str.size());
+  } else {
+    storage[sizeof(Expr_t)] = 0xff;
+    auto *size = new (storage + sizeof(size_t)) size_t{def.str.size()};
+    // wtf am i doing
+    auto *buffer = new (storage + 2 * sizeof(size_t)) char *{new char[*size]{}};
+    memcpy(*buffer, def.str.data(), *size);
+  }
+}
+
+ExprNode::ExprNode(ExprNode::CharLit &&lit) noexcept {
+  std::memset(storage, 0, STORAGE_SIZE);
+  new (storage) Expr_t(Expr_t::CHARLIT);
+  if (lit.str.size() < SMALL_STRING_AMOUNT) {
+    // alignment
+    storage[sizeof(Expr_t)] = 0xbe;
+    memcpy(storage + sizeof(Expr_t) + 1, lit.str.data(), lit.str.size());
+  } else {
+    storage[sizeof(Expr_t)] = 0xff;
+    auto *size = new (storage + sizeof(size_t)) size_t{lit.str.size()};
+    // wtf am i doing
+    auto *buffer = new (storage + 2 * sizeof(size_t)) char *{new char[*size]{}};
+    memcpy(*buffer, lit.str.data(), *size);
+  }
+}
+
+ExprNode::ExprNode(ExprNode::Grouping &&group) noexcept {
+  std::memset(storage, 0, STORAGE_SIZE);
+  new (storage) Expr_t(Expr_t::GROUPING);
+  new (storage + sizeof(size_t))
+      std::unique_ptr<ExprNode>(std::move(group.expr));
+}
+
+ExprNode::ExprNode(ExprNode::Binary::Binary_t bin_t,
+                   ExprNode::Binary &&bin) noexcept {
+  std::memset(storage, 0, STORAGE_SIZE);
+  new (storage) Expr_t(Expr_t::BINARY);
+  new (storage + sizeof(Expr_t)) Binary::Binary_t(bin_t);
+  new (storage + sizeof(size_t)) std::unique_ptr<ExprNode>(std::move(bin.lhs));
+  new (storage + 2 * sizeof(size_t))
+      std::unique_ptr<ExprNode>(std::move(bin.rhs));
+}
+
+ExprNode::ExprNode(ExprNode::Unary::Unary_t un_t,
+                   ExprNode::Unary &&un) noexcept {
+  std::memset(storage, 0, STORAGE_SIZE);
+  new (storage) Expr_t(Expr_t::UNARY);
+  new (storage + sizeof(Expr_t)) Unary::Unary_t(un_t);
+  new (storage + sizeof(size_t)) std::unique_ptr<ExprNode>(std::move(un.un));
+}
+
+ExprNode::~ExprNode() noexcept {
+  switch (expr_t()) {
+  case Expr_t::DEFINED:
+  case Expr_t::CHARLIT:
+  case Expr_t::GROUPING:
+  case Expr_t::BINARY:
+  case Expr_t::UNARY:
+    break;
+  case Expr_t::INT:
+    [[fallthrough]];
+  case Expr_t::NUMBER:
+    [[fallthrough]];
+  case Expr_t::NONE:
+    break; // nothing to do, all on the stack
+  }
 }
 
 auto ExprNode::eval(std::string_view const expr, StringMap const &macros,
