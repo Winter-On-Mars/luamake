@@ -1,6 +1,7 @@
 #ifndef __LUAMAKE_COMMON_HPP
 #define __LUAMAKE_COMMON_HPP
 
+#include <cstdint>
 #include <string_view>
 
 // TODO: add fmt as a subproject, that way we can used their color system to
@@ -100,6 +101,7 @@ static_assert(sizeof(unsigned char) == 1);
 using u8 = unsigned char;
 
 using uint = unsigned int;
+using u32 = std::uint32_t;
 
 namespace luamake {
 auto os_call(std::string_view const) -> int;
