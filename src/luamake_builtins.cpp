@@ -1249,13 +1249,13 @@ auto Module::append_include_paths(std::string const &compiler) -> void {
 
 // TODO: add another field for function macros, so that they can be added more
 // easily, and (if needed) evaluated easier
+// TODO: switch this to use the pp::StringHasher, so that we can avoid some
+// allocations, while also avoiding the stack use after free that comes from
+// std::async call
 static auto predefined_macros_cache =
-    std::unordered_map<std::string,
-                       std::pair<std::unordered_map<std::string, pp::Macro>,
-                                 std::unordered_set<std::string>>>();
+    std::unordered_map<std::string, std::pair<pp::StringMap, pp::StringSet>>();
 auto Module::append_predefined_macros(std::string const &compiler)
-    -> std::pair<std::unordered_map<std::string, pp::Macro>,
-                 std::unordered_set<std::string>> {
+    -> std::pair<pp::StringMap, pp::StringSet> {
   if (auto macros = predefined_macros_cache.find(compiler);
       macros != predefined_macros_cache.end()) {
     return macros->second;
@@ -1285,8 +1285,8 @@ auto Module::append_predefined_macros(std::string const &compiler)
     }
   } break;
   default: { // in parent proc
-    auto macros = std::unordered_map<std::string, pp::Macro>();
-    auto def_macros = std::unordered_set<std::string>();
+    auto macros = pp::StringMap();
+    auto def_macros = pp::StringSet();
 
     close(write_pipe);
     auto *read_me =

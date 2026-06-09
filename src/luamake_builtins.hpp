@@ -318,8 +318,7 @@ struct Module final {
    */
   [[nodiscard]]
   auto append_predefined_macros(std::string const &)
-      -> std::pair<std::unordered_map<std::string, pp::Macro>,
-                   std::unordered_set<std::string>>;
+      -> std::pair<pp::StringMap, pp::StringSet>;
 
   // TODO: update these to return FixedString
   auto format_includes() const -> std::string;

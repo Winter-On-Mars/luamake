@@ -7,7 +7,9 @@
 // fast, so hopefully it will be, something worth trying
 
 #include <filesystem>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -20,9 +22,25 @@ namespace luamake {
 namespace pp {
 using Macro = std::string;
 
+// [[https://stackoverflow.com/questions/34596768/stdunordered-mapfind-using-a-type-different-than-the-key-type/53530846#53530846]]
+struct StringHasher final {
+  using hash_type = std::hash<std::string_view>;
+  using is_transparent = void;
+  inline auto operator()(std::string_view const sv) const -> size_t {
+    return hash_type{}(sv);
+  }
+  inline auto operator()(std::string const &s) const -> size_t {
+    return hash_type{}(s);
+  }
+};
+
+using StringMap =
+    std::unordered_map<std::string, Macro, StringHasher, std::equal_to<>>;
+using StringSet =
+    std::unordered_set<std::string, StringHasher, std::equal_to<>>;
+
 struct Interpreter final {
-  Interpreter(std::unordered_map<std::string, Macro> &&macros,
-              std::unordered_set<std::string> &&def_macros) noexcept
+  Interpreter(StringMap &&macros, StringSet &&def_macros) noexcept
       : macros(macros), def_macros(def_macros) {}
 
   Interpreter() noexcept = default;
@@ -43,8 +61,8 @@ struct Interpreter final {
 #endif // DEBUG_CPP
 
 private:
-  std::unordered_map<std::string, Macro> macros;
-  std::unordered_set<std::string> def_macros;
+  StringMap macros;
+  StringSet def_macros;
 };
 } // namespace pp
 } // namespace luamake
