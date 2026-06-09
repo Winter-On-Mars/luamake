@@ -1233,20 +1233,6 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
     _else,
     endif,
   } cur = FoundEnd::none;
-  auto const determine_state = [this](auto const cur_t) {
-    switch (types[cur_t]) {
-    case ir_t::ELSE:
-      return FoundEnd::_else;
-    case ir_t::ENDIF:
-      return FoundEnd::endif;
-    case ir_t::ELIF:
-      return FoundEnd::elif;
-    default:
-      throw std::runtime_error(std::format(
-          "Unexpected token [{}], found after parsing #else directive",
-          to_string(types[cur_t])));
-    }
-  };
   while (cur == FoundEnd::none && cur_t < types.size()) {
     switch (types[cur_t]) {
     case ir_t::IF:
@@ -1293,6 +1279,20 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
         std::format("Unterminated #ifdef directive found"));
   }
 
+  auto const determine_state = [this](auto const cur_t) {
+    switch (types[cur_t]) {
+    case ir_t::ELSE:
+      return FoundEnd::_else;
+    case ir_t::ENDIF:
+      return FoundEnd::endif;
+    case ir_t::ELIF:
+      return FoundEnd::elif;
+    default:
+      throw std::runtime_error(std::format(
+          "Unexpected token [{}], found after parsing #else directive",
+          to_string(types[cur_t])));
+    }
+  };
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
@@ -1347,20 +1347,6 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
     _else,
     endif,
   } cur = FoundEnd::none;
-  auto const determine_state = [this](auto const cur_t) {
-    switch (types[cur_t]) {
-    case ir_t::ELSE:
-      return FoundEnd::_else;
-    case ir_t::ENDIF:
-      return FoundEnd::endif;
-    case ir_t::ELIF:
-      return FoundEnd::elif;
-    default:
-      throw std::runtime_error(std::format(
-          "Unexpected token [{}], found after parsing #else directive",
-          to_string(types[cur_t])));
-    }
-  };
   while (cur == FoundEnd::none && cur_t < types.size()) {
     switch (types[cur_t]) {
     case ir_t::IF:
@@ -1407,6 +1393,20 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
         std::format("Unterminated #ifdef directive found"));
   }
 
+  auto const determine_state = [this](auto const cur_t) {
+    switch (types[cur_t]) {
+    case ir_t::ELSE:
+      return FoundEnd::_else;
+    case ir_t::ENDIF:
+      return FoundEnd::endif;
+    case ir_t::ELIF:
+      return FoundEnd::elif;
+    default:
+      throw std::runtime_error(std::format(
+          "Unexpected token [{}], found after parsing #else directive",
+          to_string(types[cur_t])));
+    }
+  };
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
@@ -1507,6 +1507,20 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
         std::format("Unterminated #ifndef directive found"));
   }
 
+  auto const determine_state = [this](auto const cur_t) {
+    switch (types[cur_t]) {
+    case ir_t::ELSE:
+      return FoundEnd::_else;
+    case ir_t::ENDIF:
+      return FoundEnd::endif;
+    case ir_t::ELIF:
+      return FoundEnd::elif;
+    default:
+      throw std::runtime_error(std::format(
+          "Unexpected token [{}], found after parsing #else directive",
+          to_string(types[cur_t])));
+    }
+  };
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
@@ -1519,6 +1533,7 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
              (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
         elif_branches.push_back(handle_elif(cur_t, cur_lex));
       }
+      cur = determine_state(cur_t);
       break;
     case FoundEnd::_else:
       if (else_branch != nullptr) {
@@ -1527,6 +1542,7 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
             "#ifndef directive");
       }
       else_branch = handle_else(cur_t, cur_lex);
+      cur = determine_state(cur_t);
       break;
     case FoundEnd::endif:
       ++cur_t;
@@ -1534,7 +1550,6 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
       break;
     case FoundEnd::none:
       unreachable();
-      break;
     }
   }
 
