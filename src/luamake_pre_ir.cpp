@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <format>
 #include <functional>
 #include <initializer_list>
@@ -42,6 +43,8 @@ concept any_of = (std::is_same_v<T, Values> || ...);
 // components instead of the 3 currently, a change to this would require a
 // complete rearchitecure of the code, and i'm too fucking exhaused to do that
 // rn, so i'll get to it in a later commit
+
+// TODO: arena allocate this so that we can just stop worring about memory
 
 namespace luamake {
 namespace pp {
@@ -240,8 +243,10 @@ struct ExprNode final {
   struct CharLit final {
     std::string_view str;
   };
+  // NOTE: the ExprNode holds onto the pointers, which are valid, and returns
+  // references to be used
   struct Grouping final {
-    std::unique_ptr<ExprNode> expr;
+    ExprNode *expr;
   };
   struct Binary final {
     enum class Binary_t : u32 {
@@ -258,12 +263,12 @@ struct ExprNode final {
       AND,
       OR
     };
-    std::unique_ptr<ExprNode> lhs;
-    std::unique_ptr<ExprNode> rhs;
+    ExprNode *lhs;
+    ExprNode *rhs;
   };
   struct Unary final {
     enum class Unary_t : u32 { BANG, MINUS };
-    std::unique_ptr<ExprNode> un;
+    ExprNode *un;
   };
   enum class Expr_t : u32 {
     INT,
@@ -1887,8 +1892,7 @@ ExprNode::ExprNode(ExprNode::CharLit &&lit) noexcept {
 ExprNode::ExprNode(ExprNode::Grouping &&group) noexcept {
   std::memset(storage, 0, STORAGE_SIZE);
   new (storage) Expr_t(Expr_t::GROUPING);
-  new (storage + sizeof(size_t))
-      std::unique_ptr<ExprNode>(std::move(group.expr));
+  new (storage + sizeof(size_t)) ExprNode *(group.expr);
 }
 
 ExprNode::ExprNode(ExprNode::Binary::Binary_t bin_t,
@@ -1896,9 +1900,8 @@ ExprNode::ExprNode(ExprNode::Binary::Binary_t bin_t,
   std::memset(storage, 0, STORAGE_SIZE);
   new (storage) Expr_t(Expr_t::BINARY);
   new (storage + sizeof(Expr_t)) Binary::Binary_t(bin_t);
-  new (storage + sizeof(size_t)) std::unique_ptr<ExprNode>(std::move(bin.lhs));
-  new (storage + 2 * sizeof(size_t))
-      std::unique_ptr<ExprNode>(std::move(bin.rhs));
+  new (storage + sizeof(size_t)) ExprNode *(bin.lhs);
+  new (storage + 2 * sizeof(size_t)) ExprNode *(bin.rhs);
 }
 
 ExprNode::ExprNode(ExprNode::Unary::Unary_t un_t,
@@ -1906,17 +1909,47 @@ ExprNode::ExprNode(ExprNode::Unary::Unary_t un_t,
   std::memset(storage, 0, STORAGE_SIZE);
   new (storage) Expr_t(Expr_t::UNARY);
   new (storage + sizeof(Expr_t)) Unary::Unary_t(un_t);
-  new (storage + sizeof(size_t)) std::unique_ptr<ExprNode>(std::move(un.un));
+  new (storage + sizeof(size_t)) ExprNode *(un.un);
 }
 
 ExprNode::~ExprNode() noexcept {
+  // have to manually call the dtor because we placement new them
   switch (expr_t()) {
   case Expr_t::DEFINED:
-  case Expr_t::CHARLIT:
-  case Expr_t::GROUPING:
-  case Expr_t::BINARY:
-  case Expr_t::UNARY:
-    break;
+    [[fallthrough]];
+  case Expr_t::CHARLIT: {
+    if (storage[sizeof(Expr_t)] == 0xbe) {
+      // small string, all on the stack, nothing to do
+    } else if (storage[sizeof(Expr_t)] == 0xff) {
+      auto *buffer = reinterpret_cast<char *>(storage + 2 * sizeof(size_t));
+      // we call this with new[] in the ctor, it's just nested in the placement
+      // new call
+      delete[] buffer;
+    } else {
+      std::cerr << "Memory corruption with the storage buffer";
+      std::terminate();
+    }
+  } break;
+  case Expr_t::GROUPING: {
+    auto *grp = reinterpret_cast<ExprNode *>(storage + sizeof(size_t));
+    grp->~ExprNode();
+    // is currently allocated with a new expression, will need to change this
+    // when that changes
+    delete grp;
+  } break;
+  case Expr_t::BINARY: {
+    auto *lhs = reinterpret_cast<ExprNode *>(storage + sizeof(size_t));
+    auto *rhs = reinterpret_cast<ExprNode *>(storage + 2 * sizeof(size_t));
+    lhs->~ExprNode();
+    rhs->~ExprNode();
+    delete lhs;
+    delete rhs;
+  } break;
+  case Expr_t::UNARY: {
+    auto *un = reinterpret_cast<ExprNode *>(storage + sizeof(size_t));
+    un->~ExprNode();
+    delete un;
+  } break;
   case Expr_t::INT:
     [[fallthrough]];
   case Expr_t::NUMBER:
@@ -1999,7 +2032,7 @@ auto operator<<(std::ostream &out, ExprNode const &en) noexcept
       out << '|' << '|';
       break;
     }
-    out << *bin.lhs << ' ' << *bin.rhs;
+    out << bin.lhs << ' ' << bin.rhs;
   } break;
   case ExprNode::Expr_t::UNARY: {
     auto const &un = en.to<ExprNode::Unary>();
@@ -2011,7 +2044,7 @@ auto operator<<(std::ostream &out, ExprNode const &en) noexcept
       out << '-';
       break;
     }
-    out << *un.un;
+    out << un.un;
   } break;
   case ExprNode::Expr_t::NONE:
     break;
@@ -2153,8 +2186,7 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
                       "expected a ')' to wrap the expression"));
     }
     ++cur_t;
-    return ExprNode(
-        ExprNode::Grouping{std::make_unique<ExprNode>(std::move(res))});
+    return ExprNode(ExprNode::Grouping{new ExprNode(std::move(res))});
   } break;
   case DEFINED: {
     ++cur_t;
@@ -2550,9 +2582,8 @@ auto Expressions::make_binary(Expressions::expr_t tkn, ExprNode &&lhs,
       unreachable();
     }
   }(tkn);
-  return ExprNode(bin_t,
-                  ExprNode::Binary(std::make_unique<ExprNode>(std::move(lhs)),
-                                   std::make_unique<ExprNode>(std::move(rhs))));
+  return ExprNode(bin_t, ExprNode::Binary(new ExprNode(std::move(lhs)),
+                                          new ExprNode(std::move(rhs))));
 }
 
 auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
@@ -2567,8 +2598,7 @@ auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
       unreachable();
     }
   }(tkn);
-  return ExprNode(un_t,
-                  ExprNode::Unary(std::make_unique<ExprNode>(std::move(un))));
+  return ExprNode(un_t, ExprNode::Unary(new ExprNode(std::move(un))));
 }
 
 auto Expressions::make_integer(Expressions::expr_t tkn,
