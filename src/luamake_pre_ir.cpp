@@ -1,5 +1,6 @@
 #include "luamake_pre_ir.hpp"
 #include "common.hpp"
+#include "luamake_allocator.hpp"
 #include "luamake_string_manip.hpp"
 #include "luamake_strings.hpp"
 
@@ -25,8 +26,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#define DEBUG_CPP
 
 namespace fs = std::filesystem;
 
@@ -371,8 +370,8 @@ struct ExprNode final {
    * @throws std::runtime_error
    * (if a float is found)
    */
-  static auto eval(std::string_view const, StringMap const &macros,
-                   StringSet const &def_macros) -> int;
+  static auto eval(std::string_view const, allocator::Page &,
+                   StringMap const &macros, StringSet const &def_macros) -> int;
 
   friend auto operator<<(std::ostream &, ExprNode const &) noexcept
       -> std::ostream &;
@@ -624,158 +623,154 @@ struct Ast final {
   auto accept(AstVisitor &) const -> void;
 };
 
-struct Expressions final {
-  enum class expr_t {
-    LPAREN,
-    RPAREN,
-    // TODO: add other operators
-    AND,
-    OR,
-    BIT_AND,
-    BIT_OR,
-    DEFINED,
-    LESS,
-    LESS_EQ,
-    GREATER,
-    GREATER_EQ,
-    STRINGIZING,
-    CONCAT,
-    PLUS,
-    MINUS,
-    STAR,
-    SLASH,
-    BANG_EQ,
-    EQ,
-    EQ_EQ,
-    BANG,
-    // values
-    LIT_CHAR,
-    LIT_DEC,
-    LIT_HEX,
-    LIT_OCT,
-    LIT_BIN,
-    LIT_FLOAT,
-    MACRO,
-  };
-  using enum expr_t;
+namespace Expressions {
+enum class expr_t {
+  LPAREN,
+  RPAREN,
+  // TODO: add other operators
+  AND,
+  OR,
+  BIT_AND,
+  BIT_OR,
+  DEFINED,
+  LESS,
+  LESS_EQ,
+  GREATER,
+  GREATER_EQ,
+  STRINGIZING,
+  CONCAT,
+  PLUS,
+  MINUS,
+  STAR,
+  SLASH,
+  BANG_EQ,
+  EQ,
+  EQ_EQ,
+  BANG,
+  // values
+  LIT_CHAR,
+  LIT_DEC,
+  LIT_HEX,
+  LIT_OCT,
+  LIT_BIN,
+  LIT_FLOAT,
+  MACRO,
+};
 
-  static auto constexpr to_string(expr_t t) noexcept -> std::string_view {
-    switch (t) {
-    case LPAREN:
-      return std::string_view{"LPAREN"};
-    case RPAREN:
-      return std::string_view{"RPAREN"};
-    case AND:
-      return std::string_view{"AND"};
-    case OR:
-      return std::string_view{"OR"};
-    case BIT_AND:
-      return std::string_view{"BIT_AND"};
-    case BIT_OR:
-      return std::string_view{"BIT_OR"};
-    case DEFINED:
-      return std::string_view{"DEFINED"};
-    case LESS:
-      return std::string_view{"LESS"};
-    case LESS_EQ:
-      return std::string_view{"LESS_EQ"};
-    case GREATER:
-      return std::string_view{"GREATER"};
-    case GREATER_EQ:
-      return std::string_view{"GREATER_EQ"};
-    case STRINGIZING:
-      return std::string_view{"STRINGIZING"};
-    case CONCAT:
-      return std::string_view{"CONCAT"};
-    case PLUS:
-      return std::string_view{"PLUS"};
-    case MINUS:
-      return std::string_view{"MINUS"};
-    case STAR:
-      return std::string_view{"STAR"};
-    case SLASH:
-      return std::string_view{"SLASH"};
-    case BANG_EQ:
-      return std::string_view{"BANG_EQ"};
-    case EQ:
-      return std::string_view{"EQ"};
-    case EQ_EQ:
-      return std::string_view{"EQ_EQ"};
-    case BANG:
-      return std::string_view{"BANG"};
-    case LIT_CHAR:
-      return std::string_view{"LIT_CHAR"};
-    case LIT_DEC:
-      return std::string_view{"LIT_DEC"};
-    case LIT_HEX:
-      return std::string_view{"LIT_HEX"};
-    case LIT_OCT:
-      return std::string_view{"LIT_OCT"};
-    case LIT_BIN:
-      return std::string_view{"LIT_BIN"};
-    case LIT_FLOAT:
-      return std::string_view{"LIT_FLOAT"};
-    case MACRO:
-      return std::string_view{"MACRO"};
+auto constexpr to_string(expr_t t) noexcept -> std::string_view {
+  switch (t) {
+  case expr_t::LPAREN:
+    return std::string_view{"LPAREN"};
+  case expr_t::RPAREN:
+    return std::string_view{"RPAREN"};
+  case expr_t::AND:
+    return std::string_view{"AND"};
+  case expr_t::OR:
+    return std::string_view{"OR"};
+  case expr_t::BIT_AND:
+    return std::string_view{"BIT_AND"};
+  case expr_t::BIT_OR:
+    return std::string_view{"BIT_OR"};
+  case expr_t::DEFINED:
+    return std::string_view{"DEFINED"};
+  case expr_t::LESS:
+    return std::string_view{"LESS"};
+  case expr_t::LESS_EQ:
+    return std::string_view{"LESS_EQ"};
+  case expr_t::GREATER:
+    return std::string_view{"GREATER"};
+  case expr_t::GREATER_EQ:
+    return std::string_view{"GREATER_EQ"};
+  case expr_t::STRINGIZING:
+    return std::string_view{"STRINGIZING"};
+  case expr_t::CONCAT:
+    return std::string_view{"CONCAT"};
+  case expr_t::PLUS:
+    return std::string_view{"PLUS"};
+  case expr_t::MINUS:
+    return std::string_view{"MINUS"};
+  case expr_t::STAR:
+    return std::string_view{"STAR"};
+  case expr_t::SLASH:
+    return std::string_view{"SLASH"};
+  case expr_t::BANG_EQ:
+    return std::string_view{"BANG_EQ"};
+  case expr_t::EQ:
+    return std::string_view{"EQ"};
+  case expr_t::EQ_EQ:
+    return std::string_view{"EQ_EQ"};
+  case expr_t::BANG:
+    return std::string_view{"BANG"};
+  case expr_t::LIT_CHAR:
+    return std::string_view{"LIT_CHAR"};
+  case expr_t::LIT_DEC:
+    return std::string_view{"LIT_DEC"};
+  case expr_t::LIT_HEX:
+    return std::string_view{"LIT_HEX"};
+  case expr_t::LIT_OCT:
+    return std::string_view{"LIT_OCT"};
+  case expr_t::LIT_BIN:
+    return std::string_view{"LIT_BIN"};
+  case expr_t::LIT_FLOAT:
+    return std::string_view{"LIT_FLOAT"};
+  case expr_t::MACRO:
+    return std::string_view{"MACRO"};
+  }
+  unreachable();
+}
+
+struct ExprLexer final {
+  std::vector<expr_t> tkns;
+  std::vector<std::string> macros;
+  auto to_ast(allocator::Page &) const -> ExprNode;
+
+  auto constexpr matching(expr_t tkn, std::initializer_list<expr_t> &&matches)
+      const noexcept -> bool {
+    for (auto &&t : matches) {
+      if (tkn == t) {
+        return true;
+      }
     }
-    unreachable();
+    return false;
   }
 
-  struct ExprLexer final {
-    std::vector<expr_t> tkns;
-    std::vector<std::string> macros;
-    auto to_ast() const -> ExprNode;
+  auto expression(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto _or(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto _and(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto equality(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto comparison(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto term(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto factor(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto unary(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto primary(allocator::Page &, size_t &, size_t &) const -> ExprNode;
 
-    auto constexpr matching(expr_t tkn, std::initializer_list<expr_t> &&matches)
-        const noexcept -> bool {
-      for (auto &&t : matches) {
-        if (tkn == t) {
-          return true;
-        }
-      }
-      return false;
+  auto expect(size_t cur_t, expr_t &&tkn) const -> void {
+    if (tkns[cur_t] != tkn) {
+      throw std::runtime_error(
+          std::format("Unexpected token, expected {}, found {}", to_string(tkn),
+                      to_string(tkns[cur_t])));
     }
-
-    auto expression(size_t &, size_t &) const -> ExprNode;
-    auto _or(size_t &, size_t &) const -> ExprNode;
-    auto _and(size_t &, size_t &) const -> ExprNode;
-    auto equality(size_t &, size_t &) const -> ExprNode;
-    auto comparison(size_t &, size_t &) const -> ExprNode;
-    auto term(size_t &, size_t &) const -> ExprNode;
-    auto factor(size_t &, size_t &) const -> ExprNode;
-    auto unary(size_t &, size_t &) const -> ExprNode;
-    auto primary(size_t &, size_t &) const -> ExprNode;
-
-    auto expect(size_t cur_t, expr_t &&tkn) const -> void {
-      if (tkns[cur_t] != tkn) {
-        throw std::runtime_error(
-            std::format("Unexpected token, expected {}, found {}",
-                        to_string(tkn), to_string(tkns[cur_t])));
-      }
-    }
+  }
 #ifdef DEBUG_CPP
-    auto display(std::ostream &) const noexcept -> std::ostream &;
+  auto display(std::ostream &) const noexcept -> std::ostream &;
 #endif // DEBUG_CPP
-  };
-
-  // TODO: maybe compress these into one function(?)
-  static auto lex(std::string_view const) -> ExprLexer;
-  static auto lex_integer(std::string_view const, size_t &,
-                          std::vector<expr_t> &, std::vector<std::string> &)
-      -> void;
-  static auto expand(ExprLexer const &, StringMap const &, StringSet const &)
-      -> ExprLexer;
-  static auto expand_macro(std::string const &, StringMap const &,
-                           StringSet const &) noexcept -> ExprLexer;
-
-  static auto eval_impl(ExprNode const &, StringMap const &, StringSet const &)
-      -> int;
-
-  static auto make_binary(expr_t, ExprNode &&, ExprNode &&) noexcept
-      -> ExprNode;
-  static auto make_unary(expr_t, ExprNode &&) noexcept -> ExprNode;
-  static auto make_integer(expr_t, std::string_view) noexcept -> ExprNode;
 };
+
+auto lex(std::string_view const) -> ExprLexer;
+auto lex_integer(std::string_view const, size_t &, std::vector<expr_t> &,
+                 std::vector<std::string> &) -> void;
+auto expand(ExprLexer const &, StringMap const &, StringSet const &)
+    -> ExprLexer;
+auto expand_macro(std::string const &, StringMap const &,
+                  StringSet const &) noexcept -> ExprLexer;
+
+auto eval_impl(ExprNode const &, StringMap const &, StringSet const &) -> int;
+
+auto make_binary(allocator::Page &, expr_t, ExprNode &&, ExprNode &&) noexcept
+    -> ExprNode;
+auto make_unary(allocator::Page &, expr_t, ExprNode &&) noexcept -> ExprNode;
+auto make_integer(expr_t, std::string_view) noexcept -> ExprNode;
+}; // namespace Expressions
 
 auto constexpr ExprNode::to_string(Expr_t t) noexcept -> std::string_view {
   switch (t) {
@@ -885,13 +880,19 @@ struct AstPrinter final : AstVisitor {
 
 // TODO: rewrite this implimentation so that the vector of paths is just
 // returned instead of being a part of this struct
+// TODO: expose this so that it can be initialized outside of this file, and we
+// can then just hold onto it, allowing us to avoid reinitializing the arena for
+// every file
 struct AstIncluder final : AstVisitor {
   std::vector<fs::path> &paths;
   StringMap &macros;
   StringSet &def_macros;
+
+  allocator::Page alloc;
+
   AstIncluder(std::vector<fs::path> &paths, StringMap &macros,
               StringSet &def_macros) noexcept
-      : paths(paths), macros(macros), def_macros(def_macros) {}
+      : paths(paths), macros(macros), def_macros(def_macros), alloc() {}
 
   auto get_includes(Ast &ast) -> void {
     for (auto &&node : ast.nodes) {
@@ -2041,8 +2042,9 @@ auto ExprNode::expr_t() const noexcept -> ExprNode::Expr_t {
   return expr_t;
 }
 
-auto ExprNode::eval(std::string_view const expr, StringMap const &macros,
-                    StringSet const &def_macros) -> int {
+auto ExprNode::eval(std::string_view const expr, allocator::Page &page,
+                    StringMap const &macros, StringSet const &def_macros)
+    -> int {
   auto const expr_lex = Expressions::lex(expr);
   auto const expansion = Expressions::expand(expr_lex, macros, def_macros);
   // TODO: report if the expansion is empty, i.e. if you have a case like
@@ -2052,7 +2054,7 @@ auto ExprNode::eval(std::string_view const expr, StringMap const &macros,
   // #endif
   // ```
   // in that case, this becomes a malformed program
-  auto const ast = expansion.to_ast();
+  auto const ast = expansion.to_ast(page);
 #ifdef DEBUG_CPP
   ast.display(std::cout) << std::endl;
 #endif // DEBUG_CPP
@@ -2250,138 +2252,145 @@ auto operator<<(std::ostream &out, ExprNode const &en) noexcept
 
 Ast::Ast() { nodes.reserve(20); }
 
-auto Expressions::ExprLexer::to_ast() const -> ExprNode {
+auto Expressions::ExprLexer::to_ast(allocator::Page &page) const -> ExprNode {
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
-  return expression(cur_t, cur_lex);
+  return expression(page, cur_t, cur_lex);
 }
 
-auto Expressions::ExprLexer::expression(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  return _or(cur_t, cur_lex);
+auto Expressions::ExprLexer::expression(allocator::Page &page, size_t &cur_t,
+                                        size_t &cur_lex) const -> ExprNode {
+  return _or(page, cur_t, cur_lex);
 }
 
-auto Expressions::ExprLexer::_or(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = _and(cur_t, cur_lex);
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {OR})) {
+auto Expressions::ExprLexer::_or(allocator::Page &page, size_t &cur_t,
+                                 size_t &cur_lex) const -> ExprNode {
+  auto lhs = _and(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {expr_t::OR})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = _and(cur_t, cur_lex);
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = _and(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
   return lhs;
 }
 
-auto Expressions::ExprLexer::_and(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = equality(cur_t, cur_lex);
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {AND})) {
+auto Expressions::ExprLexer::_and(allocator::Page &page, size_t &cur_t,
+                                  size_t &cur_lex) const -> ExprNode {
+  auto lhs = equality(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {expr_t::AND})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = equality(cur_t, cur_lex);
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = equality(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
   return lhs;
 }
 
-auto Expressions::ExprLexer::equality(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = comparison(cur_t, cur_lex);
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {BANG_EQ, EQ_EQ})) {
-    auto const tkn = tkns[cur_t++];
-    auto rhs = comparison(cur_t, cur_lex);
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
-  }
-  return lhs;
-}
-
-auto Expressions::ExprLexer::comparison(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = term(cur_t, cur_lex);
+auto Expressions::ExprLexer::equality(allocator::Page &page, size_t &cur_t,
+                                      size_t &cur_lex) const -> ExprNode {
+  auto lhs = comparison(page, cur_t, cur_lex);
   while (cur_t < tkns.size() &&
-         matching(tkns[cur_t], {LESS, LESS_EQ, GREATER, GREATER_EQ})) {
+         matching(tkns[cur_t], {expr_t::BANG_EQ, expr_t::EQ_EQ})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = term(cur_t, cur_lex);
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = comparison(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
   return lhs;
 }
 
-auto Expressions::ExprLexer::term(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = factor(cur_t, cur_lex);
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {PLUS, MINUS})) {
+auto Expressions::ExprLexer::comparison(allocator::Page &page, size_t &cur_t,
+                                        size_t &cur_lex) const -> ExprNode {
+  auto lhs = term(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {expr_t::LESS, expr_t::LESS_EQ, expr_t::GREATER,
+                                expr_t::GREATER_EQ})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = factor(cur_t, cur_lex);
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = term(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
   return lhs;
 }
 
-auto Expressions::ExprLexer::factor(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = unary(cur_t, cur_lex);
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {STAR, SLASH})) {
+auto Expressions::ExprLexer::term(allocator::Page &page, size_t &cur_t,
+                                  size_t &cur_lex) const -> ExprNode {
+  auto lhs = factor(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {expr_t::PLUS, expr_t::MINUS})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = unary(cur_t, cur_lex);
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = factor(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
   return lhs;
 }
 
-auto Expressions::ExprLexer::unary(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  if (cur_t < tkns.size() && matching(tkns[cur_t], {BANG, MINUS})) {
+auto Expressions::ExprLexer::factor(allocator::Page &page, size_t &cur_t,
+                                    size_t &cur_lex) const -> ExprNode {
+  auto lhs = unary(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {expr_t::STAR, expr_t::SLASH})) {
     auto const tkn = tkns[cur_t++];
-    auto un = unary(cur_t, cur_lex);
-    return make_unary(tkn, std::move(un));
+    auto rhs = unary(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
-  return primary(cur_t, cur_lex);
+  return lhs;
 }
 
-auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
+auto Expressions::ExprLexer::unary(allocator::Page &page, size_t &cur_t,
+                                   size_t &cur_lex) const -> ExprNode {
+  if (cur_t < tkns.size() &&
+      matching(tkns[cur_t], {expr_t::BANG, expr_t::MINUS})) {
+    auto const tkn = tkns[cur_t++];
+    auto un = unary(page, cur_t, cur_lex);
+    return make_unary(page, tkn, std::move(un));
+  }
+  return primary(page, cur_t, cur_lex);
+}
+
+auto Expressions::ExprLexer::primary(allocator::Page &page, size_t &cur_t,
+                                     size_t &cur_lex) const -> ExprNode {
   // TODO
   switch (tkns[cur_t]) {
-  case MACRO:
+  case expr_t::MACRO:
     break;
-  case LIT_CHAR:
+  case expr_t::LIT_CHAR:
     break;
-  case LIT_DEC:
+  case expr_t::LIT_DEC:
     ++cur_t;
     return make_integer(expr_t::LIT_DEC, macros[cur_lex++]);
-  case LIT_HEX:
+  case expr_t::LIT_HEX:
     ++cur_t;
     return make_integer(expr_t::LIT_HEX, macros[cur_lex++]);
     break;
-  case LIT_OCT:
+  case expr_t::LIT_OCT:
     break;
-  case LIT_BIN:
+  case expr_t::LIT_BIN:
     break;
-  case LIT_FLOAT:
+  case expr_t::LIT_FLOAT:
     break;
-  case LPAREN: {
+  case expr_t::LPAREN: {
     ++cur_t;
-    auto res = expression(cur_t, cur_lex);
-    if (tkns[cur_t] != RPAREN) {
+    auto res = expression(page, cur_t, cur_lex);
+    if (tkns[cur_t] != expr_t::RPAREN) {
       throw std::runtime_error(
           std::format("While parsing a grouping expression, "
                       "expected a ')' to wrap the expression"));
     }
     ++cur_t;
-    return ExprNode::from(ExprNode::Grouping{new ExprNode(std::move(res))});
+    auto *expr_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
+    *expr_ptr = std::move(res);
+    return ExprNode::from(ExprNode::Grouping{expr_ptr});
   } break;
-  case DEFINED: {
+  case expr_t::DEFINED: {
     ++cur_t;
     auto lex = std::string();
-    if (tkns[cur_t] == LPAREN) {
+    if (tkns[cur_t] == expr_t::LPAREN) {
       ++cur_t;
-      expect(cur_t, MACRO);
+      expect(cur_t, expr_t::MACRO);
       ++cur_t;
       lex = macros[cur_lex++];
-      expect(cur_t, RPAREN);
+      expect(cur_t, expr_t::RPAREN);
       ++cur_t;
     } else {
-      expect(cur_t, MACRO);
+      expect(cur_t, expr_t::MACRO);
       ++cur_t;
       lex = macros[cur_lex++];
     }
@@ -2425,78 +2434,78 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
     // smaller
     switch (auto ch = str[i]) {
     case '+':
-      tkns.push_back(PLUS);
+      tkns.push_back(expr_t::PLUS);
       ++i;
       break;
     case '(':
-      tkns.push_back(LPAREN);
+      tkns.push_back(expr_t::LPAREN);
       ++i;
       break;
     case ')':
-      tkns.push_back(RPAREN);
+      tkns.push_back(expr_t::RPAREN);
       ++i;
       break;
     case '|': {
       ++i;
       if (i < str.size() && str[i] == '|') {
         ++i;
-        tkns.push_back(OR);
+        tkns.push_back(expr_t::OR);
       } else {
-        tkns.push_back(BIT_OR);
+        tkns.push_back(expr_t::BIT_OR);
       }
     } break;
     case '&': {
       ++i;
       if (i < str.size() && str[i] == '&') {
         ++i;
-        tkns.push_back(AND);
+        tkns.push_back(expr_t::AND);
       } else {
-        tkns.push_back(BIT_AND);
+        tkns.push_back(expr_t::BIT_AND);
       }
     } break;
     case '=': {
       ++i;
       if (i < str.size() && str[i] == '=') {
         ++i;
-        tkns.push_back(EQ_EQ);
+        tkns.push_back(expr_t::EQ_EQ);
       } else {
-        tkns.push_back(EQ);
+        tkns.push_back(expr_t::EQ);
       }
     } break;
     case '!': {
       ++i;
       if (i < str.size() && str[i] == '=') {
         ++i;
-        tkns.push_back(BANG_EQ);
+        tkns.push_back(expr_t::BANG_EQ);
       } else {
-        tkns.push_back(BANG);
+        tkns.push_back(expr_t::BANG);
       }
     } break;
     case '<': {
       ++i;
       if (i < str.size() && str[i] == '=') {
         ++i;
-        tkns.push_back(LESS_EQ);
+        tkns.push_back(expr_t::LESS_EQ);
       } else {
-        tkns.push_back(LESS);
+        tkns.push_back(expr_t::LESS);
       }
     } break;
     case '>': {
       ++i;
       if (i < str.size() && str[i] == '=') {
         ++i;
-        tkns.push_back(GREATER_EQ);
+        tkns.push_back(expr_t::GREATER_EQ);
       } else {
-        tkns.push_back(GREATER);
+        tkns.push_back(expr_t::GREATER);
       }
     } break;
     case '#': {
       ++i;
       if (i < str.size() && str[i] == '#') {
         ++i;
-        tkns.push_back(STRINGIZING);
+        tkns.push_back(expr_t::STRINGIZING);
       } else {
-        tkns.push_back(CONCAT);
+        tkns.push_back(expr_t::CONCAT);
       }
     } break;
     case '.':
@@ -2509,11 +2518,11 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
           strncmp(str.data() + i, defined_str.data(), defined_str.size()) ==
               0) {
         i += defined_str.size();
-        tkns.push_back(DEFINED);
+        tkns.push_back(expr_t::DEFINED);
       } else {
         auto const start = i;
         i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
-        tkns.push_back(MACRO);
+        tkns.push_back(expr_t::MACRO);
         macros.push_back(std::string(str.data() + start, str.data() + i));
       }
     } break;
@@ -2529,7 +2538,7 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
       } else {
         auto const start = i;
         i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
-        tkns.push_back(MACRO);
+        tkns.push_back(expr_t::MACRO);
         macros.push_back(std::string(str.data() + start, str.data() + i));
       }
     }
@@ -2547,7 +2556,7 @@ auto Expressions::lex_integer(std::string_view const str, size_t &i,
   if (str[i] != '0') {
     auto const start = i;
     i = luamake::skip_while(delims_at(delims::ALLOWED_DECIMAL), str, i);
-    tkns.push_back(LIT_DEC);
+    tkns.push_back(expr_t::LIT_DEC);
     macros.push_back(std::string(str.data() + start, str.data() + i));
     // NOTE: we technically need to worry about the order of things, for
     // instance, we allow code that looks like zlu, which isn't an allowed
@@ -2558,7 +2567,7 @@ auto Expressions::lex_integer(std::string_view const str, size_t &i,
   // str[i] == 0
   ++i;
   if (!(i < str.size())) {
-    tkns.push_back(LIT_DEC);
+    tkns.push_back(expr_t::LIT_DEC);
     macros.push_back(std::string(1, '0'));
     return;
   }
@@ -2651,13 +2660,13 @@ auto Expressions::lex_integer(std::string_view const str, size_t &i,
   tkns.push_back([](int_type int_t) {
     switch (int_t) {
     case int_type::DECIMAL:
-      return LIT_DEC;
+      return expr_t::LIT_DEC;
     case int_type::BINARY:
-      return LIT_BIN;
+      return expr_t::LIT_BIN;
     case int_type::OCTAL:
-      return LIT_OCT;
+      return expr_t::LIT_OCT;
     case int_type::HEX:
-      return LIT_HEX;
+      return expr_t::LIT_HEX;
     }
     unreachable();
   }(int_t));
@@ -2732,56 +2741,61 @@ auto Expressions::eval_impl(ExprNode const &e, StringMap const &macros,
   unreachable();
 }
 
-auto Expressions::make_binary(Expressions::expr_t tkn, ExprNode &&lhs,
-                              ExprNode &&rhs) noexcept -> ExprNode {
+auto Expressions::make_binary(allocator::Page &page, Expressions::expr_t tkn,
+                              ExprNode &&lhs, ExprNode &&rhs) noexcept
+    -> ExprNode {
   auto bin_t = [](expr_t tkn) {
     switch (tkn) {
-    case PLUS:
+    case expr_t::PLUS:
       return ExprNode::Binary::Binary_t::PLUS;
-    case MINUS:
+    case expr_t::MINUS:
       return ExprNode::Binary::Binary_t::MINUS;
-    case SLASH:
+    case expr_t::SLASH:
       return ExprNode::Binary::Binary_t::DIVIDE;
-    case STAR:
+    case expr_t::STAR:
       return ExprNode::Binary::Binary_t::TIMES;
-    case GREATER:
+    case expr_t::GREATER:
       return ExprNode::Binary::Binary_t::GREATER;
-    case GREATER_EQ:
+    case expr_t::GREATER_EQ:
       return ExprNode::Binary::Binary_t::GREATER_EQ;
-    case LESS:
+    case expr_t::LESS:
       return ExprNode::Binary::Binary_t::LESS;
-    case LESS_EQ:
+    case expr_t::LESS_EQ:
       return ExprNode::Binary::Binary_t::LESS_EQ;
-    case BANG_EQ:
+    case expr_t::BANG_EQ:
       return ExprNode::Binary::Binary_t::NEQ;
-    case EQ_EQ:
+    case expr_t::EQ_EQ:
       return ExprNode::Binary::Binary_t::EQ;
-    case AND:
+    case expr_t::AND:
       return ExprNode::Binary::Binary_t::AND;
-    case OR:
+    case expr_t::OR:
       return ExprNode::Binary::Binary_t::OR;
     default:
       unreachable();
     }
   }(tkn);
-  auto *lhs_ptr = new ExprNode(std::move(lhs));
-  auto *rhs_ptr = new ExprNode(std::move(rhs));
+  auto *lhs_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
+  *lhs_ptr = std::move(lhs);
+  auto *rhs_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
+  *rhs_ptr = std::move(rhs);
   return ExprNode::from(bin_t, lhs_ptr, rhs_ptr);
 }
 
-auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
-    -> ExprNode {
+auto Expressions::make_unary(allocator::Page &page, Expressions::expr_t tkn,
+                             ExprNode &&un) noexcept -> ExprNode {
   auto un_t = [](expr_t tkn) {
     switch (tkn) {
-    case MINUS:
+    case expr_t::MINUS:
       return ExprNode::Unary::Unary_t::MINUS;
-    case BANG:
+    case expr_t::BANG:
       return ExprNode::Unary::Unary_t::BANG;
     default:
       unreachable();
     }
   }(tkn);
-  return ExprNode::from(un_t, new ExprNode(std::move(un)));
+  auto *un_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
+  *un_ptr = std::move(un);
+  return ExprNode::from(un_t, un_ptr);
 }
 
 auto Expressions::make_integer(Expressions::expr_t tkn,
@@ -2789,21 +2803,21 @@ auto Expressions::make_integer(Expressions::expr_t tkn,
   // TODO: idk i feel like i could do better but this is fine
   auto i = [str](expr_t tkn) -> size_t {
     switch (tkn) {
-    case LIT_DEC: {
+    case expr_t::LIT_DEC: {
       auto res = size_t{};
       sscanf(str.data(), "%zu", &res);
       return res;
     } break;
-    case LIT_HEX: {
+    case expr_t::LIT_HEX: {
       auto res = size_t{};
       sscanf(str.data(), "%zx", &res);
       return res;
     } break;
-    case LIT_CHAR:
+    case expr_t::LIT_CHAR:
       [[fallthrough]];
-    case LIT_OCT:
+    case expr_t::LIT_OCT:
       [[fallthrough]];
-    case LIT_BIN:
+    case expr_t::LIT_BIN:
       throw std::runtime_error(std::format(
           "Parsing Expr_t [{}], is not currently implimented", to_string(tkn)));
       break;
@@ -2850,9 +2864,9 @@ auto Expressions::expand(Expressions::ExprLexer const &lexer,
       ++tkn_i;
       // NOTE: we consume any parens, so that there are no parens, this is fine
       // to do by the standard, and a small optimization(?)
-      if (lexer.tkns[tkn_i] == LPAREN) {
+      if (lexer.tkns[tkn_i] == expr_t::LPAREN) {
         ++tkn_i; // LPAREN
-        tkns.push_back(MACRO);
+        tkns.push_back(expr_t::MACRO);
         ++tkn_i; // MACRO
         ++tkn_i; // RPAREN
       }
@@ -2897,7 +2911,7 @@ auto Expressions::expand_macro(std::string const &macro_to_expand,
              val != def_macros.end()) {
     // nothing to do in this case
   } else {
-    tkns.push_back(LIT_DEC);
+    tkns.push_back(expr_t::LIT_DEC);
     lexes.push_back("0");
   }
   return ExprLexer{tkns, lexes};
@@ -3010,19 +3024,24 @@ auto AstPrinter::visit_pragma(PragmaNode &p) -> void {
 #endif // DEBUG_CPP
 
 auto AstIncluder::visit_if(IfNode &i) -> void {
-  if (ExprNode::eval(i.condition, macros, def_macros) != 0) {
+  if (ExprNode::eval(i.condition, alloc, macros, def_macros) != 0) {
+    alloc.reset();
     for (auto &&thens : i.then_branch) {
       thens->accept(*this);
     }
     return;
   }
+  alloc.reset();
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
+    if (ExprNode::eval(elif->condition, alloc, macros, def_macros) != 0) {
+      alloc.reset();
       elif->accept(*this);
       return;
     }
   }
+  alloc.reset();
   if (i.else_branch != nullptr) {
+    alloc.reset();
     i.else_branch->accept(*this);
   }
 }
@@ -3035,7 +3054,8 @@ auto AstIncluder::visit_ifdef(IfDefNode &i) -> void {
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
+    if (ExprNode::eval(elif->condition, alloc, macros, def_macros) != 0) {
+      alloc.reset();
       elif->accept(*this);
       return;
     }
@@ -3053,7 +3073,8 @@ auto AstIncluder::visit_ifndef(IfNDefNode &i) -> void {
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
+    if (ExprNode::eval(elif->condition, alloc, macros, def_macros) != 0) {
+      alloc.reset();
       elif->accept(*this);
       return;
     }
