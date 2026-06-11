@@ -888,6 +888,9 @@ struct AstIncluder final : AstVisitor {
   StringMap &macros;
   StringSet &def_macros;
 
+  // TODO: move this to the gen_dep_tree function, so we can avoid the constant
+  // memory allocations, that seem to be increasing the time this takes to run
+  // by at least 5 milliseconds, usually 10 on a cold run
   allocator::Page alloc;
 
   AstIncluder(std::vector<fs::path> &paths, StringMap &macros,
