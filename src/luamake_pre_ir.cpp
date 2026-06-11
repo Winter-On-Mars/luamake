@@ -297,24 +297,28 @@ struct ExprNode final {
         new (storage.data()) Expr_t(Expr_t::CHARLIT);
       }
       if (expr.str.size() < SMALL_STRING_AMOUNT) {
+#ifdef DEBUG_CPP
         std::cout << std::format("Making small string\n\tsize={}\n",
                                  expr.str.size());
+#endif // DEBUG_CPP
         storage[sizeof(Expr_t)] = 0xbe;
         std::memcpy(storage.data() + sizeof(Expr_t) + 1, expr.str.data(),
                     expr.str.size());
       } else {
+#ifdef DEBUG_CPP
         std::cout << std::format("Making big string\n\tsize={}\n",
                                  expr.str.size());
+#endif // DEBUG_CPP
         storage[sizeof(Expr_t)] = 0xff;
         auto *size =
             new (storage.data() + sizeof(size_t)) size_t{expr.str.size()};
         // wtf am i doing
         auto *buffer_ptr =
             new (storage.data() + 2 * sizeof(size_t)) char *{new char[*size]{}};
-        expr_dbg((void *)storage.data());
-        expr_dbg((void *)(storage.data() + 2 * sizeof(size_t)));
+#ifdef DEBUG_CPP
         std::cout << std::format("memory pointing at buffer={}, *buffer={}\n",
                                  (void *)buffer_ptr, (void *)*buffer_ptr);
+#endif // DEBUG_CPP
         std::memcpy(*buffer_ptr, expr.str.data(), *size);
       }
     } else if constexpr (std::is_same_v<actual_t, Grouping>) {
@@ -418,19 +422,21 @@ struct ExprNode final {
         std::memcpy(&size, storage.data() + sizeof(size_t), sizeof(size_t));
         std::memcpy(&buffer, storage.data() + 2 * sizeof(size_t),
                     sizeof(char *));
-        expr_dbg((void *)buffer);
         return T{std::string_view{buffer, size}};
       }
     } else if constexpr (std::is_same_v<actual_t, Grouping> ||
                          std::is_same_v<actual_t, Unary>) {
-      auto ptr =
-          reinterpret_cast<ExprNode const *>(storage.data() + sizeof(size_t));
+      auto const *ptr = static_cast<ExprNode const *>(nullptr);
+      std::memcpy(&ptr, storage.data() + sizeof(size_t),
+                  sizeof(ExprNode const *));
       return T{ptr};
     } else if constexpr (std::is_same_v<actual_t, Binary>) {
-      auto lhs =
-          reinterpret_cast<ExprNode const *>(storage.data() + sizeof(size_t));
-      auto rhs = reinterpret_cast<ExprNode const *>(storage.data() +
-                                                    2 * sizeof(size_t));
+      auto const *lhs = static_cast<ExprNode const *>(nullptr);
+      std::memcpy(&lhs, storage.data() + sizeof(size_t),
+                  sizeof(ExprNode const *));
+      auto const *rhs = static_cast<ExprNode const *>(nullptr);
+      std::memcpy(&rhs, storage.data() + 2 * sizeof(size_t),
+                  sizeof(ExprNode const *));
       return T{lhs, rhs};
     }
   }
@@ -1983,7 +1989,6 @@ ExprNode::~ExprNode() noexcept {
     } else if (storage[sizeof(Expr_t)] == 0xff) {
       auto *buffer = static_cast<char *>(nullptr);
       std::memcpy(&buffer, storage.data() + 2 * sizeof(size_t), sizeof(char *));
-      expr_dbg((void *)buffer);
       // we call this with new[] in the ctor, it's just nested in the placement
       // new call
       delete[] buffer;
@@ -2049,7 +2054,6 @@ auto ExprNode::eval(std::string_view const expr, StringMap const &macros,
   // in that case, this becomes a malformed program
   auto const ast = expansion.to_ast();
 #ifdef DEBUG_CPP
-  // TODO: finish writing this
   ast.display(std::cout) << std::endl;
 #endif // DEBUG_CPP
   return Expressions::eval_impl(ast, macros, def_macros);
@@ -2760,8 +2764,9 @@ auto Expressions::make_binary(Expressions::expr_t tkn, ExprNode &&lhs,
       unreachable();
     }
   }(tkn);
-  return ExprNode::from(bin_t, new ExprNode(std::move(lhs)),
-                        new ExprNode(std::move(rhs)));
+  auto *lhs_ptr = new ExprNode(std::move(lhs));
+  auto *rhs_ptr = new ExprNode(std::move(rhs));
+  return ExprNode::from(bin_t, lhs_ptr, rhs_ptr);
 }
 
 auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
