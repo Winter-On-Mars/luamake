@@ -16,14 +16,18 @@ extern "C" {
 
 namespace luamake::allocator {
 struct Page final {
-  // TODO: expose this as a compilation parameter, this number seems to work the
-  // best for my machine in terms of a boost in performance
+  // TODO: expose this as a compilation parameter, also we should be able to
+  // change it, because we're using it with the preir eval function, and this
+  // size is a bit much for most of those
   static auto constexpr SIZE = size_t{2 << 16};
   Page() noexcept;
   ~Page() noexcept;
   // not technically required, but ensures that the allocator is initialized
   // before use
   auto to_lua_alloc() -> lua_Alloc;
+
+  auto alloc(size_t) -> void *;
+  auto reset() -> void;
 
 private:
   static auto lua_alloc(void *, void *, size_t, size_t) -> void *;
@@ -32,7 +36,6 @@ private:
     return (size + sizeof(intptr_t) - 1) & ~(sizeof(intptr_t) - 1);
   }
 
-  auto alloc(size_t) -> void *;
   auto get_new_page() -> void;
 
   struct Header final {
@@ -47,10 +50,10 @@ private:
 #ifdef DEBUG_ALLOCATOR
   size_t amount_alloc = 0;
   size_t wasted_space = 0;
+  size_t unused_space = 0;
 
   auto dump_stats(std::ostream &) -> std::ostream &;
 #endif // DEBUG_ALLOCATOR
 };
 } // namespace luamake::allocator
-
 #endif // !__LUAMAKE_ALLOCATOR_HPP

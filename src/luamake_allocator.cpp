@@ -31,6 +31,35 @@ Page::~Page() noexcept {
 
 auto Page::to_lua_alloc() -> lua_Alloc { return lua_alloc; }
 
+auto Page::alloc(size_t n_bytes) -> void * {
+#ifdef DEBUG_ALLOCATOR
+  wasted_space += get_alignment(n_bytes) - n_bytes;
+#endif // DEBUG_ALLOCATOR
+  n_bytes = get_alignment(n_bytes);
+#ifdef DEBUG_ALLOCATOR
+  amount_alloc += n_bytes;
+#endif // DEBUG_ALLOCATOR
+  [[unlikely]]
+  if (n_bytes >= SIZE - sizeof(Header)) {
+    throw std::runtime_error(
+        std::format("Unable to allocate requested amount of memory [{}] bytes, "
+                    "too big to fit in a page [{}] bytes",
+                    n_bytes, SIZE - sizeof(Header)));
+  }
+  [[unlikely]]
+  if (n_bytes + cur_page->amount_used >= SIZE) {
+#ifdef DEBUG_ALLOCATOR
+    unused_space += SIZE - cur_page->amount_used;
+#endif // DEBUG_ALLOCATOR
+    get_new_page();
+  }
+  auto ret_ptr = cur_page->cur + cur_page->amount_used;
+  cur_page->amount_used += n_bytes;
+  return static_cast<void *>(ret_ptr);
+}
+
+auto Page::reset() -> void { cur_page = &start; }
+
 auto Page::lua_alloc(void *ud, void *ptr, size_t o_size, size_t n_size)
     -> void * {
   // don't have to do any work
@@ -53,34 +82,13 @@ auto Page::lua_alloc(void *ud, void *ptr, size_t o_size, size_t n_size)
   return static_cast<Page *>(ud)->alloc(n_size);
 }
 
-auto Page::alloc(size_t n_bytes) -> void * {
-#ifdef DEBUG_ALLOCATOR
-  wasted_space += get_alignment(n_bytes) - n_bytes;
-#endif // DEBUG_ALLOCATOR
-  n_bytes = get_alignment(n_bytes);
-#ifdef DEBUG_ALLOCATOR
-  amount_alloc += n_bytes;
-#endif // DEBUG_ALLOCATOR
-  [[unlikely]]
-  if (n_bytes >= SIZE - sizeof(Header)) {
-    throw std::runtime_error(
-        std::format("Unable to allocate requested amount of memory [{}] bytes, "
-                    "too big to fit in a page [{}] bytes",
-                    n_bytes, SIZE - sizeof(Header)));
-  }
-  [[unlikely]]
-  if (n_bytes + cur_page->amount_used >= SIZE) {
-#ifdef DEBUG_ALLOCATOR
-    wasted_space += SIZE - cur_page->amount_used;
-#endif // DEBUG_ALLOCATOR
-    get_new_page();
-  }
-  auto ret_ptr = cur_page->cur + cur_page->amount_used;
-  cur_page->amount_used += n_bytes;
-  return static_cast<void *>(ret_ptr);
-}
-
 auto Page::get_new_page() -> void {
+  // to work with the reset function, that just sets the current page to the
+  // start, used mostly in the cpp eval function to avoid memory allocations
+  if (cur_page->next != nullptr) {
+    cur_page = cur_page->next;
+    return;
+  }
   cur_page->next = static_cast<Header *>(malloc(SIZE));
   if (cur_page->next == nullptr)
     throw std::runtime_error("Unable to allocate new page of memory");
@@ -92,18 +100,22 @@ auto Page::get_new_page() -> void {
 
 #ifdef DEBUG_ALLOCATOR
 auto Page::dump_stats(std::ostream &out) -> std::ostream & {
-  std::cout << std::format("Allocated [{:*>8}] bytes, wasted [{:*>8}] bytes, "
-                           "ratio [{:.2f}%], took [{}] pages\n",
-                           amount_alloc, wasted_space,
-                           static_cast<double>(amount_alloc) /
-                               static_cast<double>(wasted_space),
-                           [&]() {
-                             auto num_pages = size_t{};
-                             for (auto page = &start; page; page = page->next) {
-                               ++num_pages;
-                             }
-                             return num_pages;
-                           }());
+  unused_space += SIZE - cur_page->amount_used;
+  auto const waste_ratio = wasted_space != 0
+                               ? static_cast<double>(amount_alloc) /
+                                     static_cast<double>(wasted_space)
+                               : 0.0;
+  auto const num_pages = [&]() {
+    auto num_pages = size_t{};
+    for (auto page = &start; page; page = page->next) {
+      ++num_pages;
+    }
+    return num_pages;
+  }();
+  std::cout << std::format(
+      "Allocated [{:*>8}] bytes, wasted [{:*>8}] bytes "
+      "({:.2f}%), unused = [{:*>8}] bytes took [{}] pages\n",
+      amount_alloc, wasted_space, waste_ratio, unused_space, num_pages);
   return out;
 }
 #endif // DEBUG_ALLOCATOR
