@@ -2,6 +2,7 @@
 #define __LUAMAKE_BUILTINS_HPP
 
 #include "common.hpp"
+#include "luamake_allocator.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
@@ -293,9 +294,12 @@ struct Module final {
   std::vector<std::filesystem::path> dep_includes;
   std::vector<std::filesystem::path> sys_includes;
   std::vector<std::filesystem::path> linking;
-  // TODO: remove this from the module, it should just be on the stack or
-  // something
-  luamake::pp::Interpreter interpreter;
+  // NOTE: i really want to just have this on the stack, so that we can stop
+  // caring about it, but when we parse the options, and when we need them kind
+  // of necessitates this design, we could have an array of interpreters in the
+  // mods array, then just an index, but either way this is sort of what we have
+  // to do
+  std::unique_ptr<pp::Interpreter> interpreter;
   // TODO: optimize this :)
   std::string compiler;
   std::string name;
@@ -409,6 +413,9 @@ struct LakeModules final {
     return Iterator(ModIndex(0, num_mods), nullptr);
   }
 
+  auto init_allocator() noexcept -> void;
+  auto get_allocator() noexcept -> allocator::Page<LM_EXPR_ALLOC_SIZE> &;
+
 private:
   auto resize_mods() -> void;
   auto resize_paths() -> void;
@@ -420,11 +427,8 @@ private:
   // state mtx inline
   uint mods_cap;
   uint paths_cap;
-  // size_t cap;
-  // TODO: probably have 2 uints for the num_lake_paths, and for the modules
   uint num_mods;
   uint num_paths;
-  // size_t size;
   // TODO: test if it's better to just have all of these in an aos instead of
   // this soa (multiarraylist) that it currently is
   std::unique_ptr<ModState[]> states;
@@ -437,6 +441,8 @@ private:
   // TODO: switch this to not have the luamake.lua in the path, i.e. just push
   // back the parent path
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
+
+  allocator::Page<LM_EXPR_ALLOC_SIZE> arena;
 
   friend CompilationPool;
 };
