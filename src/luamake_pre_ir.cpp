@@ -1350,6 +1350,7 @@ auto Lexer::parse_define_args(std::string_view const fcontent, size_t i)
       if (i + 3 < fcontent.size() &&
           (fcontent[i + 1] == '.' && fcontent[i + 2] == '.')) {
         types.push_back(ir_t::VARIADIC);
+        i += 3;
       } else {
         throw std::runtime_error(
             "Error around `.` in function macro parameters");
