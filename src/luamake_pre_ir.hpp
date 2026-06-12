@@ -6,6 +6,8 @@
 // that we would need in terms of reading the headers, and it's supposed to be
 // fast, so hopefully it will be, something worth trying
 
+#include "luamake_allocator.hpp"
+
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -17,6 +19,10 @@
 #ifdef DEBUG_CPP
 #include <ostream>
 #endif // DEBUG_CPP
+
+#ifndef LM_EXPR_ALLOC_SIZE
+#define LM_EXPR_ALLOC_SIZE 2 << 8
+#endif // !LM_EXPR_ALLOC_SIZE
 
 namespace luamake {
 namespace pp {
@@ -54,7 +60,8 @@ struct Interpreter final {
    * @throws std::runtime_error
    */
   [[nodiscard]]
-  auto interpret(std::string_view const) -> std::vector<std::filesystem::path>;
+  auto interpret(std::string_view const, allocator::Page<LM_EXPR_ALLOC_SIZE> &)
+      -> std::vector<std::filesystem::path>;
 
 #ifdef DEBUG_CPP
   auto dump_macros(std::ostream &) noexcept -> void;

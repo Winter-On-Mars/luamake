@@ -41,7 +41,7 @@ concept any_of = (std::is_same_v<T, Values> || ...);
 // complete rearchitecure of the code, and i'm too fucking exhaused to do that
 // rn, so i'll get to it in a later commit
 
-// TODO: arena allocate this so that we can just stop worring about memory
+// TODO: arena allocate this whole structure, specifically the ast stuff
 
 namespace luamake {
 namespace pp {
@@ -370,7 +370,8 @@ struct ExprNode final {
    * @throws std::runtime_error
    * (if a float is found)
    */
-  static auto eval(std::string_view const, allocator::Page &,
+  static auto eval(std::string_view const,
+                   allocator::Page<LM_EXPR_ALLOC_SIZE> &,
                    StringMap const &macros, StringSet const &def_macros) -> int;
 
   friend auto operator<<(std::ostream &, ExprNode const &) noexcept
@@ -722,7 +723,7 @@ auto constexpr to_string(expr_t t) noexcept -> std::string_view {
 struct ExprLexer final {
   std::vector<expr_t> tkns;
   std::vector<std::string> macros;
-  auto to_ast(allocator::Page &) const -> ExprNode;
+  auto to_ast(allocator::Page<LM_EXPR_ALLOC_SIZE> &) const -> ExprNode;
 
   auto constexpr matching(expr_t tkn, std::initializer_list<expr_t> &&matches)
       const noexcept -> bool {
@@ -734,15 +735,24 @@ struct ExprLexer final {
     return false;
   }
 
-  auto expression(allocator::Page &, size_t &, size_t &) const -> ExprNode;
-  auto _or(allocator::Page &, size_t &, size_t &) const -> ExprNode;
-  auto _and(allocator::Page &, size_t &, size_t &) const -> ExprNode;
-  auto equality(allocator::Page &, size_t &, size_t &) const -> ExprNode;
-  auto comparison(allocator::Page &, size_t &, size_t &) const -> ExprNode;
-  auto term(allocator::Page &, size_t &, size_t &) const -> ExprNode;
-  auto factor(allocator::Page &, size_t &, size_t &) const -> ExprNode;
-  auto unary(allocator::Page &, size_t &, size_t &) const -> ExprNode;
-  auto primary(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto expression(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &,
+                  size_t &) const -> ExprNode;
+  auto _or(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &, size_t &) const
+      -> ExprNode;
+  auto _and(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &, size_t &) const
+      -> ExprNode;
+  auto equality(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &, size_t &) const
+      -> ExprNode;
+  auto comparison(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &,
+                  size_t &) const -> ExprNode;
+  auto term(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &, size_t &) const
+      -> ExprNode;
+  auto factor(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &, size_t &) const
+      -> ExprNode;
+  auto unary(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &, size_t &) const
+      -> ExprNode;
+  auto primary(allocator::Page<LM_EXPR_ALLOC_SIZE> &, size_t &, size_t &) const
+      -> ExprNode;
 
   auto expect(size_t cur_t, expr_t &&tkn) const -> void {
     if (tkns[cur_t] != tkn) {
@@ -766,9 +776,10 @@ auto expand_macro(std::string const &, StringMap const &,
 
 auto eval_impl(ExprNode const &, StringMap const &, StringSet const &) -> int;
 
-auto make_binary(allocator::Page &, expr_t, ExprNode &&, ExprNode &&) noexcept
-    -> ExprNode;
-auto make_unary(allocator::Page &, expr_t, ExprNode &&) noexcept -> ExprNode;
+auto make_binary(allocator::Page<LM_EXPR_ALLOC_SIZE> &, expr_t, ExprNode &&,
+                 ExprNode &&) noexcept -> ExprNode;
+auto make_unary(allocator::Page<LM_EXPR_ALLOC_SIZE> &, expr_t,
+                ExprNode &&) noexcept -> ExprNode;
 auto make_integer(expr_t, std::string_view) noexcept -> ExprNode;
 }; // namespace Expressions
 
@@ -888,14 +899,12 @@ struct AstIncluder final : AstVisitor {
   StringMap &macros;
   StringSet &def_macros;
 
-  // TODO: move this to the gen_dep_tree function, so we can avoid the constant
-  // memory allocations, that seem to be increasing the time this takes to run
-  // by at least 5 milliseconds, usually 10 on a cold run
-  allocator::Page alloc;
+  allocator::Page<LM_EXPR_ALLOC_SIZE> &alloc;
 
-  AstIncluder(std::vector<fs::path> &paths, StringMap &macros,
+  AstIncluder(std::vector<fs::path> &paths,
+              allocator::Page<LM_EXPR_ALLOC_SIZE> &alloc, StringMap &macros,
               StringSet &def_macros) noexcept
-      : paths(paths), macros(macros), def_macros(def_macros), alloc() {}
+      : paths(paths), macros(macros), def_macros(def_macros), alloc(alloc) {}
 
   auto get_includes(Ast &ast) -> void {
     for (auto &&node : ast.nodes) {
@@ -2045,9 +2054,11 @@ auto ExprNode::expr_t() const noexcept -> ExprNode::Expr_t {
   return expr_t;
 }
 
-auto ExprNode::eval(std::string_view const expr, allocator::Page &page,
+auto ExprNode::eval(std::string_view const expr,
+                    allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
                     StringMap const &macros, StringSet const &def_macros)
     -> int {
+  // TODO: idk fix these, they should be just one call(?)
   auto const expr_lex = Expressions::lex(expr);
   auto const expansion = Expressions::expand(expr_lex, macros, def_macros);
   // TODO: report if the expansion is empty, i.e. if you have a case like
@@ -2255,19 +2266,22 @@ auto operator<<(std::ostream &out, ExprNode const &en) noexcept
 
 Ast::Ast() { nodes.reserve(20); }
 
-auto Expressions::ExprLexer::to_ast(allocator::Page &page) const -> ExprNode {
+auto Expressions::ExprLexer::to_ast(
+    allocator::Page<LM_EXPR_ALLOC_SIZE> &page) const -> ExprNode {
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
   return expression(page, cur_t, cur_lex);
 }
 
-auto Expressions::ExprLexer::expression(allocator::Page &page, size_t &cur_t,
-                                        size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::expression(
+    allocator::Page<LM_EXPR_ALLOC_SIZE> &page, size_t &cur_t,
+    size_t &cur_lex) const -> ExprNode {
   return _or(page, cur_t, cur_lex);
 }
 
-auto Expressions::ExprLexer::_or(allocator::Page &page, size_t &cur_t,
-                                 size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::_or(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                                 size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
   auto lhs = _and(page, cur_t, cur_lex);
   while (cur_t < tkns.size() && matching(tkns[cur_t], {expr_t::OR})) {
     auto const tkn = tkns[cur_t++];
@@ -2277,8 +2291,9 @@ auto Expressions::ExprLexer::_or(allocator::Page &page, size_t &cur_t,
   return lhs;
 }
 
-auto Expressions::ExprLexer::_and(allocator::Page &page, size_t &cur_t,
-                                  size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::_and(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                                  size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
   auto lhs = equality(page, cur_t, cur_lex);
   while (cur_t < tkns.size() && matching(tkns[cur_t], {expr_t::AND})) {
     auto const tkn = tkns[cur_t++];
@@ -2288,8 +2303,9 @@ auto Expressions::ExprLexer::_and(allocator::Page &page, size_t &cur_t,
   return lhs;
 }
 
-auto Expressions::ExprLexer::equality(allocator::Page &page, size_t &cur_t,
-                                      size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::equality(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                                      size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
   auto lhs = comparison(page, cur_t, cur_lex);
   while (cur_t < tkns.size() &&
          matching(tkns[cur_t], {expr_t::BANG_EQ, expr_t::EQ_EQ})) {
@@ -2300,8 +2316,9 @@ auto Expressions::ExprLexer::equality(allocator::Page &page, size_t &cur_t,
   return lhs;
 }
 
-auto Expressions::ExprLexer::comparison(allocator::Page &page, size_t &cur_t,
-                                        size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::comparison(
+    allocator::Page<LM_EXPR_ALLOC_SIZE> &page, size_t &cur_t,
+    size_t &cur_lex) const -> ExprNode {
   auto lhs = term(page, cur_t, cur_lex);
   while (cur_t < tkns.size() &&
          matching(tkns[cur_t], {expr_t::LESS, expr_t::LESS_EQ, expr_t::GREATER,
@@ -2313,8 +2330,9 @@ auto Expressions::ExprLexer::comparison(allocator::Page &page, size_t &cur_t,
   return lhs;
 }
 
-auto Expressions::ExprLexer::term(allocator::Page &page, size_t &cur_t,
-                                  size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::term(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                                  size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
   auto lhs = factor(page, cur_t, cur_lex);
   while (cur_t < tkns.size() &&
          matching(tkns[cur_t], {expr_t::PLUS, expr_t::MINUS})) {
@@ -2325,8 +2343,9 @@ auto Expressions::ExprLexer::term(allocator::Page &page, size_t &cur_t,
   return lhs;
 }
 
-auto Expressions::ExprLexer::factor(allocator::Page &page, size_t &cur_t,
-                                    size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::factor(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                                    size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
   auto lhs = unary(page, cur_t, cur_lex);
   while (cur_t < tkns.size() &&
          matching(tkns[cur_t], {expr_t::STAR, expr_t::SLASH})) {
@@ -2337,8 +2356,9 @@ auto Expressions::ExprLexer::factor(allocator::Page &page, size_t &cur_t,
   return lhs;
 }
 
-auto Expressions::ExprLexer::unary(allocator::Page &page, size_t &cur_t,
-                                   size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::unary(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                                   size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
   if (cur_t < tkns.size() &&
       matching(tkns[cur_t], {expr_t::BANG, expr_t::MINUS})) {
     auto const tkn = tkns[cur_t++];
@@ -2348,8 +2368,9 @@ auto Expressions::ExprLexer::unary(allocator::Page &page, size_t &cur_t,
   return primary(page, cur_t, cur_lex);
 }
 
-auto Expressions::ExprLexer::primary(allocator::Page &page, size_t &cur_t,
-                                     size_t &cur_lex) const -> ExprNode {
+auto Expressions::ExprLexer::primary(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                                     size_t &cur_t, size_t &cur_lex) const
+    -> ExprNode {
   // TODO
   switch (tkns[cur_t]) {
   case expr_t::MACRO:
@@ -2744,9 +2765,9 @@ auto Expressions::eval_impl(ExprNode const &e, StringMap const &macros,
   unreachable();
 }
 
-auto Expressions::make_binary(allocator::Page &page, Expressions::expr_t tkn,
-                              ExprNode &&lhs, ExprNode &&rhs) noexcept
-    -> ExprNode {
+auto Expressions::make_binary(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                              Expressions::expr_t tkn, ExprNode &&lhs,
+                              ExprNode &&rhs) noexcept -> ExprNode {
   auto bin_t = [](expr_t tkn) {
     switch (tkn) {
     case expr_t::PLUS:
@@ -2777,6 +2798,7 @@ auto Expressions::make_binary(allocator::Page &page, Expressions::expr_t tkn,
       unreachable();
     }
   }(tkn);
+  page.init();
   auto *lhs_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
   *lhs_ptr = std::move(lhs);
   auto *rhs_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
@@ -2784,8 +2806,9 @@ auto Expressions::make_binary(allocator::Page &page, Expressions::expr_t tkn,
   return ExprNode::from(bin_t, lhs_ptr, rhs_ptr);
 }
 
-auto Expressions::make_unary(allocator::Page &page, Expressions::expr_t tkn,
-                             ExprNode &&un) noexcept -> ExprNode {
+auto Expressions::make_unary(allocator::Page<LM_EXPR_ALLOC_SIZE> &page,
+                             Expressions::expr_t tkn, ExprNode &&un) noexcept
+    -> ExprNode {
   auto un_t = [](expr_t tkn) {
     switch (tkn) {
     case expr_t::MINUS:
@@ -2796,6 +2819,7 @@ auto Expressions::make_unary(allocator::Page &page, Expressions::expr_t tkn,
       unreachable();
     }
   }(tkn);
+  page.init();
   auto *un_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
   *un_ptr = std::move(un);
   return ExprNode::from(un_t, un_ptr);
@@ -3147,7 +3171,8 @@ auto AstIncluder::visit_pragma(PragmaNode &) -> void {
   return; // ? idk if there's actually anything for us to do here
 }
 
-auto Interpreter::interpret(std::string_view const file)
+auto Interpreter::interpret(std::string_view const file,
+                            allocator::Page<LM_EXPR_ALLOC_SIZE> &alloc)
     -> std::vector<fs::path> {
   auto ast = Lexer::lex(file).ast();
   auto vec = std::vector<fs::path>();
@@ -3155,7 +3180,7 @@ auto Interpreter::interpret(std::string_view const file)
   auto ast_p = AstPrinter(std::cout);
   ast_p.print(ast);
 #endif // DEBUG_CPP
-  auto includer = AstIncluder(vec, macros, def_macros);
+  auto includer = AstIncluder(vec, alloc, macros, def_macros);
   includer.get_includes(ast);
   return vec;
 }
