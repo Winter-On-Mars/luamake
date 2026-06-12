@@ -30,6 +30,10 @@ extern "C" {
 
 namespace fs = std::filesystem;
 
+#ifndef LM_LUA_ALLOC_SIZE
+#define LM_LUA_ALLOC_SIZE 2 << 12
+#endif
+
 namespace {
 enum class Value_t { NUMBER, STRING, BOOL_TRUE, BOOL_FALSE, NIL };
 auto constexpr determine_type(std::string_view const str) noexcept -> Value_t {
@@ -286,7 +290,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     break;
   }
 
-  auto page_allocator = luamake::allocator::Page();
+  auto page_allocator = luamake::allocator::Page<LM_LUA_ALLOC_SIZE>();
   auto *state = lua_newstate(page_allocator.to_lua_alloc(), &page_allocator);
   if (state == nullptr) {
     error_message(
