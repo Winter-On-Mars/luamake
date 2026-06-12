@@ -1,6 +1,7 @@
 #include "luamake_builtins.hpp"
 
 #include "common.hpp"
+#include "luamake_allocator.hpp"
 #include "luamake_file.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_spiral.hpp"
@@ -513,7 +514,7 @@ auto install_impl(lua_State *state) -> int {
   // point, any sooner and we run into linking errors, everybodys favorite :)
   // TODO: try to move this into the threads structure with threads.add_task
   auto gen_dep_tree_fut = std::async(std::launch::async, [&]() -> void {
-    return mod.tree.gen_dep_tree(mod, mod.interpreter, mod_idx);
+    return mod.tree.gen_dep_tree(mod, *mod.interpreter, mod_idx);
   });
 
   // TODO: try to move these calls to create directory to be do when the
@@ -720,7 +721,7 @@ auto install_dummy_impl(lua_State *state) -> int {
         static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
             mod.type)));
   }
-  (void)mod.tree.gen_dep_tree(mod, mod.interpreter, mod_idx);
+  (void)mod.tree.gen_dep_tree(mod, *mod.interpreter, mod_idx);
   return 1;
 }
 } // namespace
@@ -832,7 +833,8 @@ auto Module::DepTree::append_dep(Module const &mod,
   // HACK: didn't want to rewrite all of the interpreter code to work with
   // explicitly utf8 strings
   auto const files_deps = interpreter.interpret(
-      std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
+      std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize),
+      mods.get_allocator());
 
 #ifdef DEBUG_MOD
   std::cout << std::format("Possible includes for {}: {{" NL, dep.string());
@@ -1139,12 +1141,8 @@ auto Module::display(std::ostream &out) const noexcept -> void {
 
 static auto include_path_cache =
     std::unordered_map<std::string, std::vector<fs::path>>();
-// TODO: i think i'm not properly handling child procs, so see about fixing it
-// in these two functions :)
-// from some basic perf testing, these two functions seem to be the biggest
-// slow downs, they should be run in parallel (or just in the background)
-// which will help speed things up. We could rework the thread pool to allow
-// for arbitrary functions to be run(?)
+// TODO: probably switch this to using popen, it seems like it will be more
+// performant, plus it *should* be more portable
 auto Module::append_include_paths(std::string const &compiler) -> void {
   // TODO: see if we need to cache the whole compiler string, or if it's
   // enough to just cache the path to the binary, i.e. if we can get away with
@@ -1381,7 +1379,32 @@ auto Module::append_predefined_macros(std::string const &compiler)
 // more info
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     : type(type), tree(8), roots(), headers(), includes(), sys_includes(),
-      linking(), interpreter({}, {}), compiler(), name(), install_dir() {
+      linking(), interpreter(nullptr), compiler(), name(), install_dir() {
+  switch (auto const compiler_t = lua_getfield(state, -1, "compiler")) {
+  case LUA_TTABLE:
+    compiler = Module::parse_compiler_table(state);
+    break;
+  case LUA_TNIL:
+    throw missing_field("compiler");
+  default:
+    throw unexpected_type("compiler", LUA_TTABLE, compiler_t);
+  }
+  lua_pop(state, 1);
+
+  // if the compiler string doesn't contain a space then it *should* just be the
+  // path to the compiler, so just use the whole length
+  auto const compiler_space = compiler.find(' ') != compiler.npos
+                                  ? compiler.find(' ')
+                                  : compiler.length();
+  auto res = std::async(std::launch::async, [this, compiler_space]() {
+    auto const compiler_command = std::string(compiler.data(), compiler_space);
+    this->append_include_paths(compiler_command);
+  });
+  auto macros_res = std::async(std::launch::async, [this, compiler_space]() {
+    auto const compiler_command = std::string(compiler.data(), compiler_space);
+    return this->append_predefined_macros(compiler_command);
+  });
+
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING:
     name = lua_tolstring(state, -1, nullptr);
@@ -1433,31 +1456,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     std::terminate();
     break;
   }
-
-  switch (auto const compiler_t = lua_getfield(state, -1, "compiler")) {
-  case LUA_TTABLE:
-    compiler = Module::parse_compiler_table(state);
-    break;
-  case LUA_TNIL:
-    throw missing_field("compiler");
-  default:
-    throw unexpected_type("compiler", LUA_TTABLE, compiler_t);
-  }
-  lua_pop(state, 1);
-
-  // if the compiler string doesn't contain a space then it *should* just be the
-  // path to the compiler, so just use the whole length
-  auto const compiler_space = compiler.find(' ') != compiler.npos
-                                  ? compiler.find(' ')
-                                  : compiler.length();
-  auto res = std::async(std::launch::async, [this, compiler_space]() {
-    auto const compiler_command = std::string(compiler.data(), compiler_space);
-    this->append_include_paths(compiler_command);
-  });
-  auto macros_res = std::async(std::launch::async, [this, compiler_space]() {
-    auto const compiler_command = std::string(compiler.data(), compiler_space);
-    return this->append_predefined_macros(compiler_command);
-  });
 
   switch (auto const install_dir_t = lua_getfield(state, -1, "install_dir")) {
   case LUA_TSTRING:
@@ -1597,7 +1595,8 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     throw unexpected_type("macros", LUA_TTABLE, macro_t);
   }
 
-  interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
+  interpreter = std::make_unique<pp::Interpreter>(std::move(macros),
+                                                  std::move(def_macros));
   res.get();
 }
 
@@ -2456,6 +2455,13 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
         std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname));
   }
   return files_to_compile;
+}
+
+auto LakeModules::init_allocator() noexcept -> void { arena.init(); }
+
+auto LakeModules::get_allocator() noexcept
+    -> allocator::Page<LM_EXPR_ALLOC_SIZE> & {
+  return arena;
 }
 
 auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
