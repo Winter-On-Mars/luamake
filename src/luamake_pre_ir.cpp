@@ -43,6 +43,11 @@ concept any_of = (std::is_same_v<T, Values> || ...);
 
 // TODO: arena allocate this whole structure, specifically the ast stuff
 
+// TODO: test if using lazy parsing improves performance, it would allow us to
+// cut back on some memory useage, also short circuit when we come across a
+// macro, also we need to look into allowing #pragma once, and what that
+// semantically means
+
 namespace luamake {
 namespace pp {
 namespace {
