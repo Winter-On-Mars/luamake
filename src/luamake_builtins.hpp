@@ -138,9 +138,7 @@ struct Module final {
   };
   using enum Module_t;
 
-  /**
-   * @throws ModuleErr
-   */
+  // @throws std::runtime_error
   Module(Module_t &&type, lua_State *state,
          std::filesystem::path const &) noexcept(false);
 
@@ -170,9 +168,7 @@ struct Module final {
       MISC,
     };
 
-    /**
-     * @throws DepTreeErr | std::bad_alloc
-     */
+    // @throws std::runtime_error | std::bad_alloc
     [[nodiscard]]
     DepTree(size_t const num_files) noexcept(false);
     ~DepTree() noexcept = default;
@@ -184,9 +180,7 @@ struct Module final {
     DepTree(DepTree &&) = default;
     DepTree &operator=(DepTree &&) = default;
 
-    /**
-     * @throws
-     */
+    // @throws std::runtime_error
     auto gen_dep_tree(Module const &mod, pp::Interpreter &,
                       ModIndex const) noexcept(false) -> void;
 
@@ -242,20 +236,14 @@ struct Module final {
     std::unique_ptr<std::vector<uint>[]> deps;
     std::unique_ptr<size_t[]> hashes;
 
-    /**
-     * @throws std::bad_alloc
-     */
+    // @throws std::bad_alloc
     auto resize() noexcept(false) -> void;
-    /**
-     * @throws std::bad_alloc
-     */
+    // @throws std::bad_alloc
     auto reserve(size_t) noexcept(false) -> void;
 
     // basically making the assumption that a project isn't gonna have
     // size_t.max files in it, idk if that's even physically possible
     // so this *seems like* a valid assumption
-    // TODO: rename this to like invalid_idx or something, then we can use 0 as
-    // the root index, because that's where the root index *should* be
     static constexpr auto NIL_IDX = static_cast<size_t>(-1);
 
 #ifdef DEBUG_MOD
@@ -263,9 +251,7 @@ struct Module final {
                       unsigned int const idx) const noexcept -> void;
 #endif // DEBUG_MOD
 
-    /**
-     * @throws DepTreeErr
-     */
+    // @throws std::runtime_error
     auto append_dep(Module const &, pp::Interpreter &, ModIndex const,
                     std::filesystem::path const &,
                     std::filesystem::path const &, size_t const) -> void;
@@ -294,11 +280,15 @@ struct Module final {
   std::vector<std::filesystem::path> dep_includes;
   std::vector<std::filesystem::path> sys_includes;
   std::vector<std::filesystem::path> linking;
-  // NOTE: i really want to just have this on the stack, so that we can stop
-  // caring about it, but when we parse the options, and when we need them kind
-  // of necessitates this design, we could have an array of interpreters in the
-  // mods array, then just an index, but either way this is sort of what we have
-  // to do
+  // NOTE: we need to seperate this into the macros that are predefined, and
+  // those that are then defined in files, as an example we could have something
+  // like this
+  //   A
+  //  / \
+  // B   C
+  // if B defines `FOO`, and then C checks for `FOO`, then we should use a
+  // globally defined `FOO` and/or a `FOO` that was passed through the macros
+  // variable in the config rather than B's `FOO`
   std::unique_ptr<pp::Interpreter> interpreter;
   // TODO: optimize this :)
   std::string compiler;
@@ -313,13 +303,9 @@ struct Module final {
   auto display(std::ostream &) const noexcept -> void;
 #endif // DEBUG_MOD
 
-  /**
-   * @throws CAPI
-   */
+  // @throws std::runtime_error
   auto append_include_paths(std::string const &) -> void;
-  /**
-   * @throws CAPI
-   */
+  // @throws std::runtime_error
   [[nodiscard]]
   auto append_predefined_macros(std::string const &)
       -> std::pair<pp::StringMap, pp::StringSet>;
@@ -425,6 +411,7 @@ private:
   // be able to have cap + 1 mtxs, and then use mtxs[cap] == state mtx,
   // something that could help, or it might be more performant to just have the
   // state mtx inline
+  // we might be able to avoid this if we have some kind of std::atomic<T*>(?)
   uint mods_cap;
   uint paths_cap;
   uint num_mods;
