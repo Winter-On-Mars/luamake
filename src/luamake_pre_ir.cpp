@@ -616,6 +616,7 @@ struct Ast final {
   auto accept(AstVisitor &) const -> void;
 };
 
+// TODO: rewrite this namespace, it really doesn't need to be written like this
 namespace Expressions {
 enum class expr_t {
   LPAREN,
@@ -3270,11 +3271,9 @@ auto LazyParser::next() -> pp_t {
       return pp_t::_EOF;
     switch (buffer[i]) {
     case '#': {
-      // TODO: bounds checking
       auto end = luamake::skip_until(chars.ws, buffer, i);
       auto const hash_keyword =
           std::string_view{buffer.begin() + i, buffer.begin() + end};
-      expr_dbg(hash_keyword);
       i = end;
       auto const keyword = keywords.find(hash_keyword);
       if (keyword == keywords.end())
@@ -3326,7 +3325,6 @@ auto LazyParser::next() -> pp_t {
         i = luamake::skip_until(chars.ws, buffer, i) + 1;
         end = luamake::skip_until(chars.define, buffer, i);
         cur_lex = std::string_view{buffer.begin() + i, buffer.begin() + end};
-        expr_dbg(cur_lex);
         if (end >= buffer.size())
           throw std::runtime_error("Unterminated #define macro");
         switch (buffer[end]) {
@@ -3406,7 +3404,7 @@ auto LazyParser::next() -> pp_t {
 auto LazyParser::goto_next_branch() -> void {
   for (;;) {
     if (i >= buffer.size())
-      return;
+      throw std::runtime_error("Unable to find next branch");
     switch (buffer[i]) {
     case '#': {
       auto end = luamake::skip_until(chars.ws, buffer, i);
@@ -3418,11 +3416,12 @@ auto LazyParser::goto_next_branch() -> void {
         continue;
       }
       switch (keyword->second) {
+      case pp_t::ELIF:
+        cur_lex = produce_if_arg();
+        [[fallthrough]];
       case pp_t::ENDIF:
         [[fallthrough]];
       case pp_t::ELSE:
-        [[fallthrough]];
-      case pp_t::ELIF:
         // buffer[i] *should* == '#'
         cur_tkn = keyword->second;
         return;
@@ -3511,8 +3510,10 @@ auto LazyParser::goto_matching_endif() -> void {
         ++depth;
         break;
       case pp_t::ENDIF:
-        if (depth == 0)
+        if (depth == 0) {
+          cur_tkn = pp_t::ENDIF;
           return;
+        }
         --depth;
         break;
       default:
@@ -3569,45 +3570,23 @@ auto LazyParser::goto_matching_endif() -> void {
           std::format("Unknown char [{}] found while lexing", buffer[i]));
     }
   }
+  throw std::runtime_error("idk how you got here");
   // ?
   unreachable();
 }
 
-auto LazyParser::eval(allocator::Page &, pp::MacroMap &, pp::StringSet &)
-    -> int {
-  expr_dbg(cur_lex);
-  auto start = size_t{};
-  auto end = start;
-  while (end < cur_lex.size()) {
-    start = end;
-    switch (cur_lex[start]) {
-    case 'd': { // check for define
-    } break;
-    case 0:
-      [[fallthrough]];
-    case 1:
-      [[fallthrough]];
-    case 2:
-      [[fallthrough]];
-    case 3:
-      [[fallthrough]];
-    case 4:
-      [[fallthrough]];
-    case 5:
-      [[fallthrough]];
-    case 6:
-      [[fallthrough]];
-    case 7:
-      [[fallthrough]];
-    case 8:
-      [[fallthrough]];
-    case 9:
-      break;
-    default:
-      throw std::runtime_error("");
-    }
-  }
-  throw std::runtime_error("LazyParser::eval not impl");
+// TODO: see if it's worth also making this lazy in some sense?
+auto LazyParser::eval(allocator::Page &alloc, pp::MacroMap &macros,
+                      pp::StringSet &defs) -> int {
+  auto const expr_tkn = Expressions::lex(cur_lex);
+  auto const expanded = Expressions::expand(expr_tkn, macros, defs);
+  // see note in ExprNode::eval about malformed programs
+  // TODO: handle the \n chars that are now in the string
+  auto const expr_ast = expanded.to_ast(alloc);
+#ifdef DEBUG_CPP
+  expr_ast.display(std::cout) << std::endl;
+#endif // DEBUG_CPP
+  return Expressions::eval_impl(expr_ast, macros, defs);
 }
 
 // NOTE: we could possibly get away with some kind of state machine + stack,
@@ -3629,15 +3608,18 @@ auto LazyParser::parse_decl(std::vector<fs::path> &res, allocator::Page &alloc,
     [[fallthrough]];
   case pp_t::ELSE:
     [[fallthrough]];
-  case pp_t::ENDIF: {
-  } break;
+  case pp_t::ENDIF:
+    throw std::runtime_error(std::format(
+        "Found {} not connected to a #if((n)?def)? preprocessor directive",
+        to_string(cur_t)));
+    break;
   case pp_t::DEFINE:
     handle_define(alloc, macros, defs);
     break;
-  case pp_t::DEFINE_FUNC: {
+  case pp_t::DEFINE_FUNC:
     throw std::runtime_error("evaluating #define not impl");
-  } break;
-  case pp_t::INCLUDE: {
+    break;
+  case pp_t::INCLUDE:
     if (cur_lex[0] == '<') {
       // non-local include (global/from another module), ignoring (should
       // check that it actually exists)
@@ -3648,23 +3630,23 @@ auto LazyParser::parse_decl(std::vector<fs::path> &res, allocator::Page &alloc,
       throw std::runtime_error(std::format(
           "Attempting to include an unknown thing(?) [{}]", cur_lex));
     }
-  } break;
-  case pp_t::UNDEF: {
+    break;
+  case pp_t::UNDEF:
     if (auto const is_macro = macros.find(cur_lex); is_macro != macros.end()) {
     } else if (auto const is_def = defs.find(cur_lex); is_def != defs.end()) {
     } else {
       // nothing to do, at least according to gcc :)
     }
-  } break;
-  case pp_t::PRAGMA: {
+    break;
+  case pp_t::PRAGMA:
     // TODO: pass a map of evaluated files, because #pragma once means that
     // (as far as i can tell) even if the defined macros change we only need
     // to evaluate the file once, for now we just say whatever and eval the
     // file again :)
-  } break;
-  case pp_t::_EOF: {
+    break;
+  case pp_t::_EOF:
     // idk maybe remove?
-  } break;
+    break;
   default:
     unreachable();
   }
@@ -3678,13 +3660,17 @@ auto LazyParser::handle_if(std::vector<fs::path> &res, allocator::Page &alloc,
       goto_next_branch();
       switch (cur_tkn) {
       case pp_t::ELIF:
-        if (eval(alloc, macros, defs) != 0)
+        if (eval(alloc, macros, defs) != 0) {
+          next();
           found_branch = true;
+        }
         break;
       case pp_t::ELSE:
+        next();
         found_branch = true;
         break;
       case pp_t::ENDIF: // should probably advance the token?
+        next();
         return; // found #endif, with nothing in between that we could use
         break;
       case pp_t::_EOF:
@@ -3694,68 +3680,149 @@ auto LazyParser::handle_if(std::vector<fs::path> &res, allocator::Page &alloc,
       }
     }
   }
-  auto const cur = next();
-  switch (cur) {
-  case pp_t::IF:
-    handle_if(res, alloc, macros, defs);
-    break;
-  case pp_t::IFDEF:
-    handle_ifdef(res, alloc, macros, defs);
-    break;
-  case pp_t::IFNDEF:
-    handle_ifndef(res, alloc, macros, defs);
-    break;
-  case pp_t::ELIF:
-    [[fallthrough]];
-  case pp_t::ELSE:
-    [[fallthrough]];
-  case pp_t::ENDIF: {
-  } break;
-  case pp_t::DEFINE:
-    handle_define(alloc, macros, defs);
-    break;
-  case pp_t::DEFINE_FUNC: {
-    throw std::runtime_error("evaluating #define not impl");
-  } break;
-  case pp_t::INCLUDE: {
-    if (cur_lex[0] == '<') {
-      // non-local include (global/from another module), ignoring (should
-      // check that it actually exists)
-    } else if (cur_lex[0] == '"') {
-      // strip the wrapping '"' chars
-      res.push_back(cur_lex.substr(1, cur_lex.size() - 2));
-    } else {
-      throw std::runtime_error(std::format(
-          "Attempting to include an unknown thing(?) [{}]", cur_lex));
+
+  for (auto got_all = false; got_all != true;) {
+    auto const cur = next();
+    switch (cur) {
+    case pp_t::IF:
+      handle_if(res, alloc, macros, defs);
+      break;
+    case pp_t::IFDEF:
+      handle_ifdef(res, alloc, macros, defs);
+      break;
+    case pp_t::IFNDEF:
+      handle_ifndef(res, alloc, macros, defs);
+      break;
+    case pp_t::ELIF:
+      [[fallthrough]];
+    case pp_t::ELSE:
+      [[fallthrough]];
+    case pp_t::ENDIF:
+      got_all = true;
+      break;
+    case pp_t::DEFINE:
+      handle_define(alloc, macros, defs);
+      break;
+    case pp_t::DEFINE_FUNC: {
+      throw std::runtime_error("evaluating #define not impl");
+    } break;
+    case pp_t::INCLUDE: {
+      if (cur_lex[0] == '<') {
+        // non-local include (global/from another module), ignoring (should
+        // check that it actually exists)
+      } else if (cur_lex[0] == '"') {
+        // strip the wrapping '"' chars
+        res.push_back(cur_lex.substr(1, cur_lex.size() - 2));
+      } else {
+        throw std::runtime_error(std::format(
+            "Attempting to include an unknown thing(?) [{}]", cur_lex));
+      }
+    } break;
+    case pp_t::UNDEF: {
+      if (auto const is_macro = macros.find(cur_lex);
+          is_macro != macros.end()) {
+        macros.erase(is_macro);
+      } else if (auto const is_def = defs.find(cur_lex); is_def != defs.end()) {
+        defs.erase(is_def);
+      } else {
+        // nothing to do, at least according to gcc :)
+      }
+    } break;
+    case pp_t::PRAGMA: {
+      // TODO: pass a map of evaluated files, because #pragma once means that
+      // (as far as i can tell) even if the defined macros change we only need
+      // to evaluate the file once, for now we just say whatever and eval the
+      // file again :)
+    } break;
+    case pp_t::_EOF: {
+      // idk maybe remove?
+    } break;
+    default:
+      unreachable();
     }
-  } break;
-  case pp_t::UNDEF: {
-    if (auto const is_macro = macros.find(cur_lex); is_macro != macros.end()) {
-      macros.erase(is_macro);
-    } else if (auto const is_def = defs.find(cur_lex); is_def != defs.end()) {
-      defs.erase(is_def);
-    } else {
-      // nothing to do, at least according to gcc :)
-    }
-  } break;
-  case pp_t::PRAGMA: {
-    // TODO: pass a map of evaluated files, because #pragma once means that
-    // (as far as i can tell) even if the defined macros change we only need
-    // to evaluate the file once, for now we just say whatever and eval the
-    // file again :)
-  } break;
-  case pp_t::_EOF: {
-    // idk maybe remove?
-  } break;
-  default:
-    unreachable();
   }
   goto_matching_endif();
+  if (cur_tkn != pp_t::ENDIF)
+    throw std::runtime_error(
+        "Expected #endif to wrap #if preprocessor directive");
 }
 
 auto LazyParser::handle_ifdef(std::vector<fs::path> &res,
                               allocator::Page &alloc, pp::MacroMap &macros,
-                              pp::StringSet &defs) -> void {}
+                              pp::StringSet &defs) -> void {
+  // have to find the right branch to get the values from
+  if (!is_defined(cur_lex, macros, defs)) {
+    for (auto found_branch = false; !found_branch;) {
+      goto_next_branch();
+      switch (cur_tkn) {
+      case pp_t::ELIF:
+        if (eval(alloc, macros, defs) != 0)
+          found_branch = true;
+        break;
+      case pp_t::ELSE:
+        found_branch = true;
+        break;
+      case pp_t::ENDIF:
+        // early return, nothing to do
+        return;
+      case pp_t::_EOF:
+        throw std::runtime_error("Unterminated #ifndef macro");
+      default:
+        unreachable();
+      }
+    }
+  }
+
+  while (nin(cur_tkn, {pp_t::ELIF, pp_t::ELSE, pp_t::ENDIF})) {
+    auto const cur = next();
+    switch (cur) {
+    case pp_t::IF:
+      handle_if(res, alloc, macros, defs);
+      break;
+    case pp_t::IFDEF:
+      handle_ifdef(res, alloc, macros, defs);
+      break;
+    case pp_t::IFNDEF:
+      handle_ifndef(res, alloc, macros, defs);
+      break;
+    case pp_t::ELIF:
+      [[fallthrough]];
+    case pp_t::ELSE:
+      [[fallthrough]];
+    case pp_t::ENDIF:
+      break;
+    case pp_t::DEFINE:
+      handle_define(alloc, macros, defs);
+      break;
+    case pp_t::DEFINE_FUNC:
+      throw std::runtime_error("Not impl, don't want to worry about this yet");
+      break;
+    case pp_t::INCLUDE:
+      if (cur_lex[0] == '<') {
+        // non-local include (global/from another module), ignoring (should
+        // check that it actually exists)
+      } else if (cur_lex[0] == '"') {
+        // strip the wrapping '"' chars
+        res.push_back(cur_lex.substr(1, cur_lex.size() - 2));
+      } else {
+        throw std::runtime_error(std::format(
+            "Attempting to include an unknown thing(?) [{}]", cur_lex));
+      }
+      break;
+    case pp_t::UNDEF:
+      [[fallthrough]];
+    case pp_t::PRAGMA:
+      throw std::runtime_error("not impl");
+      break;
+    case pp_t::_EOF:
+      throw std::runtime_error(
+          "Unterminated branch of #ifndef preprocessor directive");
+    default:
+      unreachable();
+    }
+  }
+  goto_matching_endif();
+}
 
 // we're just handling the most basic case to get this working and see the kinks
 auto LazyParser::handle_ifndef(std::vector<fs::path> &res,
@@ -3838,7 +3905,6 @@ auto LazyParser::handle_ifndef(std::vector<fs::path> &res,
 auto LazyParser::handle_define(allocator::Page &alloc, pp::MacroMap &macros,
                                pp::StringSet &defs) -> void {
   auto const macro_name = cur_lex;
-  expr_dbg(macro_name);
 
   // need to do some lexing ourselves because we don't currently support this
   auto const end = luamake::skip_until(chars.define, buffer, i);
@@ -3895,20 +3961,19 @@ auto get_includes(std::string_view const file, allocator::Page &alloc,
 
 auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
     -> std::vector<fs::path> {
-  /*
-auto macros = pp::MacroMap();
-auto defs = pp::StringSet();
-*/
+  auto macros_a = pp::MacroMap();
+  auto defs_a = pp::StringSet();
+
+  auto macros_b = pp::MacroMap();
+  auto defs_b = pp::StringSet();
   auto ast = Lexer::lex(file).ast();
   auto vec = std::vector<fs::path>();
 #ifdef DEBUG_CPP
   auto ast_p = AstPrinter(std::cout);
   ast_p.print(ast);
 #endif // DEBUG_CPP
-  /*
-  auto includer = AstIncluder(vec, alloc, macros, def_macros);
+  auto includer = AstIncluder(vec, alloc, macros_a, defs_a);
   includer.get_includes(ast);
-  */
   // technically not A, but this is just for some idea of ab testing
   std::cout << "files from the A\n";
   for (auto &&f : vec) {
@@ -3916,7 +3981,7 @@ auto defs = pp::StringSet();
   }
   std::cout << "---\n";
 
-  auto const test = B::get_includes(file, alloc, macros, defs);
+  auto const test = B::get_includes(file, alloc, macros_b, defs_b);
   std::cout << "files from the B\n";
   for (auto &&f : test) {
     std::cout << f << '\n';
