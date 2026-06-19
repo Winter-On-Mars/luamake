@@ -290,7 +290,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     break;
   }
 
-  auto page_allocator = luamake::allocator::Page<LM_LUA_ALLOC_SIZE>();
+  auto page_allocator = luamake::allocator::Page(LM_LUA_ALLOC_SIZE);
   auto *state = lua_newstate(page_allocator.to_lua_alloc(), &page_allocator);
   if (state == nullptr) {
     error_message(

@@ -4,8 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <format>
-#include <iostream>
 
 extern "C" {
 #include "lua.h"
@@ -18,8 +16,9 @@ extern "C" {
 #include "common.hpp"
 
 namespace luamake::allocator {
-template <size_t SIZE> struct Page final {
-  Page() noexcept;
+struct Page final {
+  // Page() noexcept;
+  Page(size_t) noexcept;
   ~Page() noexcept;
   // not technically required, but ensures that the allocator is initialized
   // before use
@@ -44,6 +43,7 @@ private:
     Header *next;
   };
 
+  size_t page_size;
   Header start;
   Header *cur_page;
 
@@ -55,128 +55,5 @@ private:
   auto dump_stats(std::ostream &) -> std::ostream &;
 #endif // DEBUG_ALLOCATOR
 };
-
-template <size_t SIZE>
-Page<SIZE>::Page() noexcept : start({0, nullptr, nullptr}), cur_page(&start) {}
-
-template <size_t SIZE> Page<SIZE>::~Page() noexcept {
-#ifdef DEBUG_ALLOCATOR
-  dump_stats(std::cout).flush();
-#endif // DEBUG_ALLOCATOR
-  for (auto *page = &start; page;) {
-    auto const next = page->next;
-    free(page->cur);
-    page = next;
-  }
-}
-
-template <size_t SIZE> auto Page<SIZE>::to_lua_alloc() -> lua_Alloc {
-  init();
-  return lua_alloc;
-}
-
-template <size_t SIZE> auto Page<SIZE>::init() -> void {
-  if (start.cur != nullptr) {
-    return; // already initialized
-  }
-  start.cur = static_cast<u8 *>(malloc(SIZE));
-  if (start.cur == nullptr) {
-    std::cerr << std::format(
-        "Unable to get enough memory to initialize allocator");
-    std::terminate();
-  }
-}
-
-template <size_t SIZE> auto Page<SIZE>::alloc(size_t n_bytes) -> void * {
-#ifdef DEBUG_ALLOCATOR
-  wasted_space += get_alignment(n_bytes) - n_bytes;
-#endif // DEBUG_ALLOCATOR
-  n_bytes = get_alignment(n_bytes);
-#ifdef DEBUG_ALLOCATOR
-  amount_alloc += n_bytes;
-#endif // DEBUG_ALLOCATOR
-  [[unlikely]]
-  if (n_bytes >= SIZE - sizeof(Header)) {
-    throw std::runtime_error(
-        std::format("Unable to allocate requested amount of memory [{}] bytes, "
-                    "too big to fit in a page [{}] bytes",
-                    n_bytes, SIZE - sizeof(Header)));
-  }
-  [[unlikely]]
-  if (n_bytes + cur_page->amount_used >= SIZE) {
-#ifdef DEBUG_ALLOCATOR
-    unused_space += SIZE - cur_page->amount_used;
-#endif // DEBUG_ALLOCATOR
-    get_new_page();
-  }
-  auto ret_ptr = cur_page->cur + cur_page->amount_used;
-  cur_page->amount_used += n_bytes;
-  return static_cast<void *>(ret_ptr);
-}
-
-template <size_t SIZE> auto Page<SIZE>::reset() -> void { cur_page = &start; }
-
-template <size_t SIZE>
-auto Page<SIZE>::lua_alloc(void *ud, void *ptr, size_t o_size, size_t n_size)
-    -> void * {
-  // don't have to do any work
-  if (n_size == 0)
-    return nullptr;
-  if (ptr != nullptr && o_size != 0 && n_size != 0) {
-    if (n_size > o_size) {
-      // realloc, i.e. memcpy
-      auto *page = static_cast<Page *>(ud);
-      auto ret_ptr = page->alloc(n_size);
-#ifdef DEBUG_ALLOCATOR
-      page->wasted_space += o_size;
-#endif // DEBUG_ALLOCATOR
-      // realloc
-      std::memcpy(ret_ptr, ptr, o_size);
-      return ret_ptr;
-    }
-    return ptr;
-  }
-  return static_cast<Page *>(ud)->alloc(n_size);
-}
-
-template <size_t SIZE> auto Page<SIZE>::get_new_page() -> void {
-  // to work with the reset function, that just sets the current page to the
-  // start, used mostly in the cpp eval function to avoid memory allocations
-  if (cur_page->next != nullptr) {
-    cur_page = cur_page->next;
-    return;
-  }
-  cur_page->next = static_cast<Header *>(malloc(SIZE));
-  if (cur_page->next == nullptr)
-    throw std::runtime_error("Unable to allocate new page of memory");
-  cur_page = cur_page->next;
-  cur_page->cur = reinterpret_cast<u8 *>(cur_page);
-  cur_page->amount_used = sizeof(Header);
-  cur_page->next = nullptr;
-}
-
-#ifdef DEBUG_ALLOCATOR
-template <size_t SIZE>
-auto Page<SIZE>::dump_stats(std::ostream &out) -> std::ostream & {
-  unused_space += SIZE - cur_page->amount_used;
-  auto const waste_ratio = wasted_space != 0
-                               ? static_cast<double>(amount_alloc) /
-                                     static_cast<double>(wasted_space)
-                               : 0.0;
-  auto const num_pages = [&]() {
-    auto num_pages = size_t{};
-    for (auto page = &start; page; page = page->next) {
-      ++num_pages;
-    }
-    return num_pages;
-  }();
-  std::cout << std::format(
-      "Allocated [{:*>8}] bytes, wasted [{:*>8}] bytes "
-      "({:.2f}%), unused = [{:*>8}] bytes took [{}] pages\n",
-      amount_alloc, wasted_space, waste_ratio, unused_space, num_pages);
-  return out;
-}
-#endif // DEBUG_ALLOCATOR
-
 } // namespace luamake::allocator
 #endif // !__LUAMAKE_ALLOCATOR_HPP
