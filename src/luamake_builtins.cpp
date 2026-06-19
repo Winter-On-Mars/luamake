@@ -1251,9 +1251,9 @@ auto Module::append_include_paths(std::string const &compiler) -> void {
 // allocations, while also avoiding the stack use after free that comes from
 // std::async call
 static auto predefined_macros_cache =
-    std::unordered_map<std::string, std::pair<pp::StringMap, pp::StringSet>>();
+    std::unordered_map<std::string, std::pair<pp::MacroMap, pp::StringSet>>();
 auto Module::append_predefined_macros(std::string const &compiler)
-    -> std::pair<pp::StringMap, pp::StringSet> {
+    -> std::pair<pp::MacroMap, pp::StringSet> {
   if (auto macros = predefined_macros_cache.find(compiler);
       macros != predefined_macros_cache.end()) {
     return macros->second;
@@ -1283,7 +1283,7 @@ auto Module::append_predefined_macros(std::string const &compiler)
     }
   } break;
   default: { // in parent proc
-    auto macros = pp::StringMap();
+    auto macros = pp::MacroMap();
     auto def_macros = pp::StringSet();
 
     close(write_pipe);
@@ -2301,7 +2301,8 @@ auto operator<<(std::ostream &out, ModIndex const idx) noexcept
 
 LakeModules::LakeModules() noexcept
     : mods_cap(0), paths_cap(0), num_mods(0), num_paths(0), states(nullptr),
-      compiled_files(nullptr), mods(nullptr), luamake_paths(nullptr) {}
+      compiled_files(nullptr), mods(nullptr), luamake_paths(nullptr),
+      arena(LM_EXPR_ALLOC_SIZE) {}
 
 auto LakeModules::init(size_t const cap) -> void {
   mods_cap = static_cast<uint>(cap);
@@ -2459,8 +2460,7 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
 
 auto LakeModules::init_allocator() noexcept -> void { arena.init(); }
 
-auto LakeModules::get_allocator() noexcept
-    -> allocator::Page<LM_EXPR_ALLOC_SIZE> & {
+auto LakeModules::get_allocator() noexcept -> allocator::Page & {
   return arena;
 }
 
