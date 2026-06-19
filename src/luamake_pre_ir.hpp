@@ -24,8 +24,7 @@
 #define LM_EXPR_ALLOC_SIZE 2 << 8
 #endif // !LM_EXPR_ALLOC_SIZE
 
-namespace luamake {
-namespace pp {
+namespace luamake::pp {
 using Macro = std::string;
 
 // [[https://stackoverflow.com/questions/34596768/stdunordered-mapfind-using-a-type-different-than-the-key-type/53530846#53530846]]
@@ -40,14 +39,17 @@ struct StringHasher final {
   }
 };
 
+template <class T>
 using StringMap =
-    std::unordered_map<std::string, Macro, StringHasher, std::equal_to<>>;
+    std::unordered_map<std::string_view, T, StringHasher, std::equal_to<>>;
+
+using MacroMap = StringMap<Macro>;
 using StringSet =
-    std::unordered_set<std::string, StringHasher, std::equal_to<>>;
+    std::unordered_set<std::string_view, StringHasher, std::equal_to<>>;
 
 struct Interpreter final {
-  Interpreter(StringMap &&macros, StringSet &&def_macros) noexcept
-      : macros(macros), def_macros(def_macros) {}
+  Interpreter(MacroMap &&macros, StringSet &&defs) noexcept
+      : macros(macros), defs(defs) {}
 
   Interpreter() noexcept = default;
   Interpreter(Interpreter &&) noexcept = default;
@@ -56,11 +58,9 @@ struct Interpreter final {
 
   Interpreter(Interpreter const &) noexcept = delete;
   Interpreter &operator=(Interpreter const &) noexcept = delete;
-  /**
-   * @throws std::runtime_error
-   */
+  /// @throws std::runtime_error
   [[nodiscard]]
-  auto interpret(std::string_view const, allocator::Page<LM_EXPR_ALLOC_SIZE> &)
+  auto interpret(std::string_view const, allocator::Page &)
       -> std::vector<std::filesystem::path>;
 
 #ifdef DEBUG_CPP
@@ -68,10 +68,9 @@ struct Interpreter final {
 #endif // DEBUG_CPP
 
 private:
-  StringMap macros;
-  StringSet def_macros;
+  MacroMap macros;
+  StringSet defs;
 };
-} // namespace pp
-} // namespace luamake
+} // namespace luamake::pp
 
 #endif
