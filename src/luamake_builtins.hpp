@@ -125,6 +125,12 @@ static_assert([]() -> bool {
   return true;
 }());
 
+struct MacroStorage {
+  std::filesystem::path fpath;
+  pp::MacroMap macros;
+  pp::StringSet defs;
+};
+
 // TODO: add exported header field, and probably refactor this to be a tagged
 // union to discriminate between exe and library type modules
 // TODO: rewrite how the include files are processed to have a system header
@@ -289,7 +295,13 @@ struct Module final {
   // if B defines `FOO`, and then C checks for `FOO`, then we should use a
   // globally defined `FOO` and/or a `FOO` that was passed through the macros
   // variable in the config rather than B's `FOO`
+  // TODO: move all macros to just be a part of a single hash map, treating
+  // `#define FOO` to just be `#define FOO ` with it's value being the empty
+  // string, because that's what happens when we need to do textual substitution
+  // then we can have a per file diff, in case the file #undef's a macro and/or
+  // redefines a macro
   std::unique_ptr<pp::Interpreter> interpreter;
+  pp::StringMap<MacroStorage> macro_cache;
   // TODO: optimize this :)
   std::string compiler;
   std::string name;
@@ -308,7 +320,7 @@ struct Module final {
   // @throws std::runtime_error
   [[nodiscard]]
   auto append_predefined_macros(std::string const &)
-      -> std::pair<pp::StringMap, pp::StringSet>;
+      -> std::pair<pp::MacroMap, pp::StringSet>;
 
   // TODO: update these to return FixedString
   auto format_includes() const -> std::string;
@@ -400,7 +412,7 @@ struct LakeModules final {
   }
 
   auto init_allocator() noexcept -> void;
-  auto get_allocator() noexcept -> allocator::Page<LM_EXPR_ALLOC_SIZE> &;
+  auto get_allocator() noexcept -> allocator::Page &;
 
 private:
   auto resize_mods() -> void;
@@ -429,7 +441,7 @@ private:
   // back the parent path
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
 
-  allocator::Page<LM_EXPR_ALLOC_SIZE> arena;
+  allocator::Page arena;
 
   friend CompilationPool;
 };
