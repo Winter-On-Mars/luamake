@@ -3961,19 +3961,15 @@ auto get_includes(std::string_view const file, allocator::Page &alloc,
 
 auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
     -> std::vector<fs::path> {
-  auto macros_a = pp::MacroMap();
-  auto defs_a = pp::StringSet();
-
-  auto macros_b = pp::MacroMap();
-  auto defs_b = pp::StringSet();
   auto ast = Lexer::lex(file).ast();
   auto vec = std::vector<fs::path>();
 #ifdef DEBUG_CPP
   auto ast_p = AstPrinter(std::cout);
   ast_p.print(ast);
 #endif // DEBUG_CPP
-  auto includer = AstIncluder(vec, alloc, macros_a, defs_a);
+  auto includer = AstIncluder(vec, alloc, macros, defs);
   includer.get_includes(ast);
+#ifdef DEBUG_CPP
   // technically not A, but this is just for some idea of ab testing
   std::cout << "files from the A\n";
   for (auto &&f : vec) {
@@ -3981,6 +3977,8 @@ auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
   }
   std::cout << "---\n";
 
+  auto macros_b = pp::MacroMap();
+  auto defs_b = pp::StringSet();
   auto const test = B::get_includes(file, alloc, macros_b, defs_b);
   std::cout << "files from the B\n";
   for (auto &&f : test) {
@@ -3988,6 +3986,7 @@ auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
   }
   std::cout << "---\n";
   return test;
+#endif // DEBUG
   return vec;
 }
 
