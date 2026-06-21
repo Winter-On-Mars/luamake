@@ -41,7 +41,7 @@ struct StringHasher final {
 
 template <class T>
 using StringMap =
-    std::unordered_map<std::string_view, T, StringHasher, std::equal_to<>>;
+    std::unordered_map<std::string, T, StringHasher, std::equal_to<>>;
 
 using MacroMap = StringMap<Macro>;
 using StringSet =
