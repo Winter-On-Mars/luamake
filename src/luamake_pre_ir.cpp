@@ -17,7 +17,6 @@
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <ostream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -27,6 +26,10 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#ifdef DEBUG_CPP
+#include <ostream>
+#endif // DEBUG
 
 namespace fs = std::filesystem;
 
@@ -365,9 +368,6 @@ struct ExprNode final {
   static auto eval(std::string_view const, allocator::Page &,
                    pp::MacroMap const &macros, StringSet const &def_macros)
       -> int;
-
-  friend auto operator<<(std::ostream &, ExprNode const &) noexcept
-      -> std::ostream &;
 
   auto expr_t() const noexcept -> Expr_t;
   template <class T>
@@ -2142,85 +2142,6 @@ auto ExprNode::display(std::ostream &out) const noexcept -> std::ostream & {
 }
 #endif // DEBUG_CPP
 
-auto operator<<(std::ostream &out, ExprNode const &en) noexcept
-    -> std::ostream & {
-  switch (en.expr_t()) {
-  case ExprNode::Expr_t::INT:
-    out << en.to<ExprNode::Integer>().i;
-    break;
-  case ExprNode::Expr_t::NUMBER:
-    out << en.to<ExprNode::Number>().f;
-    break;
-  case ExprNode::Expr_t::DEFINED:
-    out << "defined (" << en.to<ExprNode::Defined>().str << ")";
-    break;
-  case ExprNode::Expr_t::CHARLIT:
-    out << en.to<ExprNode::CharLit>().str;
-    break;
-  case ExprNode::Expr_t::GROUPING: {
-    auto const &group = en.to<ExprNode::Grouping>();
-    out << "(" << group.expr << ")";
-  } break;
-  case ExprNode::Expr_t::BINARY: {
-    auto const &bin = en.to<ExprNode::Binary>();
-    switch (en.meta_data<ExprNode::Binary::Binary_t>()) {
-    case ExprNode::Binary::Binary_t::PLUS:
-      out << '+';
-      break;
-    case ExprNode::Binary::Binary_t::MINUS:
-      out << '-';
-      break;
-    case ExprNode::Binary::Binary_t::TIMES:
-      out << '*';
-      break;
-    case ExprNode::Binary::Binary_t::DIVIDE:
-      out << '/';
-      break;
-    case ExprNode::Binary::Binary_t::GREATER:
-      out << '>';
-      break;
-    case ExprNode::Binary::Binary_t::GREATER_EQ:
-      out << '>' << '=';
-      break;
-    case ExprNode::Binary::Binary_t::LESS:
-      out << '<';
-      break;
-    case ExprNode::Binary::Binary_t::LESS_EQ:
-      out << '<' << '=';
-      break;
-    case ExprNode::Binary::Binary_t::NEQ:
-      out << '!' << '=';
-      break;
-    case ExprNode::Binary::Binary_t::EQ:
-      out << '=' << '=';
-      break;
-    case ExprNode::Binary::Binary_t::AND:
-      out << '&' << '&';
-      break;
-    case ExprNode::Binary::Binary_t::OR:
-      out << '|' << '|';
-      break;
-    }
-    out << bin.lhs << ' ' << bin.rhs;
-  } break;
-  case ExprNode::Expr_t::UNARY: {
-    auto const &un = en.to<ExprNode::Unary>();
-    switch (en.meta_data<ExprNode::Unary::Unary_t>()) {
-    case ExprNode::Unary::Unary_t::BANG:
-      out << '!';
-      break;
-    case ExprNode::Unary::Unary_t::MINUS:
-      out << '-';
-      break;
-    }
-    out << un.un;
-  } break;
-  case ExprNode::Expr_t::NONE:
-    break;
-  }
-  return out;
-}
-
 Ast::Ast() { nodes.reserve(20); }
 
 auto Expressions::ExprLexer::to_ast(allocator::Page &page) const -> ExprNode {
@@ -3123,19 +3044,8 @@ namespace B {
 // something like `delims.`, which i like for the syntax
 struct Delimiters final {
   static auto constexpr ws = std::string_view{" \t\n\r"};
-  static auto constexpr lexeme = std::string_view{" \t\n\r(){}[]+-*/<>=#"};
   static auto constexpr define = std::string_view{" \t\n\r("};
   static auto constexpr lex_switch = std::string_view{"#/\"'"};
-
-  static auto constexpr bin_fail = std::string_view{"23456789abcdefABCDEF"};
-  static auto constexpr allowed_dec = std::string_view{"0123456789"};
-  static auto constexpr allowed_hex =
-      std::string_view{"0123456789abcdefABCDEF"};
-  static auto constexpr allowed_octal = std::string_view{"01234567"};
-  static auto constexpr allowed_bin = std::string_view{"01"};
-  static auto constexpr alpha_sans_hex =
-      std::string_view{"ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ"};
-  static auto constexpr hex_sans_digits = std::string_view{"abcdefABCDEF"};
 };
 auto constexpr chars = Delimiters{};
 
