@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __LUAMAKE_STRING_MANIP_HPP
+#define __LUAMAKE_STRING_MANIP_HPP
 
 #include <algorithm>
 #include <span>
@@ -151,3 +152,4 @@ static_assert(!is_alpha('4'));
 static_assert(!is_alpha('5'));
 static_assert(!is_alpha('!'));
 } // namespace luamake
+#endif
