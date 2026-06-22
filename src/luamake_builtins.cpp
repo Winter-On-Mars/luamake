@@ -491,7 +491,8 @@ auto install_impl(lua_State *state) -> int {
   if (!builtins::mods.has_module_at(mod_idx)) {
     throw std::runtime_error(
         "Attempting to install module that the system does not know "
-        "about." NL DBG "Hint" NORMAL ": installing a module only works "
+        "about." LM_NL LM_HELP "Hint" LM_NORMAL
+        ": installing a module only works "
         "when the module has been previously defined, see documentation on "
         "`new_(exe|static|dynamic)`, and/or `Git` for more information.");
   }
@@ -527,20 +528,20 @@ auto install_impl(lua_State *state) -> int {
   // every time in case somebody changes the install_dir variable
   auto const install_dir =
       parent_path / fs::path(std::format("{}/{}.o", mod.install_dir, mod.name));
-  std::cout << std::format("making directory [{}]" NL, install_dir.string());
+  std::cout << std::format("making directory [{}]" LM_NL, install_dir.string());
   auto ec = std::error_code{};
   if (fs::create_directory(install_dir, ec); ec) {
     // TODO: update to push the ec message
-    std::cerr << ec.message() << NL;
+    std::cerr << ec.message() << LM_NL;
     lua_pushfstring(state, "Unable to create directory [%s]",
                     install_dir.c_str());
     return lua_error(state);
   }
   auto const cache_dir =
       fs::path(std::format("{}/__luamake_cache", mod.install_dir));
-  std::cout << std::format("making directory [{}]" NL, cache_dir.string());
+  std::cout << std::format("making directory [{}]" LM_NL, cache_dir.string());
   if (fs::create_directories(cache_dir, ec); ec) {
-    std::cerr << ec.message() << NL;
+    std::cerr << ec.message() << LM_NL;
     lua_pushstring(state, "Unable to create directory");
     return lua_error(state);
   }
@@ -554,14 +555,14 @@ auto install_impl(lua_State *state) -> int {
   auto files_to_compile = std::vector<std::string_view>();
   switch (maybe_cached_mod.index()) {
   case 0: {
-    std::cout << std::format("Checking [{}] cache" NL, mod.name);
+    std::cout << std::format("Checking [{}] cache" LM_NL, mod.name);
     auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
     gen_dep_tree_fut.get();
     if (mod == cached_mod) {
       files_to_compile =
           builtins::mods.get_tree_diff(mod_idx, mod.tree, cached_mod.tree);
       if (files_to_compile.empty()) {
-        std::cout << std::format("\t[{}] already built" NL, mod.name);
+        std::cout << std::format("\t[{}] already built" LM_NL, mod.name);
         return 1;
       }
     } else {
@@ -576,7 +577,7 @@ auto install_impl(lua_State *state) -> int {
   case 1: {
     // TODO: update this because it's not really an error
     auto const &error_message = std::get<std::string>(maybe_cached_mod);
-    std::cerr << std::format("[{}]" NL, error_message);
+    std::cerr << std::format("[{}]" LM_NL, error_message);
     gen_dep_tree_fut.get();
     // we don't have a cached tree to comp against, so we just push back
     // everything to be compiled
@@ -631,12 +632,12 @@ auto install_impl(lua_State *state) -> int {
     }();
 
     if (builtins::cl_options.verbose) {
-      std::cout << std::format("[{}]" NL, invoked_command);
+      std::cout << std::format("[{}]" LM_NL, invoked_command);
     } else {
       if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
-        std::cout << std::format("Making archive for [{}]" NL, mod.name);
+        std::cout << std::format("Making archive for [{}]" LM_NL, mod.name);
       } else {
-        std::cout << std::format("Building [{}]" NL, mod.name);
+        std::cout << std::format("Building [{}]" LM_NL, mod.name);
       }
     }
     // NOTE: figure out how to handle errors with the lua vm, if there's
@@ -655,7 +656,7 @@ auto install_impl(lua_State *state) -> int {
     // async, we might no longer be in the pcall function, so we really just
     // need to change how we store + handle errors :)
     if (os_call(invoked_command) != 0) {
-      fprintf(stderr, "Error compiling [%s]" NL, invoked_command.c_str());
+      fprintf(stderr, "Error compiling [%s]" LM_NL, invoked_command.c_str());
       builtins::mods.set_state_at(mod_idx,
                                   builtins::LakeModules::ModState::error);
       return;
@@ -679,12 +680,13 @@ auto install_impl(lua_State *state) -> int {
           "cp --target-directory={} {}",
           (parent_path / mod.install_dir / mod.name).string(), formatted_files);
       if (builtins::cl_options.verbose) {
-        std::cout << std::format("[{}]" NL, copy_headers);
+        std::cout << std::format("[{}]" LM_NL, copy_headers);
       } else {
-        std::cout << std::format("Copying [{}] headers" NL, mod.name);
+        std::cout << std::format("Copying [{}] headers" LM_NL, mod.name);
       }
       if (os_call(copy_headers) != 0) {
-        fprintf(stderr, "Error moving headers [%s]" NL, copy_headers.c_str());
+        fprintf(stderr, "Error moving headers [%s]" LM_NL,
+                copy_headers.c_str());
         builtins::mods.set_state_at(mod_idx,
                                     builtins::LakeModules::ModState::error);
         return;
@@ -709,7 +711,8 @@ auto install_dummy_impl(lua_State *state) -> int {
   if (!builtins::mods.has_module_at(mod_idx)) {
     throw std::runtime_error(
         "Attempting to install module that the system does not know "
-        "about." NL DBG "Hint" NORMAL ": installing a module only works "
+        "about." LM_NL LM_HELP "Hint" LM_NORMAL
+        ": installing a module only works "
         "when the module has been previously defined, see documentation on "
         "`new_(exe|static|dynamic)`, and/or `Git` for more information.");
   }
@@ -764,8 +767,8 @@ auto Module::DepTree::append_path(fs::path const &path) -> StringViews {
         std::numeric_limits<unsigned int>::max()));
   }
 #ifdef DEBUG_MOD
-  std::cout << std::format("File not found yet, so returning str = ({}, {})" NL,
-                           start, end);
+  std::cout << std::format(
+      "File not found yet, so returning str = ({}, {})" LM_NL, start, end);
 #endif // DEBUG_MOD
   return StringViews{static_cast<unsigned int>(start),
                      static_cast<unsigned int>(end)};
@@ -785,7 +788,7 @@ auto Module::DepTree::append_dep(Module const &mod,
   if (possible_idx != DepTree::NIL_IDX) {
 #ifdef DEBUG_MOD
     std::cout << std::format(
-        "Already found dep [{}], pushing back it's info and returning" NL,
+        "Already found dep [{}], pushing back it's info and returning" LM_NL,
         dep.string());
 #endif // DEBUG_MOD
     if (parent_idx != DepTree::NIL_IDX) {
@@ -837,11 +840,11 @@ auto Module::DepTree::append_dep(Module const &mod,
       mods.get_allocator());
 
 #ifdef DEBUG_MOD
-  std::cout << std::format("Possible includes for {}: {{" NL, dep.string());
+  std::cout << std::format("Possible includes for {}: {{" LM_NL, dep.string());
   for (auto &&include : files_deps) {
-    std::cout << std::format("\t{}" NL, include.string());
+    std::cout << std::format("\t{}" LM_NL, include.string());
   }
-  std::cout << "}" NL;
+  std::cout << "}" LM_NL;
   std::cout.flush();
 
   mods.dump_paths(std::cout);
@@ -854,7 +857,7 @@ auto Module::DepTree::append_dep(Module const &mod,
           fs::relative(include / file, parent_path, ec);
       if (ec) {
         // idk maybe block these behind a verbose check(?)
-        std::cerr << std::format("\t{}" NL, ec.message());
+        std::cerr << std::format("\t{}" LM_NL, ec.message());
         ec.clear();
         continue;
       }
@@ -867,7 +870,7 @@ auto Module::DepTree::append_dep(Module const &mod,
       }
 
       if (ec) {
-        std::cerr << std::format("\t{}" NL, ec.message());
+        std::cerr << std::format("\t{}" LM_NL, ec.message());
         ec.clear();
         continue;
       }
@@ -887,7 +890,7 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   // HACK: idk theres some bug happening, this "fixes" it, but we have to
   // figure out where the acutal issue is
   if (end == 0) {
-    std::cerr << std::format("end == 0, something is wrong with idx [{}]" NL,
+    std::cerr << std::format("end == 0, something is wrong with idx [{}]" LM_NL,
                              idx);
     return fs::current_path();
   }
@@ -976,7 +979,7 @@ auto Module::DepTree::reserve(size_t min) noexcept(false) -> void {
 auto Module::DepTree::display(std::ostream &out,
                               unsigned int const depth) const noexcept -> void {
   out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
-      << "]" NL;
+      << "]" LM_NL;
   out.flush();
   out << std::hex;
   display_impl(out, depth, 0);
@@ -985,26 +988,26 @@ auto Module::DepTree::display(std::ostream &out,
 
 auto Module::DepTree::dump(std::ostream &out) const noexcept -> void {
   out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
-      << "]" NL;
-  out << std::format("num_files = [{}]" NL, num_files);
-  out << std::format("cap_files = [{}]" NL, cap_files);
+      << "]" LM_NL;
+  out << std::format("num_files = [{}]" LM_NL, num_files);
+  out << std::format("cap_files = [{}]" LM_NL, cap_files);
   for (auto i = size_t{}; i < num_files; ++i) {
     out << std::format(
-        "types[{}] = [{}]" NL, i,
+        "types[{}] = [{}]" LM_NL, i,
         static_cast<std::underlying_type_t<SourceFile_t>>(types[i]));
   }
   for (auto i = size_t{}; i < num_files; ++i) {
     auto &&[start, end] = files[i];
-    out << std::format("files[{}] = [{}, {}]" NL, i, start, end);
+    out << std::format("files[{}] = [{}, {}]" LM_NL, i, start, end);
   }
   for (auto i = size_t{}; i < num_files; ++i) {
     for (auto j = size_t{}; j < deps[i].size(); ++j) {
-      out << std::format("deps[{}][{}] = [{}]" NL, i, j, deps[i][j]);
+      out << std::format("deps[{}][{}] = [{}]" LM_NL, i, j, deps[i][j]);
     }
   }
   out << std::hex;
   for (auto i = size_t{}; i < num_files; ++i) {
-    out << std::format("hashes[{}] = [{}]" NL, i, hashes[i]);
+    out << std::format("hashes[{}] = [{}]" LM_NL, i, hashes[i]);
   }
   out << std::dec;
 }
@@ -1014,7 +1017,7 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
     -> void {
   auto const indents = std::string(depth, '\t');
 
-  out << indents << "{" NL;
+  out << indents << "{" LM_NL;
   out << indents << "\"type\":\"";
   switch (types[idx]) {
   case SourceFile_t::IMPL:
@@ -1030,24 +1033,24 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
     out << "MISC";
     break;
   };
-  out << "\"," NL;
+  out << "\"," LM_NL;
 
   out << indents << "\"path\":\""
       << std::string_view{all_paths.buffer + files[idx].start,
                           all_paths.buffer + files[idx].end}
-      << "\"," NL;
+      << "\"," LM_NL;
 
-  out << indents << "\"hash\":" << hashes[idx] << "," NL;
+  out << indents << "\"hash\":" << hashes[idx] << "," LM_NL;
 
-  out << indents << "\"deps\":[" NL;
+  out << indents << "\"deps\":[" LM_NL;
 
   for (auto const dep_idx : deps[idx]) {
     display_impl(out, depth + 1, dep_idx);
   }
 
-  out << indents << "]" NL;
+  out << indents << "]" LM_NL;
 
-  out << indents << "}" NL;
+  out << indents << "}" LM_NL;
 }
 #endif // DEBUG_MOD
 
@@ -1106,35 +1109,35 @@ auto Module::display(std::ostream &out) const noexcept -> void {
     break;
   }
 
-  out << NL;
+  out << LM_NL;
 
   out << "roots = [";
   std::for_each(roots.begin(), roots.end(), _display);
-  out << "]" NL;
+  out << "]" LM_NL;
 
   out << "headers = [";
   std::for_each(headers.begin(), headers.end(), _display);
-  out << "]" NL;
+  out << "]" LM_NL;
 
   out << "includes= [";
   std::for_each(includes.begin(), includes.end(), _display);
-  out << "]" NL;
+  out << "]" LM_NL;
 
   out << "dep_includes= [";
   std::for_each(dep_includes.begin(), dep_includes.end(), _display);
-  out << "]" NL;
+  out << "]" LM_NL;
 
   out << "sys_includes= [";
   std::for_each(sys_includes.begin(), sys_includes.end(), _display);
-  out << "]" NL;
+  out << "]" LM_NL;
 
   out << "linking = [";
   std::for_each(linking.begin(), linking.end(), _display);
-  out << "]" NL;
+  out << "]" LM_NL;
 
-  out << "compiler = " << compiler << NL;
-  out << "name = " << name << NL;
-  out << "install_dir = " << install_dir << NL;
+  out << "compiler = " << compiler << LM_NL;
+  out << "name = " << name << LM_NL;
+  out << "install_dir = " << install_dir << LM_NL;
   out.flush();
 }
 #endif // DEBUG_MOD
@@ -1452,7 +1455,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     }
   } break;
   case DYNAMIC:
-    std::cerr << "Not currently implimented" NL;
+    std::cerr << "Not currently implimented" LM_NL;
     std::terminate();
     break;
   }
@@ -1825,7 +1828,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << (lua_toboolean(state, -1) ? "true" : "false");
     break;
   case LUA_TTABLE: {
-    std::cout << "{" NL;
+    std::cout << "{" LM_NL;
     auto const tbl_idx = lua_absindex(state, -1);
     for (lua_pushnil(state); lua_next(state, tbl_idx) != 0;) {
       std::cout << indents(depth);
@@ -1852,7 +1855,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << lua_typename(type);
     break;
   }
-  std::cout << NL;
+  std::cout << LM_NL;
 }
 
 auto Builder::clang(lua_State *state) noexcept -> int {
@@ -2165,7 +2168,7 @@ auto Runner::run(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
 
-    std::cout << "[" << exe_path << "]" NL;
+    std::cout << "[" << exe_path << "]" LM_NL;
     std::cout.flush();
 
     os_call(exe_path);
@@ -2375,7 +2378,7 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
   auto &lof = compiled_files[idx.mods];
   auto const &mod = mods[idx.mods];
 #ifdef DEBUG_MOD
-  std::cout << DBG "[pushing back]" NORMAL
+  std::cout << LM_HELP "[pushing back]" LM_NORMAL
             << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
             << " to " << idx << std::endl;
 #endif // DEBUG_MOD
@@ -2448,7 +2451,7 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
       }
     }();
 #ifdef DEBUG_MOD
-    std::cout << DBG "[pushing back]" NORMAL
+    std::cout << LM_HELP "[pushing back]" LM_NORMAL
               << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, fname)
               << " to " << mod_idx << std::endl;
 #endif // DEBUG_MOD
@@ -2555,22 +2558,22 @@ auto LakeModules::resize_paths() -> void {
 
 #ifdef DEBUG_MOD
 auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
-  out << "modules.paths = {" NL;
+  out << "modules.paths = {" LM_NL;
   for (auto i = uint{0}; i < num_paths; ++i) {
-    out << "\t[" << i << "][" << luamake_paths[i].string() << "]" NL;
+    out << "\t[" << i << "][" << luamake_paths[i].string() << "]" LM_NL;
   }
-  out << "}" NL;
+  out << "}" LM_NL;
   out.flush();
 }
 
 auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
-  out << "modules.mods = {" NL;
+  out << "modules.mods = {" LM_NL;
   for (auto i = uint{}; i < num_mods; ++i) {
     out << '[' << i << "] {";
     mods[i].display(out);
     out << '}';
   }
-  out << "}" NL;
+  out << "}" LM_NL;
   out.flush();
 }
 #endif // DEBUG_MOD

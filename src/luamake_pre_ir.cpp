@@ -126,16 +126,20 @@ enum class ir_t : u8 {
   ELSE,
   ENDIF,
   DEFINE,
-  SPACE, // only used when dealing with #define directives
   INCLUDE,
   UNDEF,
   PRAGMA,
+  WARNING,
+
+  // tokens needed during parsing
+  SPACE,
   LANGLE,
   RANGLE,
   QUOTE,
   LPAREN,
   RPAREN,
-  MACRO, // this is used when lexing, we leave the parsing to later
+  // this is used when lexing, we leave the parsing to later
+  MACRO,
   LIT_STRING,
   LEXEME,
   VARIADIC
@@ -586,6 +590,19 @@ struct DefineFuncNode final : AstNode {
   std::string body;
 };
 
+struct DefineVariadicFuncNode final : AstNode {
+  DefineVariadicFuncNode(std::string &&name,
+                         std::vector<std::string> &&parameters,
+                         std::string &&body) noexcept
+      : name(name), parameters(parameters), body(body) {}
+  ~DefineVariadicFuncNode() final = default;
+  auto accept(AstVisitor &) -> void final;
+
+  std::string name;
+  std::vector<std::string> parameters;
+  std::string body;
+};
+
 struct UndefNode final : AstNode {
   UndefNode(std::string const &str) noexcept : name(str) {}
   ~UndefNode() final = default;
@@ -597,6 +614,14 @@ struct UndefNode final : AstNode {
 struct PragmaNode final : AstNode {
   PragmaNode(std::string const &value) noexcept : value(value) {}
   ~PragmaNode() final = default;
+  auto accept(AstVisitor &visitor) -> void final;
+
+  std::string value;
+};
+
+struct WarningNode final : AstNode {
+  WarningNode(std::string const &value) noexcept : value(value) {}
+  ~WarningNode() final = default;
   auto accept(AstVisitor &visitor) -> void final;
 
   std::string value;
@@ -801,8 +826,10 @@ struct AstVisitor {
   virtual auto visit_local_include(LocalIncludeNode &) -> void = 0;
   virtual auto visit_define(DefineNode &) -> void = 0;
   virtual auto visit_define_func(DefineFuncNode &) -> void = 0;
+  virtual auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void = 0;
   virtual auto visit_undef(UndefNode &) -> void = 0;
   virtual auto visit_pragma(PragmaNode &) -> void = 0;
+  virtual auto visit_warning(WarningNode &) -> void = 0;
 };
 
 auto IfNode::accept(AstVisitor &visitor) -> void {
@@ -832,11 +859,17 @@ auto DefineNode::accept(AstVisitor &visitor) -> void {
 auto DefineFuncNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_define_func(*this);
 }
+auto DefineVariadicFuncNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_define_variadic_func(*this);
+}
 auto UndefNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_undef(*this);
 }
 auto PragmaNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_pragma(*this);
+}
+auto WarningNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_warning(*this);
 }
 
 #ifdef DEBUG_CPP
@@ -847,11 +880,11 @@ struct AstPrinter final : AstVisitor {
   AstPrinter(std::ostream &out) noexcept : out(out), depth(0) {}
 
   auto print(Ast &ast) -> void {
-    out << "AstPrinter:" NL;
+    out << "AstPrinter:" LM_NL;
     for (auto &&node : ast.nodes) {
       node->accept(*this);
     }
-    out << "---" NL;
+    out << "---" LM_NL;
     out.flush();
   }
 
@@ -868,8 +901,10 @@ struct AstPrinter final : AstVisitor {
   auto visit_local_include(LocalIncludeNode &) -> void final;
   auto visit_define(DefineNode &) -> void final;
   auto visit_define_func(DefineFuncNode &) -> void final;
+  auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void final;
   auto visit_undef(UndefNode &) -> void final;
   auto visit_pragma(PragmaNode &) -> void final;
+  auto visit_warning(WarningNode &) -> void final;
 };
 #endif // DEBUG_CPP
 
@@ -904,8 +939,10 @@ struct AstIncluder final : AstVisitor {
   auto visit_local_include(LocalIncludeNode &) -> void final;
   auto visit_define(DefineNode &) -> void final;
   auto visit_define_func(DefineFuncNode &) -> void final;
+  auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void final;
   auto visit_undef(UndefNode &) -> void final;
   auto visit_pragma(PragmaNode &) -> void final;
+  auto visit_warning(WarningNode &) -> void final;
 };
 
 auto constexpr to_string(ir_t t) -> std::string_view {
@@ -929,6 +966,8 @@ auto constexpr to_string(ir_t t) -> std::string_view {
   case ir_t::UNDEF:
     return std::string_view("UNDEF");
   case ir_t::PRAGMA:
+    return std::string_view("PRAGMA");
+  case ir_t::WARNING:
     return std::string_view("PRAGMA");
   case ir_t::INCLUDE:
     return std::string_view("INCLUDE");
@@ -975,7 +1014,8 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
     {std::string_view{"#define"}, ir_t::DEFINE},
     {std::string_view{"#include"}, ir_t::INCLUDE},
     {std::string_view{"#undef"}, ir_t::UNDEF},
-    {std::string_view{"#pragma"}, ir_t::PRAGMA}
+    {std::string_view{"#pragma"}, ir_t::PRAGMA},
+    {std::string_view{"#warning"}, ir_t::WARNING}
   }};
   auto constexpr chars_of_interest = std::string_view{"#/\"'"};
   // clang-format on
@@ -1114,8 +1154,10 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         break;
       default:
 #ifdef DEBUG_CPP
-        std::cerr << WARNING "Unknown ir_t preprocessor directive ["
-                  << to_string(keyword->second) << "]" NORMAL NL;
+        std::cerr << std::format(
+            LM_WARNING
+            "Unknown ir_t preprocessor directive [{}]" LM_NORMAL LM_NL,
+            to_string(keyword->second));
 #endif // DEBUG_CPP
         lex.types.push_back(keyword->second);
         break;
@@ -1163,7 +1205,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
     }
   }
 #ifdef DEBUG_CPP
-  std::cout << "Lexer:" NL;
+  std::cout << "Lexer:" LM_NL;
   lex.display(std::cout).flush();
 #endif // DEBUG_CPP
   return lex;
@@ -1718,11 +1760,20 @@ auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
 
   switch (types[cur_t]) {
   case ir_t::LPAREN: {
+    auto is_variadic = false;
     auto parameters = std::vector<std::string>();
     ++cur_t;
     while (types[cur_t] == ir_t::LEXEME) {
       parameters.push_back(lexemes[cur_lex++]);
       ++cur_t;
+    }
+    // idk this is just something to make things work, so far we don't support
+    // actually evaluating these functions (or any functions actually), but this
+    // makes it so that we can parse these
+    if (types[cur_t] == ir_t::VARIADIC) {
+      parameters.push_back("__VA_ARGS__");
+      ++cur_t;
+      is_variadic = true;
     }
     expect(cur_t, ir_t::RPAREN);
     ++cur_t;
@@ -1731,8 +1782,13 @@ auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
     }
     ++cur_t;
     auto body = lexemes[cur_lex++];
-    return std::make_unique<DefineFuncNode>(
-        std::move(lex), std::move(parameters), std::move(body));
+    if (is_variadic) {
+      return std::make_unique<DefineVariadicFuncNode>(
+          std::move(lex), std::move(parameters), std::move(body));
+    } else {
+      return std::make_unique<DefineFuncNode>(
+          std::move(lex), std::move(parameters), std::move(body));
+    }
   } break;
   case ir_t::MACRO: {
     auto macro = lexemes[cur_lex++];
@@ -1928,16 +1984,16 @@ auto Lexer::expect(size_t cur_t, ir_t tkn, std::string_view calling_func)
 
 #ifdef DEBUG_CPP
 auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
-  out << "Types:" NL "\t";
+  out << "Types:" LM_NL "\t";
   for (auto const &type : types) {
     out << '[' << to_string(type) << ']';
   }
-  out << NL;
-  out << "Lexemes:" NL "\t";
+  out << LM_NL;
+  out << "Lexemes:" LM_NL "\t";
   for (auto const &lexeme : lexemes) {
     out << '[' << lexeme << ']';
   }
-  out << NL;
+  out << LM_NL;
   return out;
 }
 #endif // DEBUG_CPP
@@ -2302,16 +2358,16 @@ auto Expressions::ExprLexer::primary(allocator::Page &page, size_t &cur_t,
 #ifdef DEBUG_CPP
 auto Expressions::ExprLexer::display(std::ostream &out) const noexcept
     -> std::ostream & {
-  out << "Tokens:" NL "\t";
+  out << "Tokens:" LM_NL "\t";
   for (auto const &type : tkns) {
     out << '[' << to_string(type) << ']';
   }
-  out << NL;
-  out << "Macros:" NL "\t";
+  out << LM_NL;
+  out << "Macros:" LM_NL "\t";
   for (auto const &macro : macros) {
     out << '[' << macro << ']';
   }
-  out << NL;
+  out << LM_NL;
   return out;
 }
 #endif // DEBUG_CPP
@@ -2814,7 +2870,7 @@ auto Expressions::expand_macro(std::string const &macro_to_expand,
 
 #ifdef DEBUG_CPP
 auto AstPrinter::visit_if(IfNode &i) -> void {
-  out << get_indents() << "(if (" << i.condition << ")" NL;
+  out << get_indents() << "(if (" << i.condition << ")" LM_NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2826,11 +2882,11 @@ auto AstPrinter::visit_if(IfNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_ifdef(IfDefNode &i) -> void {
-  out << get_indents() << "(ifdef (" << i.macro << ")" NL;
+  out << get_indents() << "(ifdef (" << i.macro << ")" LM_NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2842,11 +2898,11 @@ auto AstPrinter::visit_ifdef(IfDefNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_ifndef(IfNDefNode &i) -> void {
-  out << get_indents() << "(ifndef (" << i.macro << ")" NL;
+  out << get_indents() << "(ifndef (" << i.macro << ")" LM_NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2858,35 +2914,35 @@ auto AstPrinter::visit_ifndef(IfNDefNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_elif(ElifNode &e) -> void {
-  out << get_indents() << "(elif (" << e.condition << ")" NL;
+  out << get_indents() << "(elif (" << e.condition << ")" LM_NL;
   ++depth;
   for (auto &&thens : e.then_branch) {
     thens->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_else(ElseNode &e) -> void {
-  out << get_indents() << "(else (" NL;
+  out << get_indents() << "(else (" LM_NL;
   ++depth;
   for (auto &&elses : e.stmts) {
     elses->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_global_include(GlobalIncludeNode &global) -> void {
-  out << get_indents() << "(include global (" << global.path << "))" NL;
+  out << get_indents() << "(include global (" << global.path << "))" LM_NL;
 }
 
 auto AstPrinter::visit_local_include(LocalIncludeNode &local) -> void {
-  out << get_indents() << "(include local (" << local.path << "))" NL;
+  out << get_indents() << "(include local (" << local.path << "))" LM_NL;
 }
 
 auto AstPrinter::visit_define(DefineNode &d) -> void {
@@ -2896,7 +2952,7 @@ auto AstPrinter::visit_define(DefineNode &d) -> void {
     out << d.lexeme.value();
     out << '}';
   }
-  out << "))" NL;
+  out << "))" LM_NL;
 }
 
 auto AstPrinter::visit_define_func(DefineFuncNode &f) -> void {
@@ -2905,16 +2961,30 @@ auto AstPrinter::visit_define_func(DefineFuncNode &f) -> void {
     out << param << ",";
   }
   out << ")";
-  out << "{" << f.body << "}))" NL;
+  out << "{" << f.body << "}))" LM_NL;
+}
+
+auto AstPrinter::visit_define_variadic_func(DefineVariadicFuncNode &func)
+    -> void {
+  out << get_indents() << "(define (" << func.name << "(";
+  for (auto &&param : func.parameters) {
+    out << param << ",";
+  }
+  out << ")";
+  out << "{" << func.body << "}))" LM_NL;
 }
 
 auto AstPrinter::visit_undef(UndefNode &u) -> void {
   out << get_indents() << "(undef (" << u.name;
-  out << "))" NL;
+  out << "))" LM_NL;
 }
 
 auto AstPrinter::visit_pragma(PragmaNode &p) -> void {
-  out << get_indents() << "(pragma {" << p.value << "})" NL;
+  out << get_indents() << "(pragma {" << p.value << "})" LM_NL;
+}
+
+auto AstPrinter::visit_warning(WarningNode &w) -> void {
+  out << get_indents() << "(warning {" << w.value << "})" LM_NL;
 }
 #endif // DEBUG_CPP
 
@@ -3023,6 +3093,25 @@ auto AstIncluder::visit_define_func(DefineFuncNode &f) -> void {
   macros[cur_format] = f.body;
 }
 
+// TODO: we have to properly handle __VA_ARGS__, how they're stored/bound when
+// called
+auto AstIncluder::visit_define_variadic_func(DefineVariadicFuncNode &func)
+    -> void {
+  // when we fix how function macros are stored, we'll need to update this
+  auto cur_format = [&func]() -> std::string {
+    auto res = func.name;
+    res.append("(");
+    for (auto i = size_t{}; i < func.parameters.size(); ++i) {
+      res.append(func.parameters[i]);
+      if (i != func.parameters.size() - 1)
+        res.append(",");
+    }
+    res.append(")");
+    return res;
+  }();
+  macros[cur_format] = func.body;
+}
+
 auto AstIncluder::visit_undef(UndefNode &u) -> void {
   if (macros.contains(u.name)) {
     macros.erase(u.name);
@@ -3037,6 +3126,10 @@ auto AstIncluder::visit_undef(UndefNode &u) -> void {
 
 auto AstIncluder::visit_pragma(PragmaNode &) -> void {
   return; // ? idk if there's actually anything for us to do here
+}
+
+auto AstIncluder::visit_warning(WarningNode &warn) -> void {
+  std::cerr << std::format("Warning: [{}]" LM_NL, warn.value);
 }
 
 namespace B {
@@ -3902,18 +3995,18 @@ auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
 
 #ifdef DEBUG_CPP
 auto Interpreter::dump_macros(std::ostream &out) noexcept -> void {
-  out << "macros = {" NL;
+  out << "macros = {" LM_NL;
   for (auto &&[name, value] : macros) {
-    out << name << "=" << value << "," NL;
+    out << name << "=" << value << "," LM_NL;
   }
-  out << "}" NL;
+  out << "}" LM_NL;
 
   out << "defined_macros = ";
-  out << "[" << defs.size() << "]{" NL;
+  out << "[" << defs.size() << "]{" LM_NL;
   for (auto const &name : defs) {
-    out << name << "," NL;
+    out << name << "," LM_NL;
   }
-  out << "}" NL;
+  out << "}" LM_NL;
 }
 #endif // DEBUG_CPP
 } // namespace luamake::pp

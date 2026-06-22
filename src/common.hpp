@@ -8,48 +8,48 @@
 // have color in the terminal for displaying errors on all platforms
 
 #if defined(_WIN32)
-#define NL "\r\n"
+#define LM_NL "\r\n"
 #elif defined(__unix__)
-#define NL "\n"
+#define LM_NL "\n"
 #elif defined(__MACH__)
-#define NL "\n"
+#define LM_NL "\n"
 #else
 #warning ("new line macro defined, you can help the project by adding another header guard and defining it");
-#define NL ""
+#define LM_NL ""
 #endif
 
 // color things for error messages/ warnings
 #ifdef NO_TERM_COLOR
-#define ERROR
-#define WARNING
-#define DBG
-#define NORMAL
+#define LM_ERROR
+#define LM_WARNING
+#define LM_DBG
+#define LM_NORMAL
 #else
 #if defined(__unix__) || defined(__MACH__)
-#define ERROR "\033[0;31m"
-#define WARNING "\033[0;33m"
-#define DBG "\033[0;32m"
-#define NORMAL "\033[0;0m"
+#define LM_ERROR "\033[0;31m"
+#define LM_WARNING "\033[0;33m"
+#define LM_HELP "\033[0;32m"
+#define LM_NORMAL "\033[0;0m"
 #else
-#define ERROR
-#define WARNING
-#define DBG
-#define NORMAL
+#define LM_ERROR
+#define LM_WARNING
+#define LM_DBG
+#define LM_NORMAL
 #endif
 #endif
 
 #define error_message(msg)                                                     \
-  fprintf(stderr, ERROR "Fatel Error:" NORMAL " " msg NL)
+  fprintf(stderr, LM_ERROR "Fatel Error:" LM_NORMAL " " msg LM_NL)
 #define ferror_message(msg, ...)                                               \
-  fprintf(stderr, ERROR "Fatel Error:" NORMAL " " msg NL, __VA_ARGS__)
+  fprintf(stderr, LM_ERROR "Fatel Error:" LM_NORMAL " " msg LM_NL, __VA_ARGS__)
 #define warning_message(msg)                                                   \
-  fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL)
+  fprintf(stderr, LM_WARNING "Warning:" LM_NORMAL " " msg LM_NL)
 #define fwarning_message(msg, ...)                                             \
-  fprintf(stderr, WARNING "Warning:" NORMAL " " msg NL, __VA_ARGS__)
+  fprintf(stderr, LM_WARNING "Warning:" LM_NORMAL " " msg LM_NL, __VA_ARGS__)
 
 #define ASSERT_ERROR(expr)                                                     \
   if ((expr)) {                                                                \
-    fprintf(stderr, ERROR "Fatel Error:" NORMAL " " #expr NL);                 \
+    fprintf(stderr, LM_ERROR "Fatel Error:" LM_NORMAL " " #expr LM_NL);        \
     assert(false);                                                             \
   }
 
@@ -57,12 +57,12 @@
 #define fn_print()                                                             \
   struct __print final {                                                       \
     __print() noexcept {                                                       \
-      fprintf(stderr, "\t" DBG "calling" NORMAL " [%s]" NL,                    \
+      fprintf(stderr, "\t" LM_HELP "calling" LM_NORMAL " [%s]" LM_NL,          \
               __PRETTY_FUNCTION__);                                            \
       fflush(stderr);                                                          \
     }                                                                          \
     ~__print() noexcept {                                                      \
-      fprintf(stderr, "\t\t" DBG "exiting" NORMAL " [%s]" NL,                  \
+      fprintf(stderr, "\t\t" LM_HELP "exiting" LM_NORMAL " [%s]" LM_NL,        \
               __PRETTY_FUNCTION__);                                            \
       fflush(stderr);                                                          \
     }                                                                          \
@@ -72,7 +72,7 @@
 #define expr_dbg(expr)                                                         \
   do {                                                                         \
     auto const _expr_res = (expr);                                             \
-    std::cerr << DBG "[expr] " NORMAL #expr " = " << _expr_res << '\n';        \
+    std::cerr << LM_HELP "[expr] " LM_NORMAL #expr " = " << _expr_res << '\n'; \
   } while (false);
 #else
 #define fn_print()

@@ -80,9 +80,9 @@ auto CompilationPool::add_compile_tasks(
             "{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path, path.c_str(),
             install_dir, name, path.filename().c_str());
         if (builtins::cl_options.verbose) {
-          fprintf(stdout, "[%s]" NL, invoked_command.c_str());
+          fprintf(stdout, "[%s]" LM_NL, invoked_command.c_str());
         } else {
-          fprintf(stdout, "Building [%s]" NL, path.c_str());
+          fprintf(stdout, "Building [%s]" LM_NL, path.c_str());
         }
         if (os_call(invoked_command) == 0) {
           builtins::mods.add_compiled_file(idx, path.filename().string());
