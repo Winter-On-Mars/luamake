@@ -182,6 +182,7 @@ struct Lexer final {
   auto handle_undef(size_t &, size_t &) -> std::unique_ptr<AstNode>;
   auto handle_include(size_t &, size_t &) -> std::unique_ptr<AstNode>;
   auto handle_pragma(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_warning(size_t &, size_t &) -> std::unique_ptr<AstNode>;
 
   auto handle_elif(size_t &, size_t &) -> ptr<ElifNode>;
   auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
@@ -968,7 +969,7 @@ auto constexpr to_string(ir_t t) -> std::string_view {
   case ir_t::PRAGMA:
     return std::string_view("PRAGMA");
   case ir_t::WARNING:
-    return std::string_view("PRAGMA");
+    return std::string_view("WARNING");
   case ir_t::INCLUDE:
     return std::string_view("INCLUDE");
   case ir_t::LANGLE:
@@ -1138,6 +1139,10 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         break;
       case ir_t::PRAGMA:
         lex.types.push_back(ir_t::PRAGMA);
+        i = lex.produce_lexeme(fcontent, skip_ws(fcontent, i));
+        break;
+      case ir_t::WARNING:
+        lex.types.push_back(ir_t::WARNING);
         i = lex.produce_lexeme(fcontent, skip_ws(fcontent, i));
         break;
       case ir_t::ENDIF:
@@ -1396,6 +1401,8 @@ auto Lexer::declaration(size_t &cur_t, size_t &cur_lex)
     return handle_include(cur_t, cur_lex);
   case ir_t::PRAGMA:
     return handle_pragma(cur_t, cur_lex);
+  case ir_t::WARNING:
+    return handle_warning(cur_t, cur_lex);
   case ir_t::ELIF: // TODO: throw for these with their own special error
                    // messages
     [[fallthrough]];
@@ -1842,6 +1849,17 @@ auto Lexer::handle_pragma(size_t &cur_t, size_t &cur_lex)
   return std::make_unique<PragmaNode>(value);
 }
 
+auto Lexer::handle_warning(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  ++cur_t;
+  if (types[cur_t] != ir_t::LEXEME)
+    throw std::runtime_error(
+        std::format("Expected lexeme in #warning preprocessor directive"));
+  ++cur_t;
+  auto value = lexemes[cur_lex++];
+  return std::make_unique<WarningNode>(value);
+}
+
 auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
   ++cur_t;
   expect(cur_t, ir_t::MACRO);
@@ -1872,11 +1890,12 @@ auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
     case ir_t::INCLUDE:
       then_branch.push_back(handle_include(cur_t, cur_lex));
       break;
-    case ir_t::PRAGMA: {
-      auto res = handle_pragma(cur_t, cur_lex);
-      if (res)
-        then_branch.push_back(std::move(res));
-    } break;
+    case ir_t::PRAGMA:
+      then_branch.push_back(handle_pragma(cur_t, cur_lex));
+      break;
+    case ir_t::WARNING:
+      then_branch.push_back(handle_warning(cur_t, cur_lex));
+      break;
     case ir_t::ELIF:
       [[fallthrough]];
     case ir_t::ENDIF:
@@ -1885,9 +1904,9 @@ auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
       unreachable();
       break;
     default:
-      throw std::runtime_error(
-          std::format("Unexpected token [{}] found in top level scope.",
-                      to_string(types[cur_t])));
+      throw std::runtime_error(std::format("Unexpected token [{}] found in top "
+                                           "level scope, near #elif directive.",
+                                           to_string(types[cur_t])));
     }
   }
 
@@ -1920,11 +1939,12 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
     case ir_t::INCLUDE:
       res.push_back(handle_include(cur_t, cur_lex));
       break;
-    case ir_t::PRAGMA: {
-      auto prag = handle_pragma(cur_t, cur_lex);
-      if (prag)
-        res.push_back(std::move(prag));
-    } break;
+    case ir_t::PRAGMA:
+      res.push_back(handle_pragma(cur_t, cur_lex));
+      break;
+    case ir_t::WARNING:
+      res.push_back(handle_warning(cur_t, cur_lex));
+      break;
     case ir_t::ELSE: // this error *should* be handled elsewhere
       [[fallthrough]];
     case ir_t::ELIF:
@@ -1934,7 +1954,8 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
       break;
     default:
       throw std::runtime_error(
-          std::format("Unexpected token [{}] found in top level scope.",
+          std::format("Unexpected token [{}] found in top "
+                      "level scope, near a #else directive.",
                       to_string(types[cur_t])));
     }
   }
@@ -3982,6 +4003,7 @@ auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
 
   auto macros_b = pp::MacroMap();
   auto defs_b = pp::StringSet();
+  /*
   auto const test = B::get_includes(file, alloc, macros_b, defs_b);
   std::cout << "files from the B\n";
   for (auto &&f : test) {
@@ -3989,6 +4011,7 @@ auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
   }
   std::cout << "---\n";
   return test;
+  */
 #endif // DEBUG
   return vec;
 }
