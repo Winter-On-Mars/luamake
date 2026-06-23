@@ -1475,16 +1475,15 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   switch (type) {
   case Module_t::EXE: {
     includes.reserve(1);
-    auto const tmp = fs::canonical(roots[0]).parent_path();
-    includes.push_back(tmp);
+    includes.push_back(fs::canonical(roots[0]).parent_path());
   } break;
   case Module_t::STATIC:
     includes.reserve(roots.size());
     for (auto const &root : roots) {
-      auto const found = std::find(includes.begin(), includes.end(),
-                                   fs::canonical(root.parent_path()));
+      auto const parent_p = fs::canonical(root).parent_path();
+      auto const found = std::find(includes.begin(), includes.end(), parent_p);
       if (found != includes.end()) {
-        includes.push_back(fs::canonical(root.parent_path()));
+        includes.push_back(parent_p);
       }
     }
   case Module_t::DYNAMIC:
