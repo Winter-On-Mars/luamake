@@ -530,7 +530,7 @@ auto install_impl(lua_State *state) -> int {
       parent_path / fs::path(std::format("{}/{}.o", mod.install_dir, mod.name));
   std::cout << std::format("making directory [{}]" LM_NL, install_dir.string());
   auto ec = std::error_code{};
-  if (fs::create_directory(install_dir, ec); ec) {
+  if (fs::create_directories(install_dir, ec); ec) {
     // TODO: update to push the ec message
     std::cerr << ec.message() << LM_NL;
     lua_pushfstring(state, "Unable to create directory [%s]",
@@ -1475,12 +1475,24 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   switch (type) {
   case Module_t::EXE: {
     includes.reserve(1);
-    includes.push_back(fs::canonical(roots[0]).parent_path());
+    [[likely]]
+    if (roots[0].has_parent_path()) {
+      includes.push_back(fs::canonical(roots[0]).parent_path());
+    } else {
+    }
   } break;
   case Module_t::STATIC:
     includes.reserve(roots.size());
     for (auto const &root : roots) {
-      auto const parent_p = fs::canonical(root).parent_path();
+      auto const parent_p = [&]() -> fs::path {
+        expr_dbg(root.has_parent_path());
+        if (root.has_parent_path()) {
+          return fs::canonical(root.parent_path());
+        } else {
+          return fs::canonical(root).parent_path();
+        }
+      }();
+      expr_dbg(parent_p);
       auto const found = std::find(includes.begin(), includes.end(), parent_p);
       if (found != includes.end()) {
         includes.push_back(parent_p);
