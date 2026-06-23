@@ -1485,11 +1485,10 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     includes.reserve(roots.size());
     for (auto const &root : roots) {
       auto const parent_p = [&]() -> fs::path {
-        expr_dbg(root.has_parent_path());
         if (root.has_parent_path()) {
-          return fs::canonical(root.parent_path());
+          return fs::canonical(previous_path / root.parent_path());
         } else {
-          return fs::canonical(root).parent_path();
+          return previous_path;
         }
       }();
       expr_dbg(parent_p);
