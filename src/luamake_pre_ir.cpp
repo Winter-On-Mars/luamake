@@ -2398,14 +2398,36 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
   auto tkns = std::vector<expr_t>();
   auto macros = std::vector<std::string>();
   for (auto i = size_t{}; i < str.size();) {
-    // TODO: probably add a macro for these basic types so that we don't have to
-    // write out a bunch of things every time, and so that this function can be
-    // smaller
-    switch (auto ch = str[i]) {
+    switch (auto const ch = str[i]) {
     case '+':
       tkns.push_back(expr_t::PLUS);
       ++i;
       break;
+    case '/':
+      ++i;
+      if (i >= str.size())
+        throw std::runtime_error("found '/' not attached to anything, when "
+                                 "evaluating a macro near #(el)?if");
+      if (str[i] ==
+          '/') { // "single line" comment
+                 // [[https://mastodon.social/@winter_on_mars/116801779149164950]]
+        do {
+          i = luamake::skip_until('\n', str, i);
+        } while (str[i - 1] == '\\' && str[i - 2] != '\\');
+      } else if (str[i] == '*') { // multi-line comment
+        for (;;) {
+          i = luamake::skip_until('*', str, i);
+          if (i >= str.size() || i + 1 >= str.size())
+            throw std::runtime_error(
+                "Unterminated multi-line comment found near #(el)?if");
+          if (str[i + 1] == '/')
+            break;
+          ++i; // make sure we don't get in an infinite loop
+        }
+        ++i;   // i + 1 == '/'
+      } else { // math
+        tkns.push_back(expr_t::SLASH);
+      }
     case '(':
       tkns.push_back(expr_t::LPAREN);
       ++i;
@@ -2504,11 +2526,17 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
     default: {
       if (is_digit(ch)) {
         lex_integer(str, i, tkns, macros);
-      } else {
+      } else if (is_alpha(ch) || ch == '_') {
+        // TODO: also something about unicode
+        // property XID_Start
+        // [[https://en.cppreference.com/cpp/language/identifiers]]
         auto const start = i;
         i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
         tkns.push_back(expr_t::MACRO);
         macros.push_back(std::string(str.data() + start, str.data() + i));
+      } else {
+        throw std::runtime_error(
+            std::format("Expression lexing, unknown char [{}]", ch));
       }
     }
     }
