@@ -147,6 +147,9 @@ enum class ir_t : u8 {
 
 constexpr auto to_string(ir_t) -> std::string_view;
 
+// TODO: there is some thread use-after-free with this struct, i assume when
+// we're building bigger projects, something is going out of scope, that we just
+// haven't caught when building smaller projects
 struct Lexer final {
   Lexer(Lexer const &) = delete;
   Lexer &operator=(Lexer const &) = delete;
@@ -254,7 +257,9 @@ struct ExprNode final {
       NEQ,
       EQ,
       AND,
-      OR
+      OR,
+      LSHIFT,
+      RSHIFT,
     };
     ExprNode const *lhs;
     ExprNode const *rhs;
@@ -657,6 +662,8 @@ enum class expr_t {
   LESS_EQ,
   GREATER,
   GREATER_EQ,
+  LSHIFT,
+  RSHIFT,
   STRINGIZING,
   CONCAT,
   PLUS,
@@ -701,6 +708,10 @@ auto constexpr to_string(expr_t t) noexcept -> std::string_view {
     return std::string_view{"GREATER"};
   case expr_t::GREATER_EQ:
     return std::string_view{"GREATER_EQ"};
+  case expr_t::LSHIFT:
+    return std::string_view{"LSHIFT"};
+  case expr_t::RSHIFT:
+    return std::string_view{"RSHIFT"};
   case expr_t::STRINGIZING:
     return std::string_view{"STRINGIZING"};
   case expr_t::CONCAT:
@@ -759,12 +770,14 @@ struct ExprLexer final {
   auto _and(allocator::Page &, size_t &, size_t &) const -> ExprNode;
   auto equality(allocator::Page &, size_t &, size_t &) const -> ExprNode;
   auto comparison(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto shift(allocator::Page &, size_t &, size_t &) const -> ExprNode;
   auto term(allocator::Page &, size_t &, size_t &) const -> ExprNode;
   auto factor(allocator::Page &, size_t &, size_t &) const -> ExprNode;
   auto unary(allocator::Page &, size_t &, size_t &) const -> ExprNode;
   auto primary(allocator::Page &, size_t &, size_t &) const -> ExprNode;
 
   auto expect(size_t cur_t, expr_t &&tkn) const -> void {
+    [[unlikely]]
     if (tkns[cur_t] != tkn) {
       throw std::runtime_error(
           std::format("Unexpected token, expected {}, found {}", to_string(tkn),
@@ -2092,6 +2105,7 @@ auto ExprNode::expr_t() const noexcept -> ExprNode::Expr_t {
 auto ExprNode::eval(std::string_view const expr, allocator::Page &page,
                     pp::MacroMap const &macros, StringSet const &def_macros)
     -> int {
+  expr_dbg(expr);
   // TODO: idk fix these, they should be just one call(?)
   auto const expr_lex = Expressions::lex(expr);
   auto const expansion = Expressions::expand(expr_lex, macros, def_macros);
@@ -2268,10 +2282,22 @@ auto Expressions::ExprLexer::equality(allocator::Page &page, size_t &cur_t,
 
 auto Expressions::ExprLexer::comparison(allocator::Page &page, size_t &cur_t,
                                         size_t &cur_lex) const -> ExprNode {
-  auto lhs = term(page, cur_t, cur_lex);
+  auto lhs = shift(page, cur_t, cur_lex);
   while (cur_t < tkns.size() &&
          matching(tkns[cur_t], {expr_t::LESS, expr_t::LESS_EQ, expr_t::GREATER,
                                 expr_t::GREATER_EQ})) {
+    auto const tkn = tkns[cur_t++];
+    auto rhs = shift(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
+  }
+  return lhs;
+}
+
+auto Expressions::ExprLexer::shift(allocator::Page &page, size_t &cur_t,
+                                   size_t &cur_lex) const -> ExprNode {
+  auto lhs = term(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {expr_t::LSHIFT, expr_t::RSHIFT})) {
     auto const tkn = tkns[cur_t++];
     auto rhs = term(page, cur_t, cur_lex);
     lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
@@ -2400,8 +2426,16 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
   for (auto i = size_t{}; i < str.size();) {
     switch (auto const ch = str[i]) {
     case '+':
-      tkns.push_back(expr_t::PLUS);
       ++i;
+      tkns.push_back(expr_t::PLUS);
+      break;
+    case '-':
+      ++i;
+      tkns.push_back(expr_t::MINUS);
+      break;
+    case '*':
+      ++i;
+      tkns.push_back(expr_t::STAR);
       break;
     case '/':
       ++i;
@@ -2477,6 +2511,9 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
       if (i < str.size() && str[i] == '=') {
         ++i;
         tkns.push_back(expr_t::LESS_EQ);
+      } else if (i < str.size() && str[i] == '<') {
+        ++i;
+        tkns.push_back(expr_t::LSHIFT);
       } else {
         tkns.push_back(expr_t::LESS);
       }
@@ -2486,6 +2523,9 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
       if (i < str.size() && str[i] == '=') {
         ++i;
         tkns.push_back(expr_t::GREATER_EQ);
+      } else if (i < str.size() && str[i] == '>') {
+        ++i;
+        tkns.push_back(expr_t::RSHIFT);
       } else {
         tkns.push_back(expr_t::GREATER);
       }
@@ -2719,6 +2759,10 @@ auto Expressions::eval_impl(ExprNode const &e, pp::MacroMap const &macros,
       return lhs && rhs ? 1 : 0;
     case ExprNode::Binary::Binary_t::OR:
       return lhs || rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::LSHIFT:
+      return lhs << rhs;
+    case ExprNode::Binary::Binary_t::RSHIFT:
+      return lhs >> rhs;
     }
   }
   case ExprNode::Expr_t::UNARY: {
@@ -2768,6 +2812,10 @@ auto Expressions::make_binary(allocator::Page &page, Expressions::expr_t tkn,
       return ExprNode::Binary::Binary_t::AND;
     case expr_t::OR:
       return ExprNode::Binary::Binary_t::OR;
+    case expr_t::LSHIFT:
+      return ExprNode::Binary::Binary_t::LSHIFT;
+    case expr_t::RSHIFT:
+      return ExprNode::Binary::Binary_t::RSHIFT;
     default:
       unreachable();
     }
