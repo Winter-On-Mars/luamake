@@ -54,16 +54,16 @@ concept any_of = (std::is_same_v<T, Values> || ...);
 
 namespace luamake::pp {
 namespace {
-auto constexpr skip_until_close_multicomment(std::string_view const buf,
+auto constexpr skip_until_close_multicomment(std::string_view const str,
                                              size_t i) -> size_t {
-  while (i < buf.size() && i + 1 < buf.size()) {
-    if (buf[i] == '*' && buf[i + 1] == '/') {
-      return i + 2; // put buffer[i + 2 - 1] == '/'
-    } else {
-      ++i;
-    }
+  while (true) {
+    i = luamake::skip_until('/', str, i);
+    if (i >= str.size())
+      return str.npos; // error reporting happens elsewhere
+    if (str[i - 1] == '*')
+      return i;
+    ++i;
   }
-  return buf.size();
 }
 
 template <class T>
@@ -1007,15 +1007,6 @@ auto constexpr to_string(ir_t t) -> std::string_view {
   unreachable();
 }
 
-// i would like to add lexical short cutting, where if we see a macro that's
-// already been defined in something like a header guard, then we completely
-// skip the file
-// TODO: add proper lexing to the preprocessor, i think that for #if expressions
-// we just need to lex until we hit a '\n' character, then when we're parsing we
-// can form an expression tree, thankfully everything must eventually be
-// interpreted as an int (0 == false, x == true), so we can just have our
-// interpreter worry about int's and their expressions, how they get converted
-// to int's etc
 auto Lexer::lex(std::string_view const file) -> Lexer {
   // clang-format off
   static auto const keywords = std::unordered_map<std::string_view, ir_t>{{
@@ -1191,11 +1182,9 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         i = luamake::skip_until('\n', fcontent, i + 1);
       } break;
       case '*': { // skip until */
-        // TODO: check this code, there might be an issue if the file
-        // ends with a multi line comment, i.e. */ at the end of the file
-        i = skip_until_close_multicomment(fcontent, i + 1);
-        if (i == file.size())
-          throw std::runtime_error("Non terminated multi line comment");
+        i = skip_until_close_multicomment(fcontent, i + 2) + 1;
+        if (i >= file.size())
+          throw std::runtime_error("Unterminated multi-line comment");
       } break;
       default: // probably just an op /
         i = luamake::skip_until(chars_of_interest, fcontent, i + 1);
@@ -1252,52 +1241,70 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
                                                   ir_t::ELSE)),
               "");
 
-auto Lexer::produce_macro(std::string_view const buf, size_t i) -> size_t {
+auto Lexer::produce_macro(std::string_view const str, size_t i) -> size_t {
   auto constexpr ws = std::string_view{" \t\r\n"};
   auto constexpr switch_chars = std::string_view{"\\\n/"};
   auto macro = std::string();
   auto start = i;
   auto looping = true;
-  while (i < buf.size() && looping) {
-    auto const ch = buf[i];
-    switch (ch) {
+  while (i < str.size() && looping) {
+    switch (str[i]) {
     case '\\': {
-      if (i - 1 > start) {
-        auto const mac =
-            std::string_view{buf.begin() + start, buf.begin() + i - 1};
+      if (i + 1 < str.size() && str[i + 1] == '\n') {
+        auto const mac = std::string_view{str.begin() + start, str.begin() + i};
         macro.append(mac);
-      }
-      ++i;
-      if (i < buf.size() && buf[i] == '\n')
-        ++i;
-      start = i = luamake::skip_while(ws, buf, i);
-    } break;
-    case '/': {
-      if (i + 1 < buf.size() && buf[i + 1] == '/') {
-        auto end = i - 1;
-        while (is_any_of(ws, buf[end])) {
-          --end;
-        }
-        if (end + 1 > start) {
-          auto const mac =
-              std::string_view{buf.begin() + start, buf.begin() + end + 1};
-          macro.append(mac);
-        }
-        looping = false;
+        // str[i + 1] == '\n', so we need i + 2
+        start = i = luamake::skip_until(switch_chars, str, i + 2);
       } else {
-        i = luamake::skip_until(switch_chars, buf, i + 1);
+        i = luamake::skip_until(switch_chars, str, i + 1);
       }
+
     } break;
     case '\n': {
-      auto const mac = std::string_view{buf.begin() + start, buf.begin() + i};
+      auto const mac = std::string_view{str.begin() + start, str.begin() + i};
       macro.append(mac);
       looping = false;
     } break;
+    case '/': {
+      if (i + 1 < str.size() && str[i + 1] == '/') {
+        auto end = luamake::skip_until('\n', str, i);
+        if (end >= str.size())
+          throw std::runtime_error("Unterminated comment found near macro");
+        end = luamake::back_while(ws, str, end);
+        if (end != 0 && str[end] == '\\')
+          throw std::runtime_error("Fuck you");
+        if (end + 1 > start) {
+          auto const mac =
+              std::string_view{str.begin() + start, str.begin() + end + 1};
+          macro.append(mac);
+        }
+        looping = false;
+      } else if (i + 1 < str.size() && str[i + 1] == '*') {
+        if (i - 1 > start) {
+          auto const mac =
+              std::string_view{str.begin() + start, str.begin() + i - 1};
+          macro.append(mac);
+        }
+        start = i + 1;
+        for (;;) {
+          i = luamake::skip_until('/', str, i + 1);
+          if (i >= str.size())
+            throw std::runtime_error(
+                "Unterminated multi-line comment found near macro");
+          if (str[i - 1] == '*' && i - 1 != start)
+            break;
+          ++i;
+        }
+        start = i = luamake::skip_until(switch_chars, str, i + 1);
+      } else {
+        i = luamake::skip_until(switch_chars, str, i + 1);
+      }
+    } break;
     default:
-      i = luamake::skip_until(switch_chars, buf, i);
-      break;
+      i = luamake::skip_until(switch_chars, str, i);
     }
   }
+
   push_macro(macro);
   // the only way to break out of the loop is to hit a '\n' char, but we don't
   // want to include that in the string, we do want to skip over it though so we
@@ -2106,9 +2113,18 @@ auto ExprNode::eval(std::string_view const expr, allocator::Page &page,
                     pp::MacroMap const &macros, StringSet const &def_macros)
     -> int {
   expr_dbg(expr);
-  // TODO: idk fix these, they should be just one call(?)
   auto const expr_lex = Expressions::lex(expr);
+#ifdef DEBUG_CPP
+  std::cout << "expr:\n";
+  expr_lex.display(std::cout);
+  std::cout << "---" << std::endl;
+#endif // DEBUG
   auto const expansion = Expressions::expand(expr_lex, macros, def_macros);
+#ifdef DEBUG_CPP
+  std::cout << "expansion:\n";
+  expansion.display(std::cout);
+  std::cout << "---" << std::endl;
+#endif // DEBUG
   // TODO: report if the expansion is empty, i.e. if you have a case like
   // ```
   // #define MACRO
@@ -2177,6 +2193,12 @@ auto ExprNode::to_string() const noexcept -> std::string {
       break;
     case ExprNode::Binary::Binary_t::GREATER:
       str += '>';
+      break;
+    case ExprNode::Binary::Binary_t::LSHIFT:
+      str += "<<";
+      break;
+    case ExprNode::Binary::Binary_t::RSHIFT:
+      str += ">>";
       break;
     case ExprNode::Binary::Binary_t::GREATER_EQ:
       str += ">=";
@@ -2442,12 +2464,14 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
       if (i >= str.size())
         throw std::runtime_error("found '/' not attached to anything, when "
                                  "evaluating a macro near #(el)?if");
-      if (str[i] ==
-          '/') { // "single line" comment
-                 // [[https://mastodon.social/@winter_on_mars/116801779149164950]]
-        do {
-          i = luamake::skip_until('\n', str, i);
-        } while (str[i - 1] == '\\' && str[i - 2] != '\\');
+      if (str[i] == '/') {
+        i = luamake::skip_until('\n', str, i);
+        // "single line" comment
+        // [[https://mastodon.social/@winter_on_mars/116801779149164950]]
+        // TODO: test that this actually works
+        auto const possible_slash = luamake::back_while(' ', str, i);
+        if (possible_slash != 0 && str[possible_slash] == '\\')
+          throw std::runtime_error("fuck you");
       } else if (str[i] == '*') { // multi-line comment
         for (;;) {
           i = luamake::skip_until('*', str, i);
