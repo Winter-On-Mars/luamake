@@ -45,7 +45,7 @@ using StringMap =
 
 using MacroMap = StringMap<Macro>;
 using StringSet =
-    std::unordered_set<std::string_view, StringHasher, std::equal_to<>>;
+    std::unordered_set<std::string, StringHasher, std::equal_to<>>;
 
 struct Interpreter final {
   Interpreter(MacroMap &&macros, StringSet &&defs) noexcept

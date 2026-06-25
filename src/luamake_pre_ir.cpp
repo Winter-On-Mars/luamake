@@ -4020,7 +4020,7 @@ auto LazyParser::handle_define(allocator::Page &alloc, pp::MacroMap &macros,
   case '\r':
     [[fallthrough]];
   case '\n': // #define FOO
-    defs.insert(macro_name);
+    defs.insert(std::string(macro_name));
     break;
   case '(': // #define FOO()
     throw std::runtime_error(
