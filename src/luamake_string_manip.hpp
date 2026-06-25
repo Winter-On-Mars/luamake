@@ -118,6 +118,48 @@ static_assert([]() {
   return skip_while(std::string_view(" \t"), macro, size_t{}) == 0;
 }());
 
+template <typename int_t, typename char_t>
+constexpr auto back(char_t delim, std::basic_string_view<char_t> const buf,
+                    int_t i) noexcept -> int_t {
+  if (i >= buf.size()) {
+    return int_t{0};
+  }
+  for (; i != 0; i--) {
+    if (buf[i] == delim)
+      return i;
+  }
+  return i;
+}
+
+template <typename int_t, typename char_t>
+constexpr auto back_while(char_t delim,
+                          std::basic_string_view<char_t> const buf,
+                          int_t i) noexcept -> int_t {
+  if (i >= buf.size()) {
+    return i;
+  }
+  while (buf[i] == delim) {
+    --i;
+  }
+  return i;
+}
+
+template <typename int_t, typename char_t>
+constexpr auto back_while(std::basic_string_view<char_t> delims,
+                          std::basic_string_view<char_t> const buf,
+                          int_t i) noexcept -> int_t {
+  if (i >= buf.size())
+    return i;
+  while (true) {
+    if (i == 0)
+      return i;
+    if (delims.find(buf[i]) == delims.npos)
+      return i;
+    --i;
+  }
+  return i;
+}
+
 template <typename char_t>
 constexpr auto is_any_of(std::basic_string_view<char_t> const delims,
                          char_t ch) noexcept -> bool {
