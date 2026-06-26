@@ -1,9 +1,13 @@
 #include "luamake_allocator.hpp"
 
+#include "common.hpp"
+
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <iostream>
+#include <stdexcept>
 
 extern "C" {
 #include "lua.h"
@@ -61,7 +65,7 @@ auto Page::alloc(size_t n_bytes) -> void * {
                     n_bytes, page_size - sizeof(Header)));
   }
   [[unlikely]]
-  if (n_bytes + cur_page->amount_used >= page_size) {
+  if (n_bytes + cur_page->amount_used > page_size) {
 #ifdef DEBUG_ALLOCATOR
     unused_space += page_size - cur_page->amount_used;
 #endif // DEBUG_ALLOCATOR
@@ -73,6 +77,17 @@ auto Page::alloc(size_t n_bytes) -> void * {
 }
 
 auto Page::reset() -> void { cur_page = &start; }
+
+#ifdef DEBUG_ALLOCATOR
+auto Page::display(std::ostream &out) -> std::ostream & {
+  out << std::format("page_size = {}, cur_page = {}, start = {{.amount_used = "
+                     "{}, .cur = {}, .next = {}}}@{}",
+                     page_size, (void *)cur_page, start.amount_used,
+                     (void *)start.cur, (void *)start.next, (void *)&start);
+  return out;
+}
+
+#endif // !DEBUG_ALLOCATOR
 
 auto Page::lua_alloc(void *ud, void *ptr, size_t o_size, size_t n_size)
     -> void * {

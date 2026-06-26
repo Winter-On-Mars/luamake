@@ -28,6 +28,10 @@ struct Page final {
   auto alloc(size_t) -> void *;
   auto reset() -> void;
 
+#ifdef DEBUG_ALLOCATOR
+  auto display(std::ostream &) -> std::ostream &;
+#endif // !DEBUG_ALLOCATOR
+
 private:
   static auto lua_alloc(void *, void *, size_t, size_t) -> void *;
 
