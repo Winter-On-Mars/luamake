@@ -731,7 +731,7 @@ auto install_dummy_impl(lua_State *state) -> int {
 
 namespace builtins {
 LakeModules mods = LakeModules();
-CLOptions cl_options = CLOptions{false, -1};
+CLOptions cl_options = CLOptions{};
 
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
@@ -2316,8 +2316,8 @@ auto operator<<(std::ostream &out, ModIndex const idx) noexcept
 }
 
 LakeModules::LakeModules() noexcept
-    : mods_cap(0), paths_cap(0), num_mods(0), num_paths(0), states(nullptr),
-      compiled_files(nullptr), mods(nullptr), luamake_paths(nullptr),
+    : mods_cap(0), num_mods(0), states(nullptr), compiled_files(nullptr),
+      mods(nullptr), paths_cap(0), num_paths(0), luamake_paths(nullptr),
       arena(LM_EXPR_ALLOC_SIZE) {}
 
 auto LakeModules::init(size_t const cap) -> void {
@@ -2590,7 +2590,6 @@ auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
   out.flush();
 }
 #endif // DEBUG_MOD
-
 } // namespace builtins
 } // namespace luamake
 #undef LUA_ASSERT

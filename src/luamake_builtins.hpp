@@ -7,7 +7,6 @@
 #include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
 
-#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -54,6 +53,7 @@ class Builder final {
   static auto link_lib(lua_State *) noexcept -> int;
 
   static auto get_os(lua_State *) noexcept -> int;
+  static auto build_type(lua_State *) noexcept -> int;
 
   static auto install_exe_dummy(lua_State *) noexcept -> int;
   static auto install_static_dummy(lua_State *) noexcept -> int;
@@ -425,9 +425,7 @@ private:
   // state mtx inline
   // we might be able to avoid this if we have some kind of std::atomic<T*>(?)
   uint mods_cap;
-  uint paths_cap;
   uint num_mods;
-  uint num_paths;
   // TODO: test if it's better to just have all of these in an aos instead of
   // this soa (multiarraylist) that it currently is
   std::unique_ptr<ModState[]> states;
@@ -439,6 +437,8 @@ private:
   std::unique_ptr<Module[]> mods;
   // TODO: switch this to not have the luamake.lua in the path, i.e. just push
   // back the parent path
+  uint paths_cap;
+  uint num_paths;
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
 
   allocator::Page arena;
@@ -448,13 +448,13 @@ private:
 extern LakeModules mods;
 
 struct CLOptions final {
+  enum class BuildType : u8 { def, dbg = def, rel, dbg_w_rel, min_rel };
+  enum class LoggingLevel : u8 { none, terminal, file };
   bool verbose = false;
-  // i would use size_t, but then compilers would yell at me about alignment,
-  // and i don't careeeeee
-  int8_t num_threads = -1;
+  BuildType built_t = BuildType::def;
+  int num_threads = -1;
 };
 extern CLOptions cl_options;
 } // namespace builtins
 } // namespace luamake
-
 #endif
