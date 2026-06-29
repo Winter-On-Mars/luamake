@@ -16,7 +16,7 @@
 #include <vector>
 
 extern "C" {
-#include "lua.h"
+#include "lua/lua.h"
 }
 
 static_assert(LUA_VERSION_NUM == 504);

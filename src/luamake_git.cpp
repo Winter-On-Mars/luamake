@@ -3,15 +3,15 @@
 #include <array>
 
 extern "C" {
-#include "lauxlib.h"
-#include "lua.h"
+#include "lua/lauxlib.h"
+#include "lua/lua.h"
 }
 
 namespace luamake::builtins {
 namespace {
 auto constexpr git_lib = std::array<luaL_Reg, 1>{luaL_Reg{nullptr, nullptr}};
 auto luaopen_git(lua_State *state) -> int {
-  luaL_newlib(state, git_lib);
+  luaL_newlib(state, git_lib.data());
   return 1;
 }
 } // namespace
