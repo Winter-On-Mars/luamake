@@ -27,11 +27,11 @@ dbg: $(_files) $(_lua_a)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) --for-linker=--gdb-index  $(_lua_a)
 
 ncolor: _cc_flags+=-DNO_TERM_COLOR
-ncolor: $(_files)
+ncolor: $(_files) $(_lua_a)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 release: _cc_flags+=-O3 -ffast-math -flto -march=native
-release: $(_files)
+release: $(_files) $(_lua_a)
 	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 perf_testing: _cc_flags+=-DPERF_TESTING -O3 -ffast-math -flto -march=native -ggdb3
@@ -42,7 +42,7 @@ build/%.o: src/%.cpp
 	$(LAKE_CC) $(_cc_flags) -o $@ -c $^ -I$(_includes)
 
 $(_lua_a):
-	$(MAKE) -C lua a -j4
+	$(MAKE) -C lua a
 
 clean:
 	rm $(_bin_name) build/*.o
