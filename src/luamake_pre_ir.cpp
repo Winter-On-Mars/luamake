@@ -15,6 +15,7 @@
 #include <functional>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -110,6 +111,12 @@ auto is_defined(std::string_view const str, pp::MacroMap const &macros,
   return macros.find(str) != macros.end() ? true
          : defs.find(str) != defs.end()   ? true
                                           : false;
+}
+
+template <class T>
+auto constexpr vec_append(std::vector<T> &vec, std::vector<T> &&span) noexcept
+    -> void {
+  vec.insert(vec.end(), span.begin(), span.end());
 }
 
 struct Ast;
@@ -223,21 +230,15 @@ struct Lexer final {
 // this is never run(?)
 // #endif
 // ```
-// TODO: also might be fucked with how we store integers, because we'll also
-// have to work with negative numbers, even though i feel like i don't really
-// see many negative numbers in macros
+// TODO: remove the defined and charlit variants, have those evaluated in the
+// expansion step, and add cases for the unary and binary where we can inline
+// the respective lhs, rhs, and un values if the value is an integer
 struct ExprNode final {
   struct Integer final {
     size_t i;
   };
-  struct Number final {
-    double f;
-  };
   // NOTE: these strings are not required to be null terminated, be sure to use
   // the right apis
-  struct Defined final {
-    std::string_view str;
-  };
   struct CharLit final {
     std::string_view str;
   };
@@ -268,10 +269,8 @@ struct ExprNode final {
     enum class Unary_t : u32 { BANG, MINUS };
     ExprNode const *un;
   };
-  enum class Expr_t : u32 {
+  enum class Expr_t : u8 {
     INT,
-    NUMBER,
-    DEFINED,
     CHARLIT,
     GROUPING,
     BINARY,
@@ -281,8 +280,7 @@ struct ExprNode final {
   ExprNode() noexcept;
   // factory ctors
   template <class T>
-    requires any_of<std::remove_cvref_t<T>, Integer, Number, Defined, CharLit,
-                    Grouping>
+    requires any_of<std::remove_cvref_t<T>, Integer, CharLit, Grouping>
   static auto from(T expr) noexcept -> ExprNode {
     auto storage = std::array<u8, STORAGE_SIZE>({});
     std::memset(storage.data(), 0, STORAGE_SIZE);
@@ -290,16 +288,8 @@ struct ExprNode final {
     if constexpr (std::is_same_v<actual_t, Integer>) {
       new (storage.data()) Expr_t(Expr_t::INT);
       new (storage.data() + sizeof(size_t)) Integer(std::move(expr));
-    } else if constexpr (std::is_same_v<actual_t, Number>) {
-      new (storage.data()) Expr_t(Expr_t::NUMBER);
-      new (storage.data() + sizeof(size_t)) Number(std::move(expr));
-    } else if constexpr (std::is_same_v<actual_t, Defined> ||
-                         std::is_same_v<actual_t, CharLit>) {
-      if constexpr (std::is_same_v<actual_t, Defined>) {
-        new (storage.data()) Expr_t(Expr_t::DEFINED);
-      } else {
-        new (storage.data()) Expr_t(Expr_t::CHARLIT);
-      }
+    } else if constexpr (std::is_same_v<actual_t, CharLit>) {
+      new (storage.data()) Expr_t(Expr_t::CHARLIT);
       if (expr.str.size() < SMALL_STRING_AMOUNT) {
 #ifdef DEBUG_CPP
         std::cout << std::format("Making small string\n\tsize={}\n",
@@ -319,15 +309,18 @@ struct ExprNode final {
         // wtf am i doing
         auto *buffer_ptr =
             new (storage.data() + 2 * sizeof(size_t)) char *{new char[*size]{}};
-#ifdef DEBUG_CPP
-        std::cout << std::format("memory pointing at buffer={}, *buffer={}\n",
-                                 (void *)buffer_ptr, (void *)*buffer_ptr);
-#endif // DEBUG_CPP
         std::memcpy(*buffer_ptr, expr.str.data(), *size);
       }
     } else if constexpr (std::is_same_v<actual_t, Grouping>) {
       new (storage.data()) Expr_t(Expr_t::GROUPING);
-      new (storage.data() + sizeof(size_t)) ExprNode const *(expr.expr);
+      if (expr.expr->expr_t() == Expr_t::INT) {
+        new (storage.data() + sizeof(Expr_t)) Interned(Interned::FIRST);
+        new (storage.data() + sizeof(size_t))
+            size_t{expr.expr->template to<Integer>().i};
+      } else {
+        new (storage.data() + sizeof(Expr_t)) Interned(Interned::NONE);
+        new (storage.data() + sizeof(size_t)) ExprNode const *(expr.expr);
+      }
     } else if constexpr (std::is_same_v<actual_t, Binary> ||
                          std::is_same_v<actual_t, Unary>) {
       unreachable();
@@ -335,12 +328,60 @@ struct ExprNode final {
     return ExprNode{storage};
   }
 
+  static auto from(Unary::Unary_t un_t, Integer i) -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::UNARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::FIRST);
+    new (storage.data() + 4) Unary::Unary_t(un_t);
+    new (storage.data() + sizeof(size_t)) size_t(i.i);
+    return ExprNode(storage);
+  }
+
   static auto from(Unary::Unary_t un_t, ExprNode *node) -> ExprNode {
     auto storage = std::array<u8, STORAGE_SIZE>({});
     std::memset(storage.data(), 0, STORAGE_SIZE);
     new (storage.data()) Expr_t(Expr_t::UNARY);
-    new (storage.data() + sizeof(Expr_t)) Unary::Unary_t(un_t);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::NONE);
+    new (storage.data() + 4) Unary::Unary_t(un_t); // alignment
     new (storage.data() + sizeof(size_t)) ExprNode *(node);
+    return ExprNode{storage};
+  }
+
+  static auto from(Binary::Binary_t bin_t, Integer lhs, Integer rhs)
+      -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::BINARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(static_cast<Interned>(
+        static_cast<u8>(Interned::FIRST) | static_cast<u8>(Interned::SECOND)));
+    new (storage.data() + 4) Binary::Binary_t(bin_t);
+    new (storage.data() + sizeof(size_t)) size_t{lhs.i};
+    new (storage.data() + 2 * sizeof(size_t)) size_t{rhs.i};
+    return ExprNode{storage};
+  }
+
+  static auto from(Binary::Binary_t bin_t, Integer lhs, ExprNode *rhs)
+      -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::BINARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::FIRST);
+    new (storage.data() + 4) Binary::Binary_t(bin_t);
+    new (storage.data() + sizeof(size_t)) size_t{lhs.i};
+    new (storage.data() + 2 * sizeof(size_t)) ExprNode *(rhs);
+    return ExprNode{storage};
+  }
+
+  static auto from(Binary::Binary_t bin_t, ExprNode *lhs, Integer rhs)
+      -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::BINARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::SECOND);
+    new (storage.data() + 4) Binary::Binary_t(bin_t);
+    new (storage.data() + sizeof(size_t)) ExprNode *(lhs);
+    new (storage.data() + 2 * sizeof(size_t)) size_t{rhs.i};
     return ExprNode{storage};
   }
 
@@ -349,9 +390,23 @@ struct ExprNode final {
     auto storage = std::array<u8, STORAGE_SIZE>({});
     std::memset(storage.data(), 0, STORAGE_SIZE);
     new (storage.data()) Expr_t(Expr_t::BINARY);
-    new (storage.data() + sizeof(Expr_t)) Binary::Binary_t(bin_t);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::NONE);
+    // alignment
+    new (storage.data() + 4) Binary::Binary_t(bin_t);
     new (storage.data() + sizeof(size_t)) ExprNode *(lhs);
     new (storage.data() + 2 * sizeof(size_t)) ExprNode *(rhs);
+    if (lhs->expr_t() == Expr_t::INT) {
+      new (storage.data() + sizeof(Expr_t)) Interned(Interned::FIRST);
+      new (storage.data() + sizeof(size_t)) size_t{lhs->to<Integer>().i};
+    } else {
+      new (storage.data() + sizeof(size_t)) ExprNode *(lhs);
+    }
+    if (rhs->expr_t() == Expr_t::INT) {
+      storage[1] |= static_cast<u8>(Interned::SECOND);
+      new (storage.data() + 2 * sizeof(size_t)) size_t{rhs->to<Integer>().i};
+    } else {
+      new (storage.data() + 2 * sizeof(size_t)) ExprNode *(rhs);
+    }
     return ExprNode{storage};
   }
   // this will do the memory management of deleting the tree recursively, making
@@ -360,24 +415,19 @@ struct ExprNode final {
   // to lazy parsing, which would probably help, because we could exit early in
   // the case that the file is already checked, and it would allow us to support
   // pragma once macros finally, and make this tool actually useful
+  // TODO: when we fully remove all of the string types, we can then get rid of
+  // this dtor, because all the actual memory management wil be handled by the
+  // page allocator
   ~ExprNode() noexcept;
 
   ExprNode(ExprNode &&) noexcept;
   ExprNode &operator=(ExprNode &&) noexcept;
 
-  // static auto make_defined(string &&) noexcept -> ExprNode;
-
   ExprNode(ExprNode const &) = delete;
   ExprNode &operator=(ExprNode const &) = delete;
 
   static auto constexpr to_string(Expr_t) noexcept -> std::string_view;
-  /**
-   * @throws std::runtime_error
-   * (if a float is found)
-   */
-  static auto eval(std::string_view const, allocator::Page &,
-                   pp::MacroMap const &macros, StringSet const &def_macros)
-      -> int;
+  auto eval() const -> int;
 
   auto expr_t() const noexcept -> Expr_t;
   template <class T>
@@ -386,29 +436,24 @@ struct ExprNode final {
     // alignment
     static_assert(sizeof(T) == 4);
     auto res = T{};
-    std::memcpy(&res, storage.data() + sizeof(Expr_t), sizeof(T));
+    std::memcpy(&res, storage.data() + 4, sizeof(T));
     return res;
   }
 
   // restricted so that we're only converting the buffer into something that it
   // should be
   template <class T>
-    requires any_of<std::remove_cvref_t<T>, Integer, Number, Defined, CharLit,
-                    Grouping, Binary, Unary>
+    requires any_of<std::remove_cvref_t<T>, Integer, CharLit, Grouping, Binary,
+                    Unary>
   auto constexpr to() const noexcept -> T {
-    // TODO: it seems like we shouldn't be calling into reinterpret_cast,
-    // because it's not getting all of the info it needs for the types
     using actual_t = std::remove_cvref_t<T>;
     // NOTE: we use the fact that the memory layouts for these are the same, idk
     // if that's actually a good idea but it's what we do :)
-    if constexpr (std::is_same_v<actual_t, Integer> ||
-                  std::is_same_v<actual_t, Number>) {
-      static_assert(sizeof(Integer) == sizeof(Number));
+    if constexpr (std::is_same_v<actual_t, Integer>) {
       auto res = T{};
       std::memcpy(&res, storage.data() + sizeof(size_t), sizeof(actual_t));
       return res;
-    } else if constexpr (std::is_same_v<actual_t, Defined> ||
-                         std::is_same_v<actual_t, CharLit>) {
+    } else if constexpr (std::is_same_v<actual_t, CharLit>) {
       if (storage[sizeof(Expr_t)] == 0xbe) {
         // small string
         auto size = size_t{};
@@ -453,24 +498,28 @@ private:
   // this should be a fine alignment(?)
   static auto constexpr STORAGE_SIZE = size_t{24};
   // -1 to hold the byte for if the string is sso
-  // TODO: make the tag a u8, and add a variant tag for sso, so that we can get
-  // an additional ~4 bytes for the small string
   static auto constexpr SMALL_STRING_AMOUNT = STORAGE_SIZE - sizeof(Expr_t) - 1;
-  // tag    meta data
-  // v      v
-  // [****][****][****************]
-  //              ^
-  //              union of all the types
-  //              (all have alignment == 8, so this allows all of them to fit
-  //              here)
-  // when tag == CHARLIT || DEFINED, then it will either look like the above,
-  // with storage[4] == 0xff, the rest of the meta data being 0, and the union
-  // being a size_t and ptr, or when the string is small enough, storage[4] ==
-  // 0xbe, and the rest of the buffer is used to hold the characters
+  //     interned tag
+  //  tag|      meta data
+  //  v  v      v
+  // [*][*][**][****][****************]
+  //        ^         ^
+  //   unused         union of all the types
+  //  / chars         (all have alignment == 8, so this allows all of them to
+  //                  fit here)
+  // when tag == CHARLIT, then it will either look like the above,
+  // with storage[sizeof(Expr_t)] == 0xff, the rest of the meta data being 0,
+  // and the union being a size_t and ptr, or when the string is small enough,
+  // storage[sizeof(Expr_t)] == 0xbe, and the rest of the buffer is used to hold
+  // the characters
   alignas(size_t) std::array<u8, STORAGE_SIZE> storage;
 
   constexpr explicit ExprNode(std::array<u8, STORAGE_SIZE> storage) noexcept
       : storage(std::move(storage)) {}
+  enum class Interned : u8 { NONE, FIRST, SECOND };
+  template <enum Interned> auto constexpr is_interned() const noexcept -> bool;
+  template <enum Interned>
+  auto constexpr get_interned() const noexcept -> size_t;
 };
 
 // TODO: devirtualize this if this becomes a perf issue
@@ -682,6 +731,8 @@ enum class expr_t {
   LIT_BIN,
   LIT_FLOAT,
   MACRO,
+  LIT_TRUE,  // 1
+  LIT_FALSE, // 0
 };
 
 auto constexpr to_string(expr_t t) noexcept -> std::string_view {
@@ -746,6 +797,10 @@ auto constexpr to_string(expr_t t) noexcept -> std::string_view {
     return std::string_view{"LIT_FLOAT"};
   case expr_t::MACRO:
     return std::string_view{"MACRO"};
+  case expr_t::LIT_TRUE:
+    return std::string_view{"LIT_TRUE"};
+  case expr_t::LIT_FALSE:
+    return std::string_view{"LIT_FALSE"};
   }
   unreachable();
 }
@@ -765,6 +820,15 @@ struct ExprLexer final {
     return false;
   }
 
+  auto expand(pp::MacroMap const &, pp::StringSet const &) -> ExprLexer &;
+  auto resolve(pp::MacroMap const &, pp::StringSet const &) -> ExprLexer &;
+  auto ast(allocator::Page &) -> ExprNode;
+
+#ifdef DEBUG_CPP
+  auto display(std::ostream &) const noexcept -> std::ostream &;
+#endif // DEBUG_CPP
+
+private:
   auto expression(allocator::Page &, size_t &, size_t &) const -> ExprNode;
   auto _or(allocator::Page &, size_t &, size_t &) const -> ExprNode;
   auto _and(allocator::Page &, size_t &, size_t &) const -> ExprNode;
@@ -784,9 +848,6 @@ struct ExprLexer final {
                       to_string(tkns[cur_t])));
     }
   }
-#ifdef DEBUG_CPP
-  auto display(std::ostream &) const noexcept -> std::ostream &;
-#endif // DEBUG_CPP
 };
 
 auto lex(std::string_view const) -> ExprLexer;
@@ -797,8 +858,10 @@ auto expand(ExprLexer const &, pp::MacroMap const &, StringSet const &)
 auto expand_macro(std::string const &, pp::MacroMap const &,
                   StringSet const &) noexcept -> ExprLexer;
 
-auto eval_impl(ExprNode const &, pp::MacroMap const &, StringSet const &)
-    -> int;
+/// @throws std::runtime_error
+auto eval(std::string_view const, allocator::Page &, pp::MacroMap const &,
+          pp::StringSet const &) -> int;
+auto eval_impl(ExprNode const &) -> int;
 
 auto make_binary(allocator::Page &, expr_t, ExprNode &&, ExprNode &&) noexcept
     -> ExprNode;
@@ -810,10 +873,6 @@ auto constexpr ExprNode::to_string(Expr_t t) noexcept -> std::string_view {
   switch (t) {
   case Expr_t::INT:
     return std::string_view{"INT"};
-  case Expr_t::NUMBER:
-    return std::string_view{"NUMBER"};
-  case Expr_t::DEFINED:
-    return std::string_view{"DEFINED"};
   case Expr_t::CHARLIT:
     return std::string_view{"CHARLIT"};
   case Expr_t::GROUPING:
@@ -2040,17 +2099,14 @@ auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
 #endif // DEBUG_CPP
 
 ExprNode::ExprNode() noexcept {
-  // TODO: we should be able to remove this step, assuming we've done everything
-  // correct, we'll leave it in debug mode ig(?)
   std::memset(storage.data(), 0, STORAGE_SIZE);
   new (storage.data()) Expr_t(Expr_t::NONE);
+  new (storage.data() + sizeof(Expr_t)) Interned(Interned::NONE);
 }
 
 ExprNode::~ExprNode() noexcept {
   // have to manually call the dtor because we placement new them
   switch (expr_t()) {
-  case Expr_t::DEFINED:
-    [[fallthrough]];
   case Expr_t::CHARLIT: {
     if (storage[sizeof(Expr_t)] == 0xbe) {
       // small string, all on the stack, nothing to do
@@ -2070,19 +2126,23 @@ ExprNode::~ExprNode() noexcept {
     grp->~ExprNode();
   } break;
   case Expr_t::BINARY: {
-    auto *lhs = reinterpret_cast<ExprNode *>(storage.data() + sizeof(size_t));
-    auto *rhs =
-        reinterpret_cast<ExprNode *>(storage.data() + 2 * sizeof(size_t));
-    lhs->~ExprNode();
-    rhs->~ExprNode();
+    if (!is_interned<Interned::FIRST>()) {
+      auto *lhs = reinterpret_cast<ExprNode *>(storage.data() + sizeof(size_t));
+      lhs->~ExprNode();
+    }
+    if (!is_interned<Interned::SECOND>()) {
+      auto *rhs =
+          reinterpret_cast<ExprNode *>(storage.data() + 2 * sizeof(size_t));
+      rhs->~ExprNode();
+    }
   } break;
   case Expr_t::UNARY: {
-    auto *un = reinterpret_cast<ExprNode *>(storage.data() + sizeof(size_t));
-    un->~ExprNode();
+    if (!is_interned<Interned::FIRST>()) {
+      auto *un = reinterpret_cast<ExprNode *>(storage.data() + sizeof(size_t));
+      un->~ExprNode();
+    }
   } break;
   case Expr_t::INT:
-    [[fallthrough]];
-  case Expr_t::NUMBER:
     [[fallthrough]];
   case Expr_t::NONE:
     break; // nothing to do, all on the stack
@@ -2090,8 +2150,10 @@ ExprNode::~ExprNode() noexcept {
 }
 
 ExprNode::ExprNode(ExprNode &&that) noexcept
-    // std::memcpy(storage.data(), that.storage.data(), STORAGE_SIZE); ?
-    : storage(std::move(that.storage)) {
+// std::memcpy(storage.data(), that.storage.data(), STORAGE_SIZE); ?
+// : storage(std::move(that.storage))
+{
+  storage = std::move(that.storage);
   // tag that so that when it's dtor is called nothing happens
   new (that.storage.data()) Expr_t(Expr_t::NONE);
 }
@@ -2103,40 +2165,119 @@ auto ExprNode::operator=(ExprNode &&that) noexcept -> ExprNode & {
   return *this;
 }
 
+auto ExprNode::eval() const -> int {
+  switch (expr_t()) {
+  case Expr_t::INT: {
+    auto const val = to<Integer>().i;
+    if (val > std::numeric_limits<int>::max()) {
+      throw std::runtime_error("Undefined behaviour, integer overflow");
+    }
+    return static_cast<int>(val);
+  } break;
+  case Expr_t::BINARY: {
+    // this feels like big ub :(
+    auto bin = to<Binary>();
+    auto lhs = int{};
+    if (is_interned<Interned::FIRST>()) {
+      auto const tmp_lhs = get_interned<Interned::FIRST>();
+      if (tmp_lhs > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(
+            "Undefined behaviour, integer overflow in binary expression");
+      }
+      lhs = static_cast<int>(tmp_lhs);
+    } else {
+      lhs = bin.lhs->eval();
+    }
+    auto rhs = int{};
+    if (is_interned<Interned::SECOND>()) {
+      auto const tmp_rhs = get_interned<Interned::SECOND>();
+      if (tmp_rhs > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(
+            "Undefined behaviour, integer overflow in binary expression");
+      }
+      rhs = static_cast<int>(tmp_rhs);
+    } else {
+      rhs = bin.rhs->eval();
+    }
+    switch (meta_data<ExprNode::Binary::Binary_t>()) {
+    case ExprNode::Binary::Binary_t::PLUS:
+      return lhs + rhs;
+    case ExprNode::Binary::Binary_t::MINUS:
+      return lhs - rhs;
+    case ExprNode::Binary::Binary_t::TIMES:
+      return lhs * rhs;
+    case ExprNode::Binary::Binary_t::DIVIDE:
+      return lhs / rhs;
+    case ExprNode::Binary::Binary_t::GREATER:
+      return lhs > rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::GREATER_EQ:
+      return lhs >= rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::LESS:
+      return lhs < rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::LESS_EQ:
+      return lhs <= rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::NEQ:
+      return lhs != rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::EQ:
+      return lhs == rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::AND:
+      return lhs && rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::OR:
+      return lhs || rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::LSHIFT:
+      return lhs << rhs;
+    case ExprNode::Binary::Binary_t::RSHIFT:
+      return lhs >> rhs;
+    }
+  } break;
+  case Expr_t::UNARY: {
+    auto sub_expr = int{};
+    if (is_interned<Interned::FIRST>()) {
+      auto const tmp = get_interned<Interned::FIRST>();
+      if (tmp > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(
+            "Undefined behaviour, integer overflow in unary expression");
+      }
+      sub_expr = static_cast<int>(tmp);
+    } else {
+      auto const un = to<Unary>();
+      sub_expr = un.un->eval();
+    }
+    auto const un_t = meta_data<Unary::Unary_t>();
+    switch (un_t) {
+    case Unary::Unary_t::BANG:
+      return !sub_expr;
+    case Unary::Unary_t::MINUS:
+      return -sub_expr;
+    }
+    unreachable();
+  } break;
+  case Expr_t::GROUPING: {
+    if (is_interned<Interned::FIRST>()) {
+      auto const tmp = get_interned<Interned::FIRST>();
+      if (tmp > std::numeric_limits<int>::max())
+        throw std::runtime_error("Undefined behaviour, integer overflow");
+    } else {
+      auto const sub = to<Grouping>();
+      return sub.expr->eval();
+    }
+  } break;
+  case Expr_t::NONE: {
+    throw std::runtime_error(
+        "Attempting to eval nothing, probably an internal error :)");
+  } break;
+  case Expr_t::CHARLIT: {
+    throw std::runtime_error("Eval char lit not allowed, need to stop this");
+  } break;
+  }
+  unreachable();
+  return 0;
+}
+
 auto ExprNode::expr_t() const noexcept -> ExprNode::Expr_t {
   auto expr_t = Expr_t{};
   std::memcpy(&expr_t, storage.data(), sizeof(Expr_t));
   return expr_t;
-}
-
-auto ExprNode::eval(std::string_view const expr, allocator::Page &page,
-                    pp::MacroMap const &macros, StringSet const &def_macros)
-    -> int {
-  expr_dbg(expr);
-  auto const expr_lex = Expressions::lex(expr);
-#ifdef DEBUG_CPP
-  std::cout << "expr:\n";
-  expr_lex.display(std::cout);
-  std::cout << "---" << std::endl;
-#endif // DEBUG
-  auto const expansion = Expressions::expand(expr_lex, macros, def_macros);
-#ifdef DEBUG_CPP
-  std::cout << "expansion:\n";
-  expansion.display(std::cout);
-  std::cout << "---" << std::endl;
-#endif // DEBUG
-  // TODO: report if the expansion is empty, i.e. if you have a case like
-  // ```
-  // #define MACRO
-  // #if MACRO
-  // #endif
-  // ```
-  // in that case, this becomes a malformed program
-  auto const ast = expansion.to_ast(page);
-#ifdef DEBUG_CPP
-  ast.display(std::cout) << std::endl;
-#endif // DEBUG_CPP
-  return Expressions::eval_impl(ast, macros, def_macros);
 }
 
 #ifdef DEBUG_CPP
@@ -2153,18 +2294,6 @@ auto ExprNode::to_string() const noexcept -> std::string {
     str += std::to_string(val);
     str += "}";
   } break;
-  case Expr_t::NUMBER: {
-    str += "{.f=";
-    auto val = double{};
-    std::memcpy(&val, storage.data() + sizeof(size_t), sizeof(double));
-    str += std::to_string(val);
-    str += "}";
-  } break;
-  case Expr_t::DEFINED: {
-    str += "{.def=";
-    str += to<ExprNode::Defined>().str;
-    str += "}";
-  } break;
   case Expr_t::CHARLIT: {
     str += "{.char_lit=";
     str += to<ExprNode::CharLit>().str;
@@ -2172,7 +2301,11 @@ auto ExprNode::to_string() const noexcept -> std::string {
   } break;
   case Expr_t::GROUPING: {
     str += "{.grp=";
-    str += to<ExprNode::Grouping>().expr->to_string();
+    if (is_interned<Interned::FIRST>()) {
+      str += std::to_string(get_interned<Interned::FIRST>());
+    } else {
+      str += to<ExprNode::Grouping>().expr->to_string();
+    }
     str += "}";
   } break;
   case Expr_t::BINARY: {
@@ -2221,11 +2354,21 @@ auto ExprNode::to_string() const noexcept -> std::string {
     case ExprNode::Binary::Binary_t::OR:
       str += "||";
       break;
+    default:
+      unreachable();
     }
     str += ",lhs=";
-    str += to<ExprNode::Binary>().lhs->to_string();
+    if (is_interned<Interned::FIRST>()) {
+      str += std::to_string(get_interned<Interned::FIRST>());
+    } else {
+      str += to<ExprNode::Binary>().lhs->to_string();
+    }
     str += ",rhs=";
-    str += to<ExprNode::Binary>().rhs->to_string();
+    if (is_interned<Interned::SECOND>()) {
+      str += std::to_string(get_interned<Interned::SECOND>());
+    } else {
+      str += to<ExprNode::Binary>().rhs->to_string();
+    }
     str += "}";
   } break;
   case Expr_t::UNARY: {
@@ -2240,7 +2383,11 @@ auto ExprNode::to_string() const noexcept -> std::string {
       break;
     }
     str += ",un=";
-    str += to<ExprNode::Unary>().un->to_string();
+    if (is_interned<Interned::FIRST>()) {
+      str += std::to_string(get_interned<Interned::FIRST>());
+    } else {
+      str += to<ExprNode::Unary>().un->to_string();
+    }
     str += "}";
   } break;
   case Expr_t::NONE: {
@@ -2255,12 +2402,123 @@ auto ExprNode::display(std::ostream &out) const noexcept -> std::ostream & {
 }
 #endif // DEBUG_CPP
 
+template <ExprNode::Interned interned>
+auto constexpr ExprNode::is_interned() const noexcept -> bool {
+  if (interned == Interned::NONE)
+    return false;
+  auto const interned_byte = static_cast<Interned>(storage[sizeof(Expr_t)]);
+  // check if the specific bit is set, because the interned_byte is a bitmap
+  return static_cast<u8>(interned) ==
+         (static_cast<u8>(interned_byte) & static_cast<u8>(interned));
+}
+
+template <ExprNode::Interned interned>
+auto constexpr ExprNode::get_interned() const noexcept -> size_t {
+  if (interned == Interned::NONE)
+    throw std::runtime_error("Unable to get nothing");
+  auto res = size_t{};
+  ::memcpy(&res,
+           storage.data() +
+               (interned == Interned::FIRST ? 1 : 2) * sizeof(size_t),
+           sizeof(size_t));
+  return res;
+}
+
 Ast::Ast() { nodes.reserve(20); }
 
 auto Expressions::ExprLexer::to_ast(allocator::Page &page) const -> ExprNode {
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
   return expression(page, cur_t, cur_lex);
+}
+
+auto Expressions::ExprLexer::expand(pp::MacroMap const &macros,
+                                    pp::StringSet const &defs) -> ExprLexer & {
+  auto tkn_i = size_t{};
+  auto lex_i = size_t{};
+
+  for (auto fully_expanded = true;;) {
+    switch (tkns[tkn_i]) {
+    case expr_t::LPAREN:
+      [[fallthrough]];
+    case expr_t::RPAREN:
+      [[fallthrough]];
+    case expr_t::AND:
+      [[fallthrough]];
+    case expr_t::OR:
+      [[fallthrough]];
+    case expr_t::BIT_AND:
+      [[fallthrough]];
+    case expr_t::BIT_OR:
+      [[fallthrough]];
+    case expr_t::DEFINED:
+      [[fallthrough]];
+    case expr_t::LESS:
+      [[fallthrough]];
+    case expr_t::LESS_EQ:
+      [[fallthrough]];
+    case expr_t::GREATER:
+      [[fallthrough]];
+    case expr_t::GREATER_EQ:
+      [[fallthrough]];
+    case expr_t::LSHIFT:
+      [[fallthrough]];
+    case expr_t::RSHIFT:
+      [[fallthrough]];
+    case expr_t::STRINGIZING:
+      [[fallthrough]];
+    case expr_t::CONCAT:
+      [[fallthrough]];
+    case expr_t::PLUS:
+      [[fallthrough]];
+    case expr_t::MINUS:
+      [[fallthrough]];
+    case expr_t::STAR:
+      [[fallthrough]];
+    case expr_t::SLASH:
+      [[fallthrough]];
+    case expr_t::BANG_EQ:
+      [[fallthrough]];
+    case expr_t::EQ:
+      [[fallthrough]];
+    case expr_t::EQ_EQ:
+      [[fallthrough]];
+    case expr_t::LIT_TRUE:
+      [[fallthrough]];
+    case expr_t::LIT_FALSE:
+      [[fallthrough]];
+    case expr_t::BANG:
+      break;
+    case expr_t::LIT_CHAR:
+      break;
+    case expr_t::LIT_DEC:
+      break;
+    case expr_t::LIT_HEX:
+      break;
+    case expr_t::LIT_OCT:
+      break;
+    case expr_t::LIT_BIN:
+      break;
+    case expr_t::LIT_FLOAT:
+      break;
+    case expr_t::MACRO:
+      break;
+    }
+    if (fully_expanded)
+      return *this;
+  }
+  throw std::runtime_error("not impl");
+  unreachable();
+}
+
+auto Expressions::ExprLexer::resolve(pp::MacroMap const &macros,
+                                     pp::StringSet const &defs) -> ExprLexer & {
+  throw std::runtime_error("not impl");
+  return *this;
+}
+
+auto Expressions::ExprLexer::ast(allocator::Page &alloc) -> ExprNode {
+  throw std::runtime_error("not impl");
 }
 
 auto Expressions::ExprLexer::expression(allocator::Page &page, size_t &cur_t,
@@ -2366,8 +2624,6 @@ auto Expressions::ExprLexer::primary(allocator::Page &page, size_t &cur_t,
                                      size_t &cur_lex) const -> ExprNode {
   // TODO
   switch (tkns[cur_t]) {
-  case expr_t::MACRO:
-    break;
   case expr_t::LIT_CHAR:
     break;
   case expr_t::LIT_DEC:
@@ -2383,6 +2639,10 @@ auto Expressions::ExprLexer::primary(allocator::Page &page, size_t &cur_t,
     break;
   case expr_t::LIT_FLOAT:
     break;
+  case expr_t::LIT_TRUE:
+    return ExprNode::from(ExprNode::Integer{1});
+  case expr_t::LIT_FALSE:
+    return ExprNode::from(ExprNode::Integer{0});
   case expr_t::LPAREN: {
     ++cur_t;
     auto res = expression(page, cur_t, cur_lex);
@@ -2392,28 +2652,17 @@ auto Expressions::ExprLexer::primary(allocator::Page &page, size_t &cur_t,
                       "expected a ')' to wrap the expression"));
     }
     ++cur_t;
-    auto *expr_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
-    *expr_ptr = std::move(res);
-    return ExprNode::from(ExprNode::Grouping{expr_ptr});
-  } break;
-  case expr_t::DEFINED: {
-    ++cur_t;
-    auto lex = std::string();
-    if (tkns[cur_t] == expr_t::LPAREN) {
-      ++cur_t;
-      expect(cur_t, expr_t::MACRO);
-      ++cur_t;
-      lex = macros[cur_lex++];
-      expect(cur_t, expr_t::RPAREN);
-      ++cur_t;
+    if (res.expr_t() == ExprNode::Expr_t::INT) {
+      // this can happen during macro expansion, where you just need the
+      // operator precedence to be reset when evaluating a macro
+      return res;
     } else {
-      expect(cur_t, expr_t::MACRO);
-      ++cur_t;
-      lex = macros[cur_lex++];
+      page.init();
+      auto *expr_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(res));
+      return ExprNode::from(ExprNode::Grouping{expr_ptr});
     }
-    return ExprNode::from(ExprNode::Defined{std::move(lex)});
   } break;
-
   default:
     throw std::runtime_error(
         std::format("Unexpected token [{}] found while parsing an expression",
@@ -2736,28 +2985,54 @@ auto Expressions::lex_integer(std::string_view const str, size_t &i,
   i = skip_while(integer_suffix, str, i);
 }
 
-auto Expressions::eval_impl(ExprNode const &e, pp::MacroMap const &macros,
-                            StringSet const &def_macros) -> int {
+auto Expressions::eval(std::string_view const expr, allocator::Page &alloc,
+                       pp::MacroMap const &macros, pp::StringSet const &defs)
+    -> int {
+  try {
+    /*
+    auto const _ast = Expressions::lex(expr)
+                          .expand(macros, defs)
+                          .resolve(macros, defs)
+                          .ast(page);
+                          */
+    auto const expr_lex = Expressions::lex(expr);
+    auto const expansion = Expressions::expand(expr_lex, macros, defs);
+    if (expansion.tkns.size() == 0) {
+      // TODO: remove the catch ..., so that this can get through
+      throw std::runtime_error(
+          "Macro expansion resulted in a blank string, unable to evaluate");
+    }
+    auto const ast = expansion.to_ast(alloc);
+    return ast.eval();
+  } catch (...) {
+    // this is just a hack, if something goes wrong, then we just return false,
+    // it's probably ok, because if the expression is too complicated, then it's
+    // probably not used to guard includes (hopefully)
+#ifdef DEBUG_CPP
+    std::cout << std::format(
+        LM_HELP "Trouble" LM_NORMAL ": evaluating expression [{}]" LM_NL, expr);
+#endif // DEBUG_CPP
+    return 0;
+  }
+  return 0;
+}
+
+auto Expressions::eval_impl(ExprNode const &e) -> int {
   switch (e.expr_t()) {
   case ExprNode::Expr_t::INT:
     return static_cast<int>(e.to<ExprNode::Integer>().i);
-  case ExprNode::Expr_t::DEFINED:
-    return is_defined(e.to<ExprNode::Defined>().str, macros, def_macros) ? 1
-                                                                         : 0;
-    // TODO: report this kind of error earlier
-  case ExprNode::Expr_t::NUMBER:
-    [[fallthrough]];
   case ExprNode::Expr_t::CHARLIT:
+    // TODO: report this kind of error earlier
     throw std::runtime_error(
         std::format("While evaluating if expression found a not integer."));
   case ExprNode::Expr_t::GROUPING: {
     auto const group = e.to<ExprNode::Grouping>();
-    return eval_impl(*group.expr, macros, def_macros);
+    return eval_impl(*group.expr);
   }
   case ExprNode::Expr_t::BINARY: {
     auto const bin = e.to<ExprNode::Binary>();
-    auto const lhs = eval_impl(*bin.lhs, macros, def_macros);
-    auto const rhs = eval_impl(*bin.rhs, macros, def_macros);
+    auto const lhs = eval_impl(*bin.lhs);
+    auto const rhs = eval_impl(*bin.rhs);
     switch (e.meta_data<ExprNode::Binary::Binary_t>()) {
     case ExprNode::Binary::Binary_t::PLUS:
       return lhs + rhs;
@@ -2791,7 +3066,7 @@ auto Expressions::eval_impl(ExprNode const &e, pp::MacroMap const &macros,
   }
   case ExprNode::Expr_t::UNARY: {
     auto const un = e.to<ExprNode::Unary>();
-    auto const res = eval_impl(*un.un, macros, def_macros);
+    auto const res = eval_impl(*un.un);
     switch (e.meta_data<ExprNode::Unary::Unary_t>()) {
     case ExprNode::Unary::Unary_t::MINUS:
       return -res;
@@ -2844,12 +3119,36 @@ auto Expressions::make_binary(allocator::Page &page, Expressions::expr_t tkn,
       unreachable();
     }
   }(tkn);
-  page.init();
-  auto *lhs_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
-  *lhs_ptr = std::move(lhs);
-  auto *rhs_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
-  *rhs_ptr = std::move(rhs);
-  return ExprNode::from(bin_t, lhs_ptr, rhs_ptr);
+  if (lhs.expr_t() == ExprNode::Expr_t::INT) {
+    if (rhs.expr_t() == ExprNode::Expr_t::INT) {
+      // intern both
+      return ExprNode::from(bin_t, lhs.to<ExprNode::Integer>(),
+                            rhs.to<ExprNode::Integer>());
+    } else {
+      // intern lhs not rhs
+      page.init();
+      auto *rhs_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(rhs));
+      return ExprNode::from(bin_t, lhs.to<ExprNode::Integer>(), rhs_ptr);
+    }
+  } else {
+    if (rhs.expr_t() == ExprNode::Expr_t::INT) {
+      // intern rhs
+      page.init();
+      auto *lhs_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(lhs));
+      return ExprNode::from(bin_t, lhs_ptr, rhs.to<ExprNode::Integer>());
+    } else {
+      // intern neither lhs nor rhs
+      page.init();
+      auto *lhs_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(lhs));
+      auto *rhs_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(rhs));
+      return ExprNode::from(bin_t, lhs_ptr, rhs_ptr);
+    }
+  }
+  unreachable();
 }
 
 auto Expressions::make_unary(allocator::Page &page, Expressions::expr_t tkn,
@@ -2865,9 +3164,12 @@ auto Expressions::make_unary(allocator::Page &page, Expressions::expr_t tkn,
     }
   }(tkn);
   page.init();
-  auto *un_ptr = static_cast<ExprNode *>(page.alloc(sizeof(ExprNode)));
-  *un_ptr = std::move(un);
-  return ExprNode::from(un_t, un_ptr);
+  if (un.expr_t() == ExprNode::Expr_t::INT) {
+    return ExprNode::from(un_t, un.to<ExprNode::Integer>());
+  } else {
+    auto *un_ptr = new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(un));
+    return ExprNode::from(un_t, un_ptr);
+  }
 }
 
 auto Expressions::make_integer(Expressions::expr_t tkn,
@@ -2917,32 +3219,22 @@ auto Expressions::expand(Expressions::ExprLexer const &lexer,
     case expr_t::MACRO: {
       ++tkn_i;
       auto const macro_to_expand = lexer.macros[macro_i++];
-      auto const [expansion_tkns, expansion_lexes] =
+      auto &&[expansion_tkns, expansion_lexes] =
           expand_macro(macro_to_expand, macros, defs);
-
-      tkns.reserve(tkns.size() + expansion_tkns.size());
-      lexes.reserve(lexes.size() + expansion_lexes.size());
-      for (auto i = size_t{}; i < expansion_tkns.size(); ++i) {
-        tkns.push_back(expansion_tkns[i]);
-      }
-      for (auto i = size_t{}; i < expansion_lexes.size(); ++i) {
-        lexes.push_back(expansion_lexes[i]);
-      }
+      vec_append(tkns, std::move(expansion_tkns));
+      vec_append(lexes, std::move(expansion_lexes));
     } break;
-    // TODO: we could just optimize this here and replace all instances of
-    // defined calls, but for now i'm just trying to get something to work
     case expr_t::DEFINED: {
-      tkns.push_back(expr_t::DEFINED);
       ++tkn_i;
-      // NOTE: we consume any parens, so that there are no parens, this is fine
-      // to do by the standard, and a small optimization(?)
       if (lexer.tkns[tkn_i] == expr_t::LPAREN) {
         ++tkn_i; // LPAREN
-        tkns.push_back(expr_t::MACRO);
         ++tkn_i; // MACRO
         ++tkn_i; // RPAREN
       }
-      lexes.push_back(lexer.macros[macro_i++]);
+      auto const mac = lexer.macros[macro_i];
+      ++macro_i;
+      auto const is_def = is_defined(mac, macros, defs);
+      tkns.push_back(is_def ? expr_t::LIT_TRUE : expr_t::LIT_FALSE);
     } break;
     case expr_t::LIT_CHAR:
       [[fallthrough]];
@@ -3110,24 +3402,19 @@ auto AstPrinter::visit_warning(WarningNode &w) -> void {
 #endif // DEBUG_CPP
 
 auto AstIncluder::visit_if(IfNode &i) -> void {
-  if (ExprNode::eval(i.condition, alloc, macros, defs) != 0) {
-    alloc.reset();
+  if (Expressions::eval(i.condition, alloc, macros, defs) != 0) {
     for (auto &&thens : i.then_branch) {
       thens->accept(*this);
     }
     return;
   }
-  alloc.reset();
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, alloc, macros, defs) != 0) {
-      alloc.reset();
+    if (Expressions::eval(elif->condition, alloc, macros, defs) != 0) {
       elif->accept(*this);
       return;
     }
   }
-  alloc.reset();
   if (i.else_branch != nullptr) {
-    alloc.reset();
     i.else_branch->accept(*this);
   }
 }
@@ -3140,8 +3427,7 @@ auto AstIncluder::visit_ifdef(IfDefNode &i) -> void {
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, alloc, macros, defs) != 0) {
-      alloc.reset();
+    if (Expressions::eval(elif->condition, alloc, macros, defs) != 0) {
       elif->accept(*this);
       return;
     }
@@ -3159,8 +3445,7 @@ auto AstIncluder::visit_ifndef(IfNDefNode &i) -> void {
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, alloc, macros, defs) != 0) {
-      alloc.reset();
+    if (Expressions::eval(elif->condition, alloc, macros, defs) != 0) {
       elif->accept(*this);
       return;
     }
@@ -3307,14 +3592,6 @@ auto constexpr to_string(pp_t tkn) noexcept -> std::string_view {
   case pp_t::_EOF:
     return std::string_view("_EOF");
   }
-}
-
-template <class T>
-auto constexpr vec_append(std::vector<T> &vec, std::vector<T> &&span) noexcept
-    -> void {
-  auto const last = vec.end();
-  vec.reserve(vec.size() + span.size());
-  vec.insert(last, span.begin(), span.end());
 }
 
 template <class T>
@@ -3710,7 +3987,7 @@ auto LazyParser::eval(allocator::Page &alloc, pp::MacroMap &macros,
 #ifdef DEBUG_CPP
   expr_ast.display(std::cout) << std::endl;
 #endif // DEBUG_CPP
-  return Expressions::eval_impl(expr_ast, macros, defs);
+  return Expressions::eval_impl(expr_ast);
 }
 
 // NOTE: we could possibly get away with some kind of state machine + stack,
@@ -4093,6 +4370,7 @@ auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
 #endif // DEBUG_CPP
   auto includer = AstIncluder(vec, alloc, macros, defs);
   includer.get_includes(ast);
+  alloc.reset();
 #ifdef DEBUG_CPP
   // technically not A, but this is just for some idea of ab testing
   std::cout << "files from the A\n";
