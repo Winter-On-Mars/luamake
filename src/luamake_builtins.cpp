@@ -1434,6 +1434,10 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     lua_pop(state, 1);
     break;
   case STATIC: {
+    // TODO: maybe we could support some kind of regex, like allowing *.c, i
+    // don't like this because i think it'll lead to people including more than
+    // they should, but it seems easier than writing a bunch of includes for
+    // older projects that just give you everything *cough cough lua*
     switch (auto const root_t = lua_getfield(state, -1, "roots")) {
     case LUA_TTABLE: {
       auto const num_roots = lua_rawlen(state, -1);
@@ -1491,7 +1495,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
           return previous_path;
         }
       }();
-      expr_dbg(parent_p);
       auto const found = std::find(includes.begin(), includes.end(), parent_p);
       if (found != includes.end()) {
         includes.push_back(parent_p);
