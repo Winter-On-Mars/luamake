@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <format>
 #include <numeric>
+#include <string>
 #include <string_view>
 #include <sys/types.h>
 #include <thread>
@@ -60,23 +61,39 @@ auto constexpr find_eq(char const *str) -> ssize_t {
   return -1;
 }
 
-// TODO: (Winter-On-Mars) try moving the args table to be a userdata with
-// indexing operator overloaded, then just use our own hashmap/unordered_map
-// under the hood(?), it might not be faster but worth a try
-auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
-  lua_createtable(state, 0, 0);
+auto get_cl_args(lua_State *state, int argc, char **argv) noexcept -> void {
   auto start_lua_args = 0;
   for (; start_lua_args < argc; ++start_lua_args) {
-    if (argv[start_lua_args][0] == '-' && strlen(argv[start_lua_args]) == 2 &&
-        argv[start_lua_args][1] == '-') {
+    if (strlen(argv[start_lua_args]) == 2 &&
+        strncmp(argv[start_lua_args], "-v", sizeof("-v")) == 0) {
+      luamake::builtins::cl_options.verbose = true;
+      // we could add a check for if you just pass in `-nthreads=`, giving a
+      // warning like the original, but for now this is fine
+    } else if (strlen(argv[start_lua_args]) > sizeof("-nthreads=") - 1 &&
+               strncmp(argv[start_lua_args],
+                       "-nthreads=", sizeof("-nthreads="))) {
+      // NOTE: (Winter-On-Mars) sizeof on the string literal includes the null
+      // terminator, so we have to subtract that off
+      auto const *num_start = argv[start_lua_args] + sizeof("-nthreads=") - 1;
+      auto const n_threads = std::atoi(num_start);
+      if (n_threads > 0) {
+        luamake::builtins::cl_options.num_threads = n_threads;
+      } else {
+        fwarning_message(
+            "Attempting to use %s threads." LM_NL
+            "\tIgnoring, using the max number of threads possible (minus 1)",
+            n_threads == 0 ? "zero" : "a negative amount of");
+      }
+    } else if (strlen(argv[start_lua_args]) == 2 &&
+               strncmp(argv[start_lua_args], "--", 2) == 0) {
       ++start_lua_args;
       break;
     }
   }
 
+  lua_createtable(state, 0, argc - start_lua_args);
   for (; start_lua_args < argc; ++start_lua_args) {
     auto arg = argv[start_lua_args];
-    // auto arg = argv[start_lua_args];
     auto const eq_pos = find_eq(argv[start_lua_args]);
     if (eq_pos == ssize_t{-1}) {
       fwarning_message("Arguments passed to the args table should be of the "
@@ -89,8 +106,7 @@ auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
     // NOTE: (Winter-On-Mars) we have to do this bc lua_setfield internally
     // calls strlen, looking for a '\0'
     arg[eq_pos] = '\0';
-    auto const arg_name = arg; // don't really need this, but conceptually bc we
-                               // added a \0 it's nice to have
+    auto const arg_name = arg;
     auto const value_str = arg + eq_pos + 1;
     switch (determine_type(value_str)) {
     case Value_t::NUMBER: {
@@ -314,20 +330,18 @@ auto run_command(Command const command, int argc, char **argv) noexcept
         fs::current_path().c_str());
     return exit_t::config_error;
   }
-  // TODO: check if this is worth leaving around, or if letting the gc run
-  // whenever is alright
   (void)lua_gc(state, LUA_GCSTOP);
 
   open_libs(state);
   lua_register(state, "Dump", luamake::builtins::dump);
 
-  create_args(state, argc, argv);
+  get_cl_args(state, argc, argv);
 
   auto &&[len, str] = lake.dump_content();
   // basically the same thing as the luaL_dostring macro, but we just have the
   // buffer already
   if ((luaL_loadbufferx(state, reinterpret_cast<char const *>(str.get()), len,
-                        "luamake:root", nullptr) ||
+                        "luamake.lua", nullptr) ||
        lua_pcall(state, 0, 0, 0)) != LUA_OK) {
     ferror_message("unable to run the discovered `luamake.lua` file at "
                    "[%s]" LM_NL "\tLua error message [%s]",
@@ -335,51 +349,13 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     return exit_t::config_error;
   }
 
-  auto res = exit_t::ok;
-
-  for (int i = 0; i < argc; ++i) {
-    if (strncmp(argv[i], "-v", sizeof("-v")) == 0 ||
-        strncmp(argv[i], "--verbose", sizeof("--verbose")) == 0) {
-      luamake::builtins::cl_options.verbose = true;
-    }
-    // i know it's inconsistent to have this be formatted as --num_threads
-    // <nthreads>, while the arguments must be formatted as
-    // <arg_name>=<arg_value>, but idk this is the only way i can get this to
-    // work and it's (probably) not a big deal
-    else if (strncmp(argv[i], "--num_threads", sizeof("--num_threads")) == 0) {
-      ++i;
-      if (!(i < argc)) {
-        error_message("Improperly formatted --num_threads argument, expected "
-                      "`--num_threads <nthreads>`, but no <nthreads> parameter "
-                      "was passed in.");
-        return exit_t::useage_error;
-      }
-      auto const n_threads = std::atoi(argv[i]);
-      if (n_threads == 0) {
-        // NOTE: this does *technically* also catch cases like '012', but if
-        // you're doing that idk don't
-        if (argv[i][0] == '0') {
-          warning_message("Ignoring 0 for <nthreads> argument.");
-          --i;
-        } else {
-          warning_message(
-              "Parsing for '--num_threads <nthreads>' failed, using "
-              "max number of threads possible (minus 1)");
-        }
-      } else {
-        luamake::builtins::cl_options.num_threads =
-            static_cast<int8_t>(n_threads);
-      }
-    }
-  }
-
   luamake::builtins::mods.init();
-  // this can arguably be moved into just the build function, because that's the
-  // only one that really needs a thread pool, but for now we'll do it here
   luamake::threads.init(
       luamake::builtins::cl_options.num_threads != -1
           ? static_cast<size_t>(luamake::builtins::cl_options.num_threads)
           : std::thread::hardware_concurrency() - 1);
+
+  auto res = exit_t::ok;
   switch (command) {
   case Command::BUILD:
     res = build(state);
@@ -719,7 +695,7 @@ static auto build(lua_State *const state) noexcept -> exit_t {
 
   if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
-    ferror_message("While in the lua vm, Build function" LM_NL "\t[%s]",
+    ferror_message("While in the lua vm, Build function" LM_NL "\t%s",
                    err_message);
     return exit_t::lua_vm_error; // ?
   }
