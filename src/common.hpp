@@ -101,6 +101,7 @@ static_assert(sizeof(unsigned char) == 1);
 using u8 = unsigned char;
 
 using uint = unsigned int;
+using u16 = std::uint16_t;
 using u32 = std::uint32_t;
 
 namespace luamake {
