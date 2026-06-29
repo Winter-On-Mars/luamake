@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <format>
 #include <iostream>
 #include <memory>
 #include <unistd.h>
@@ -16,6 +15,10 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #endif
+
+#ifdef DEBUG
+#include <format>
+#endif // DEBUG
 
 namespace luamake {
 // TODO: add a macro to test if on unix system, and use unix os functions like
