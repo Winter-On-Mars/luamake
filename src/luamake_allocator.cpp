@@ -7,6 +7,7 @@
 #include <cstring>
 #include <format>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 
 extern "C" {
@@ -76,7 +77,16 @@ auto Page::alloc(size_t n_bytes) -> void * {
   return static_cast<void *>(ret_ptr);
 }
 
-auto Page::reset() -> void { cur_page = &start; }
+auto Page::reset() -> void {
+  cur_page = &start;
+  // the start page doesn't have the header info crammed in the same page, it
+  // would technically be fine to also mark the amount used of the start page as
+  // sizeof(Header), but then we'd be wasting 24 (3 * sizeof(void*)) bytes
+  cur_page->amount_used = 0;
+  for (auto *page = cur_page->next; page; page = page->next) {
+    page->amount_used = sizeof(Header);
+  }
+}
 
 #ifdef DEBUG_ALLOCATOR
 auto Page::display(std::ostream &out) -> std::ostream & {
@@ -118,13 +128,11 @@ auto Page::get_new_page() -> void {
     cur_page = cur_page->next;
     return;
   }
-  cur_page->next = static_cast<Header *>(malloc(page_size));
-  if (cur_page->next == nullptr)
-    throw std::runtime_error("Unable to allocate new page of memory");
+  auto page = static_cast<u8 *>(malloc(page_size));
+  if (page == nullptr)
+    throw std::bad_alloc();
+  cur_page->next = new (page) Header{sizeof(Header), page, nullptr};
   cur_page = cur_page->next;
-  cur_page->cur = reinterpret_cast<u8 *>(cur_page);
-  cur_page->amount_used = sizeof(Header);
-  cur_page->next = nullptr;
 }
 
 #ifdef DEBUG_ALLOCATOR
