@@ -4,7 +4,7 @@ LAKE_LINKER:=mold
 LAKE_BIN:=luamake_c#TODO: change this when the c rewrite is done
 LAKE_CC:=clang++
 # things that can be changed but probably shouldn't
-_cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -fno-rtti $(LAKE_CCFLAGS)
+_cc_flags:=-std=c++20 -Wall -Wpedantic -Wconversion -Wpadded -fno-rtti $(LAKE_CCFLAGS) -iquote lua/build
 _bin_name:=$(LAKE_BUILD_DIR)/$(LAKE_BIN)
 _includes:=lua
 
