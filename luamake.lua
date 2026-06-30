@@ -18,13 +18,11 @@ function Build(b)
 		if args["luamake.args"] ~= nil then
 			table.insert(base, args["luamake.args"])
 		end
-		--[[
 		if b.build_type() == "release" then
 			table.insert(base, "-O3 -ffast-math -flto -march=native")
 		elseif b.build_type() == "debug" then
 			table.insert(base, "-ggdb3 -DDEBUG -fno-omit-frame-pointer")
 		end
-    ]]
 		return b.clang_bare(base)
 	end)()
 
