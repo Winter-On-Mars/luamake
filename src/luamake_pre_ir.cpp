@@ -3163,10 +3163,10 @@ auto Expressions::make_unary(allocator::Page &page, Expressions::expr_t tkn,
       unreachable();
     }
   }(tkn);
-  page.init();
   if (un.expr_t() == ExprNode::Expr_t::INT) {
     return ExprNode::from(un_t, un.to<ExprNode::Integer>());
   } else {
+    page.init();
     auto *un_ptr = new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(un));
     return ExprNode::from(un_t, un_ptr);
   }
