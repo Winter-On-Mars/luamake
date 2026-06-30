@@ -418,12 +418,8 @@ private:
   auto resize_mods() -> void;
   auto resize_paths() -> void;
 
-  // NOTE: we might need to switch to having a state lock for this class for
-  // when we resize, as otherwise we might invalidate some references, we might
-  // be able to have cap + 1 mtxs, and then use mtxs[cap] == state mtx,
-  // something that could help, or it might be more performant to just have the
-  // state mtx inline
-  // we might be able to avoid this if we have some kind of std::atomic<T*>(?)
+  // NOTE: we might be able to avoid having so many mutexs if we have some kind
+  // of std::atomic<T*>(?)
   uint mods_cap;
   uint num_mods;
   // TODO: test if it's better to just have all of these in an aos instead of

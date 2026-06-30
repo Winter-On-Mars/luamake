@@ -2094,11 +2094,36 @@ auto Builder::get_os(lua_State *state) noexcept -> int {
                          "bsd"
 #endif
     );
-    (void)lua_pushstring(state, "");
     return 1;
   } catch (...) {
     (void)lua_pushstring(
         state, "An unknown exception was encountered in the get_os function");
+    return lua_error(state);
+  }
+}
+
+auto Builder::build_type(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 0, build_type);
+  try {
+    switch (cl_options.built_t) {
+    case luamake::builtins::CLOptions::BuildType::dbg:
+      (void)lua_pushstring(state, "debug");
+      break;
+    case luamake::builtins::CLOptions::BuildType::rel:
+      (void)lua_pushstring(state, "release");
+      break;
+    case luamake::builtins::CLOptions::BuildType::dbg_w_rel:
+      (void)lua_pushstring(state, "debug_and_release");
+      break;
+    case luamake::builtins::CLOptions::BuildType::min_rel:
+      (void)lua_pushstring(state, "release_min");
+      break;
+    }
+    return 1;
+  } catch (...) {
+    (void)lua_pushstring(
+        state,
+        "An unknown exception was encountered in the build_type function");
     return lua_error(state);
   }
 }
@@ -2219,7 +2244,7 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 0, 11);
+  lua_createtable(state, 0, 12);
 
   lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
@@ -2254,6 +2279,9 @@ auto make_builder_obj(lua_State *state) noexcept -> void {
   lua_pushcfunction(state, &Builder::get_os);
   lua_setfield(state, -2, "get_os");
 
+  lua_pushcfunction(state, &Builder::build_type);
+  lua_setfield(state, -2, "build_type");
+
   previous_path = fs::current_path();
 
   // TODO: add the functions install_dynamic
@@ -2267,7 +2295,7 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 }
 
 auto make_builder_dummy(lua_State *state) noexcept -> void {
-  lua_createtable(state, 0, 11);
+  lua_createtable(state, 0, 12);
 
   lua_pushcfunction(state, &Builder::clang);
   lua_setfield(state, -2, "clang");
@@ -2301,6 +2329,9 @@ auto make_builder_dummy(lua_State *state) noexcept -> void {
 
   lua_pushcfunction(state, &Builder::get_os);
   lua_setfield(state, -2, "get_os");
+
+  lua_pushcfunction(state, &Builder::build_type);
+  lua_setfield(state, -2, "build_type");
 
   // idk, we're expecting you to be calling luamake in the same path the
   // luamake.lua file is in
@@ -2593,3 +2624,5 @@ auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
 } // namespace builtins
 } // namespace luamake
 #undef LUA_ASSERT
+#undef LUA_ASSERT_FORMAT
+#undef LUA_EXPECTED_ARGUMENTS
