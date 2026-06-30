@@ -26,10 +26,10 @@
 #define LM_NORMAL
 #else
 #if defined(__unix__) || defined(__MACH__)
-#define LM_ERROR "\033[0;31m"
-#define LM_WARNING "\033[0;33m"
-#define LM_HELP "\033[0;32m"
-#define LM_NORMAL "\033[0;0m"
+#define LM_ERROR "\033[0;31m"   // red
+#define LM_WARNING "\033[0;33m" // yellow
+#define LM_HELP "\033[0;32m"    // blue (should change to green)
+#define LM_NORMAL "\033[0;0m"   // resets
 #else
 #define LM_ERROR
 #define LM_WARNING
