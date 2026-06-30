@@ -14,7 +14,8 @@ _files:=$(LAKE_BUILD_DIR)/common.o $(LAKE_BUILD_DIR)/luamake_strings.o \
 				$(LAKE_BUILD_DIR)/luamake_pre_ir.o $(LAKE_BUILD_DIR)/luamake_file.o \
 				$(LAKE_BUILD_DIR)/luamake_builtins.o $(LAKE_BUILD_DIR)/luamake_string_manip.o \
 				$(LAKE_BUILD_DIR)/luamake_thread_pool.o $(LAKE_BUILD_DIR)/main.o \
-				$(LAKE_BUILD_DIR)/luamake_spiral.o $(LAKE_BUILD_DIR)/luamake_allocator.o
+				$(LAKE_BUILD_DIR)/luamake_spiral.o $(LAKE_BUILD_DIR)/luamake_allocator.o \
+				$(LAKE_BUILD_DIR)/luamake_git.o
 _lua_a:=lua/liblua.a
 
 all: $(_files) $(_lua_a)
