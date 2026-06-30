@@ -1,6 +1,7 @@
 #include "luamake_git.hpp"
 
 #include <array>
+#include <iostream>
 
 extern "C" {
 #include "lua/lauxlib.h"
@@ -9,18 +10,19 @@ extern "C" {
 
 namespace luamake::builtins {
 namespace {
-auto constexpr git_lib = std::array<luaL_Reg, 1>{luaL_Reg{nullptr, nullptr}};
-auto luaopen_git(lua_State *state) -> int {
-  luaL_newlib(state, git_lib.data());
-  return 1;
+auto clone(lua_State *clone) -> int {
+  std::cout << "Hello from git.clone\n";
+  return 0;
 }
+
+auto constexpr git_lib = std::array<luaL_Reg, 2>{luaL_Reg{"clone", &clone},
+                                                 luaL_Reg{nullptr, nullptr}};
 } // namespace
 
-// maybe turn this into a luac function, that way we can call it with pcall, in
-// case something goes wrong
-auto open_git(lua_State *state) -> bool {
-  luaL_requiref(state, "git", luaopen_git, true);
-  lua_pop(state, 1); // remove git from top of the stack
-  return false;
+auto luaopen_git(lua_State *state) -> int {
+  luaL_checkversion(state);
+  lua_createtable(state, 0, git_lib.size() - 1);
+  luaL_setfuncs(state, git_lib.data(), 0);
+  return 1;
 }
 } // namespace luamake::builtins

@@ -2,6 +2,7 @@
 #include "luamake_allocator.hpp"
 #include "luamake_builtins.hpp"
 #include "luamake_file.hpp"
+#include "luamake_git.hpp"
 #include "luamake_thread_pool.hpp"
 
 #include <array>
@@ -166,7 +167,7 @@ auto std_panic(lua_State *L) -> int {
 // TODO: (Winter-On-Mars) SECURITY concerns, review each module and see if there
 // are any that we **need** to get rid of, and if so, if there are some features
 // that can be useful that we should provide though our own mock std lib
-auto constexpr supported_libs = std::array<luaL_Reg, 8>{
+auto constexpr supported_libs = std::array<luaL_Reg, 9>{
     luaL_Reg{LUA_GNAME, luaopen_base},
     luaL_Reg{LUA_LOADLIBNAME, luaopen_package},
     luaL_Reg{LUA_COLIBNAME,
@@ -183,6 +184,7 @@ auto constexpr supported_libs = std::array<luaL_Reg, 8>{
     luaL_Reg{LUA_MATHLIBNAME, luaopen_math},
     luaL_Reg{LUA_UTF8LIBNAME, luaopen_utf8},
     //  {LUA_DBLIBNAME, luaopen_debug},
+    luaL_Reg{"git", &luamake::builtins::luaopen_git},
     // luaL_Reg{NULL, NULL}
 };
 // see linit.c 57

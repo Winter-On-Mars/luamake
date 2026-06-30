@@ -422,14 +422,10 @@ private:
   // of std::atomic<T*>(?)
   uint mods_cap;
   uint num_mods;
-  // TODO: test if it's better to just have all of these in an aos instead of
-  // this soa (multiarraylist) that it currently is
   std::unique_ptr<ModState[]> states;
   std::unique_ptr<std::mutex[]> mtxs;
   std::unique_ptr<std::atomic<size_t>[]> remaining_files;
   std::unique_ptr<std::vector<std::string>[]> compiled_files;
-  // NOTE: we could switch this to a list<module>, then switch the new_exe
-  // function to return a lightuserdata
   std::unique_ptr<Module[]> mods;
   // TODO: switch this to not have the luamake.lua in the path, i.e. just push
   // back the parent path

@@ -6,7 +6,7 @@ extern "C" {
 }
 
 namespace luamake::builtins {
-auto open_git(lua_State *) -> bool;
+auto luaopen_git(lua_State *) -> int;
 }
 
 #endif // !__LUAMAKE_GIT_HPP
