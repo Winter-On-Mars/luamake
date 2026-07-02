@@ -1288,6 +1288,12 @@ auto Module::append_predefined_macros(std::string const &compiler)
   default: { // in parent proc
     auto macros = pp::MacroMap();
     auto def_macros = pp::StringSet();
+    // NOTE: based on my tests, the compiler will give about 400 macros, and <10
+    // defined macros, but (at least in my experience) we end up defining a fair
+    // amount of macros, basically with every file at least, hence these numbers
+    // to over allocate
+    macros.reserve(512);
+    def_macros.reserve(32);
 
     close(write_pipe);
     auto *read_me =
