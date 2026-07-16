@@ -887,13 +887,6 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   if (idx == NIL_IDX)
     return fs::current_path();
   auto &&[start, end] = files[idx];
-  // HACK: idk theres some bug happening, this "fixes" it, but we have to
-  // figure out where the acutal issue is
-  if (end == 0) {
-    std::cerr << std::format("end == 0, something is wrong with idx [{}]" LM_NL,
-                             idx);
-    return fs::current_path();
-  }
   // NOTE: -1 because otherwise it includes the null term, and that fucks with
   // fs::path comparing to strings and checking the extension type
   return fs::path(all_paths.buffer + start, all_paths.buffer + end - 1);
