@@ -226,6 +226,9 @@ static auto test(lua_State *const) noexcept -> exit_t;
 //  (adding it to a .gitignore or whatever), or just (probably by default)
 //  have it install in the $HOME/.luamake/package directory to be used for the
 //  user packages that they have installed
+// TODO: add a command to generate a luals definition file, or figure out some
+// way to ship it with the program, because depending on config you have to set
+// things up properly idk
 enum class Command : int {
   UNKNOWN_ARG,
   BUILD,
