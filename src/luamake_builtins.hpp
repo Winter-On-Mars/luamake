@@ -439,11 +439,24 @@ private:
 };
 extern LakeModules mods;
 
+// TODO: actually use these, i think only verbose is currently being used, and
+// it's not even being used that well :(
+// TODO: add cli parsing to all of these (i know there's those cli annotations
+// but they don't do anything, that would be great to set up as a part of the
+// build system? to have some command line parsing generated automatically)
 struct CLOptions final {
   enum class BuildType : u8 { def, dbg = def, rel, dbg_w_rel, min_rel };
   enum class LoggingLevel : u8 { none, terminal, file };
+  // [[cli("--verbose", "-v")]]
   bool verbose = false;
+  // [[cli("--build-type=%s")]] ??
   BuildType built_t = BuildType::def;
+  // [[cli("--no-cache")]]
+  bool cache = true; // when set to false it means we don't cache, used when
+                     // building a project that you're __sure__ you're only
+                     // going to build once (like if you got a binary from the
+                     // package manager), skips de/serialization
+  // [[cli("--num-threads=%d>0")]] ??
   int num_threads = -1;
 };
 extern CLOptions cl_options;
