@@ -2175,8 +2175,7 @@ auto Runner::run(lua_State *state) noexcept -> int {
                "Expected type of exe.path to be string [in function Run]");
     auto exe_path = std::string(lua_tolstring(state, -1, nullptr));
 
-    lua_getfield(state, -2, "args");
-    switch (auto t = lua_type(state, -1)) {
+    switch (auto const t = lua_getfield(state, -2, "args")) {
     case LUA_TNIL:
       // nothing to do either type is explicitly nil, or field is undefined so
       // which is fine bc it's an optional field
