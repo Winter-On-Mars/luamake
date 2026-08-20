@@ -30,6 +30,9 @@ auto os_call(std::string_view const cmd) -> int {
   auto child_status = int{};
   switch (pid) {
   case 0: { // child proc
+    // TODO: figure out a better way to get the errors displayed, currently it's
+    // all or nothing, but it would be nice if we could parse the errors to give
+    // some advice on the issues detected
     if (!builtins::cl_options.verbose) {
       dup2(dev_null, STDERR_FILENO);
       dup2(dev_null, STDOUT_FILENO);
