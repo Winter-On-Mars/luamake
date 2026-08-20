@@ -31,7 +31,7 @@ function Build(b)
 		root = "src/main.cpp",
 		compiler = cc,
 		install_dir = args["luamake.build"] ~= nil and args["luamake.build"] or "build",
-		linking = { "-lstdc++", "-lm" }, -- TODO: have the -lm inherited from the lua project
+		linking = { "-lstdc++" },
 	})
 	b.link_lib(lua, lm)
 	return b.install_exe(lm)
