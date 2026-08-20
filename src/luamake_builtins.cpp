@@ -2060,6 +2060,12 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
             std::format("{}/{}", mod_linked.install_dir, mod_linked.name)));
     mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
                             ("lib" + mod_linked.name + ".a"));
+    // link all the stuff that the other mod also needs
+    // TODO: idk how we should check that the path is correct, because i'm
+    // currently using this for system includes (-lm, -llua, -lstdc++, etc)?
+    for (auto &&link : mod_linked.linking) {
+      mod_d.linking.push_back(link);
+    }
 
     return 0;
   } catch (std::exception const &e) {
