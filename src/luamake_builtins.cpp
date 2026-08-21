@@ -481,10 +481,6 @@ static auto default_compiler_impl(lua_State *state,
 
 template <builtins::Module::Module_t mod_t>
 auto install_impl(lua_State *state) -> int {
-  if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
-    throw std::runtime_error(
-        "Currently do not support installing dynamic lib projects");
-  }
   // mod_idx is at the top of the stack, and we'll just return it at the
   // end, assuming everything else has gone well
   auto const mod_idx = builtins::ModIndex(lua_tointeger(state, -1));
@@ -593,6 +589,9 @@ auto install_impl(lua_State *state) -> int {
   std::cout << std::endl;
 #endif // DEBUG_MOD
 
+  // TODO: i'm pretty sure we need to add -fpic/-fpie to the individual
+  // calls to the compiler when building the .o files when building a DYNAMIC
+  // lib
   threads.add_compile_tasks(files_to_compile, mod_idx);
   // TODO: have some way of keeping track of if an error occurs when
   // building a module, that way we don't try to build with extraneous
@@ -629,6 +628,11 @@ auto install_impl(lua_State *state) -> int {
       else if (mod_t == builtins::Module::Module_t::EXE)
         return std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
                            mod.name, compiled_files, mod.format_links());
+      else if (mod_t == builtins::Module::Module_t::DYNAMIC)
+        // TODO: change the .so to .dll and .dyn(?) for depending on platform
+        return std::format("{} -shared -o {}/lib{}.so {} {}", mod.compiler,
+                           mod.install_dir, mod.name, compiled_files,
+                           mod.format_links());
     }();
 
     if (builtins::cl_options.verbose) {
@@ -1418,8 +1422,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
   lua_pop(state, 1);
 
-  switch (type) {
-  case EXE:
+  if (type == Module::EXE) {
     roots.reserve(1);
     switch (auto const root_t = lua_getfield(state, -1, "root")) {
     case LUA_TSTRING:
@@ -1431,8 +1434,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
       throw unexpected_type("root", LUA_TSTRING, root_t);
     }
     lua_pop(state, 1);
-    break;
-  case STATIC: {
+  } else if (type == STATIC || type == DYNAMIC) {
     // TODO: maybe we could support some kind of regex, like allowing *.c, i
     // don't like this because i think it'll lead to people including more than
     // they should, but it seems easier than writing a bunch of includes for
@@ -1456,11 +1458,10 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     default:
       throw unexpected_type("roots", LUA_TTABLE, root_t);
     }
-  } break;
-  case DYNAMIC:
-    std::cerr << "Not currently implimented" LM_NL;
+  } else {
+    std::cerr << "Damn I fucked something up and am not handling this case... "
+                 "please report this bug :)\n";
     std::terminate();
-    break;
   }
 
   switch (auto const install_dir_t = lua_getfield(state, -1, "install_dir")) {
@@ -1475,16 +1476,17 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   lua_pop(state, 1);
 
   // TODO: make this a relative path
-  switch (type) {
-  case Module_t::EXE: {
+  if (type == Module::EXE) {
     includes.reserve(1);
     [[likely]]
     if (roots[0].has_parent_path()) {
       includes.push_back(fs::canonical(roots[0]).parent_path());
     } else {
+      throw std::runtime_error(std::format(
+          "Idk {} doesn't have a parent path, need to figure out what to do",
+          roots[0].string()));
     }
-  } break;
-  case Module_t::STATIC:
+  } else if (type == STATIC || type == DYNAMIC) {
     includes.reserve(roots.size());
     for (auto const &root : roots) {
       auto const parent_p = [&]() -> fs::path {
@@ -1499,8 +1501,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
         includes.push_back(parent_p);
       }
     }
-  case Module_t::DYNAMIC:
-    break;
   }
 
   switch (auto const include_t = lua_getfield(state, -1, "include")) {
@@ -1556,6 +1556,8 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   case Module_t::EXE:
     break;
   // TODO: make sure this isn't nil
+  case Module_t::DYNAMIC:
+    [[fallthrough]];
   case Module_t::STATIC: {
     switch (auto const header_t = lua_getfield(state, -1, "headers")) {
     case LUA_TTABLE: {
@@ -1580,8 +1582,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     }
     lua_pop(state, 1);
   } break;
-  case Module_t::DYNAMIC:
-    break;
   }
 
   auto &&[macros, def_macros] = macros_res.get();
@@ -1743,7 +1743,6 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
                     "Expected type of argument to `new_exe` to be of type "
                     "table, found [%s]",
                     lua_typename(ret_t));
-
   try {
     auto exe_mod =
         builtins::Module(builtins::Module::EXE, state, previous_path);
@@ -1770,11 +1769,35 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
                     "Expected type of argument to `new_static` to be of type "
                     "table, found [%s]",
                     lua_typename(ret_t));
-
   try {
     auto static_mod =
         builtins::Module(builtins::Module::STATIC, state, previous_path);
+    auto const index =
+        mods.append_module_with_path(previous_path, std::move(static_mod));
+    lua_pushinteger(state, static_cast<lua_Integer>(index));
+    return 1;
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
 
+auto Builder::new_dynamic(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 2, new_dynamic);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `new_dynamic` to be of type "
+                    "table, found [%s]",
+                    lua_typename(ret_t));
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected type of argument to `new_dynamic` to be of type "
+                    "table, found [%s]",
+                    lua_typename(ret_t));
+  try {
+    auto static_mod =
+        builtins::Module(builtins::Module::DYNAMIC, state, previous_path);
     auto const index =
         mods.append_module_with_path(previous_path, std::move(static_mod));
     lua_pushinteger(state, static_cast<lua_Integer>(index));
@@ -1794,7 +1817,6 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
                     "Expected type of argument to `install_exe` to be of type "
                     "integer, found [%s]",
                     lua_typename(ret_t));
-
   try {
     return install_impl<builtins::Module::Module_t::EXE>(state);
   } catch (std::exception const &e) {
@@ -1812,9 +1834,43 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
                     "Expected type of argument to `install_static` "
                     "to be of type integer, found [%s]",
                     lua_typename(ret_t));
-
   try {
     return install_impl<Module::Module_t::STATIC>(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
+auto Builder::install_dynamic(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_dynamic);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected type of argument to `install_dynamic` "
+                    "to be of type integer, found [%s]",
+                    lua_typename(ret_t));
+  try {
+    return install_impl<Module::Module_t::DYNAMIC>(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
+auto Builder::install_dep(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_dep);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected type of argument to `install_dep` "
+                    "to be of type integer, found [%s]",
+                    lua_typename(ret_t));
+  lua_pushstring(state, "install_dep is not currently working");
+  return lua_error(state);
+  try {
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
@@ -1911,6 +1967,20 @@ auto Builder::gcc_bare(lua_State *state) noexcept -> int {
 auto Builder::clang_bare(lua_State *state) noexcept -> int {
   try {
     return compiler_impl(state, "clang");
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state,
+                   "An unknown exception was throw in the clang_bare function");
+    return lua_error(state);
+  }
+}
+
+auto Builder::cmake(lua_State *state) noexcept -> int {
+  lua_pushstring(state, "cmake function is not currently working");
+  return lua_error(state);
+  try {
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
@@ -2168,6 +2238,42 @@ auto Builder::install_static_dummy(lua_State *state) noexcept -> int {
   }
 }
 
+auto Builder::install_dynamic_dummy(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_dynamic)
+  LUA_ASSERT_FORMAT(
+      state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+      "Expected type of argument to `install_dynamic` to be of type "
+      "integer, found [%s]",
+      lua_typename(ret_t));
+  try {
+    return install_dummy_impl<builtins::Module::Module_t::DYNAMIC>(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
+auto Builder::install_dep_dummy(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_dep)
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected type of argument to `install_dep` to be of type "
+                    "integer, found [%s]",
+                    lua_typename(ret_t));
+  lua_pushstring(state, "install_dep function is not currently working");
+  return lua_error(state);
+  try {
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
 auto Runner::run(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, run);
   LUA_ASSERT_FORMAT(
@@ -2248,47 +2354,31 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 0, 12);
-
-  lua_pushcfunction(state, &Builder::clang);
-  lua_setfield(state, -2, "clang");
-
-  lua_pushcfunction(state, &Builder::gcc);
-  lua_setfield(state, -2, "gcc");
-
-  lua_pushcfunction(state, &Builder::gcc_bare);
-  lua_setfield(state, -2, "gcc_bare");
-
-  lua_pushcfunction(state, &Builder::clang_bare);
-  lua_setfield(state, -2, "clang_bare");
-
-  lua_pushcfunction(state, &Builder::new_exe);
-  lua_setfield(state, -2, "new_exe");
-
-  lua_pushcfunction(state, &Builder::new_static);
-  lua_setfield(state, -2, "new_static");
-
-  lua_pushcfunction(state, &Builder::install_exe);
-  lua_setfield(state, -2, "install_exe");
-
-  lua_pushcfunction(state, &Builder::install_static);
-  lua_setfield(state, -2, "install_static");
-
-  lua_pushcfunction(state, &Builder::require);
-  lua_setfield(state, -2, "requires");
-
-  lua_pushcfunction(state, &Builder::link_lib);
-  lua_setfield(state, -2, "link_lib");
-
-  lua_pushcfunction(state, &Builder::get_os);
-  lua_setfield(state, -2, "get_os");
-
-  lua_pushcfunction(state, &Builder::build_type);
-  lua_setfield(state, -2, "build_type");
+  auto constexpr methods = std::array<luaL_Reg, 16>{{
+      {"clang", &Builder::clang},
+      {"clang_bare", &Builder::clang_bare},
+      {"gcc", &Builder::gcc},
+      {"gcc_bare", &Builder::gcc_bare},
+      {"cmake", &Builder::cmake},
+      {"new_exe", &Builder::new_exe},
+      {"new_static", &Builder::new_static},
+      {"new_dynamic", &Builder::new_dynamic},
+      {"install_exe", &Builder::install_exe},
+      {"install_static", &Builder::install_static},
+      {"install_dynamic", &Builder::install_dynamic},
+      {"install_dep", &Builder::install_dep},
+      {"requires", &Builder::require},
+      {"link_lib", &Builder::link_lib},
+      {"get_os", &Builder::get_os},
+      {"build_type", &Builder::build_type},
+  }};
+  lua_createtable(state, 0, methods.size());
+  for (auto &&[name, func] : methods) {
+    lua_pushcfunction(state, func);
+    lua_setfield(state, -2, name);
+  }
 
   previous_path = fs::current_path();
-
-  // TODO: add the functions install_dynamic
 }
 
 auto make_runner_obj(lua_State *state) noexcept -> void {
@@ -2299,49 +2389,33 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 }
 
 auto make_builder_dummy(lua_State *state) noexcept -> void {
-  lua_createtable(state, 0, 12);
-
-  lua_pushcfunction(state, &Builder::clang);
-  lua_setfield(state, -2, "clang");
-
-  lua_pushcfunction(state, &Builder::gcc);
-  lua_setfield(state, -2, "gcc");
-
-  lua_pushcfunction(state, &Builder::gcc_bare);
-  lua_setfield(state, -2, "gcc_bare");
-
-  lua_pushcfunction(state, &Builder::clang_bare);
-  lua_setfield(state, -2, "clang_bare");
-
-  lua_pushcfunction(state, &Builder::new_exe);
-  lua_setfield(state, -2, "new_exe");
-
-  lua_pushcfunction(state, &Builder::new_static);
-  lua_setfield(state, -2, "new_static");
-
-  lua_pushcfunction(state, &Builder::install_exe_dummy);
-  lua_setfield(state, -2, "install_exe");
-
-  lua_pushcfunction(state, &Builder::install_static_dummy);
-  lua_setfield(state, -2, "install_static");
-
-  lua_pushcfunction(state, &Builder::require);
-  lua_setfield(state, -2, "requires");
-
-  lua_pushcfunction(state, &Builder::link_lib);
-  lua_setfield(state, -2, "link_lib");
-
-  lua_pushcfunction(state, &Builder::get_os);
-  lua_setfield(state, -2, "get_os");
-
-  lua_pushcfunction(state, &Builder::build_type);
-  lua_setfield(state, -2, "build_type");
+  auto constexpr methods = std::array<luaL_Reg, 16>{{
+      {"clang", &Builder::clang},
+      {"clang_bare", &Builder::clang_bare},
+      {"gcc", &Builder::gcc},
+      {"gcc_bare", &Builder::gcc_bare},
+      {"cmake", &Builder::cmake},
+      {"new_exe", &Builder::new_exe},
+      {"new_static", &Builder::new_static},
+      {"new_dynamic", &Builder::new_dynamic},
+      {"install_exe", &Builder::install_exe_dummy},
+      {"install_static", &Builder::install_static_dummy},
+      {"install_dynamic", &Builder::install_dynamic_dummy},
+      {"install_dep", &Builder::install_dep_dummy},
+      {"requires", &Builder::require},
+      {"link_lib", &Builder::link_lib},
+      {"get_os", &Builder::get_os},
+      {"build_type", &Builder::build_type},
+  }};
+  lua_createtable(state, 0, methods.size());
+  for (auto &&[name, func] : methods) {
+    lua_pushcfunction(state, func);
+    lua_setfield(state, -2, name);
+  }
 
   // idk, we're expecting you to be calling luamake in the same path the
   // luamake.lua file is in
   previous_path = fs::current_path();
-
-  // TODO: add the functions install_dynamic
 }
 
 auto operator<<(std::ostream &out, ModIndex const idx) noexcept
