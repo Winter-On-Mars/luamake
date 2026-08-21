@@ -41,22 +41,35 @@ auto make_builder_dummy(lua_State *const) noexcept -> void;
 class Builder final {
   static auto new_exe(lua_State *) noexcept -> int;
   static auto new_static(lua_State *) noexcept -> int;
+  static auto new_dynamic(lua_State *) noexcept -> int;
+
   static auto install_exe(lua_State *) noexcept -> int;
   static auto install_static(lua_State *) noexcept -> int;
+  static auto install_dynamic(lua_State *) noexcept -> int;
+  // used when building programs that use other build systems, brings their
+  // system into ours
+  static auto install_dep(lua_State *) noexcept -> int;
 
   static auto clang(lua_State *) noexcept -> int;
   static auto gcc(lua_State *) noexcept -> int;
   static auto gcc_bare(lua_State *) noexcept -> int;
   static auto clang_bare(lua_State *) noexcept -> int;
 
+  static auto cmake(lua_State *) noexcept -> int;
+
   static auto require(lua_State *) noexcept -> int;
   static auto link_lib(lua_State *) noexcept -> int;
 
+  // TODO: we could probably move get_os to be a member on the build_ctx, rather
+  // than a function, idk about the build_type, but it's worth looking at if
+  // that's possible
   static auto get_os(lua_State *) noexcept -> int;
   static auto build_type(lua_State *) noexcept -> int;
 
   static auto install_exe_dummy(lua_State *) noexcept -> int;
   static auto install_static_dummy(lua_State *) noexcept -> int;
+  static auto install_dynamic_dummy(lua_State *) noexcept -> int;
+  static auto install_dep_dummy(lua_State *) noexcept -> int; // ?
 
   friend auto make_builder_obj(lua_State *) noexcept -> void;
   friend auto make_builder_dummy(lua_State *) noexcept -> void;
