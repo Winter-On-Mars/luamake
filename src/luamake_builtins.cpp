@@ -1978,15 +1978,43 @@ auto Builder::clang_bare(lua_State *state) noexcept -> int {
 }
 
 auto Builder::cmake(lua_State *state) noexcept -> int {
-  lua_pushstring(state, "cmake function is not currently working");
-  return lua_error(state);
+  LUA_EXPECTED_ARGUMENTS(state, 1, cmake);
+  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected table to cmake function, found [%s]",
+                    lua_typename(arg_t));
   try {
+    // TODO: rewrite this function, so that we just take the input, and modify
+    // the strings, instead of making a new table and adding to it
+    auto const len = luaL_len(state, -1);
+    lua_createtable(state, static_cast<int>(len), 0);
+
+    for (auto i = lua_Integer{1}; i <= len; i++) {
+      expr_dbg(i);
+      auto const val_t = lua_geti(state, -2, i);
+      switch (val_t) {
+      case LUA_TSTRING: {
+        auto str_size = size_t{};
+        auto const str = lua_tolstring(state, -1, &str_size);
+        lua_pushfstring(state, "cmake %s", str);
+        expr_dbg(str);
+        lua_seti(state, -3, i);
+        lua_pop(state, 1); // pop ret[i]
+      } break;
+      default:
+        throw std::runtime_error(
+            std::format("while traversing cmake argument array at [{}], "
+                        "expected string, found {}",
+                        i, lua_typename(val_t)));
+      }
+    }
+
+    return 1;
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
   } catch (...) {
     lua_pushstring(state,
-                   "An unknown exception was throw in the clang_bare function");
+                   "An unknown exception was throw in the cmake function");
     return lua_error(state);
   }
 }
