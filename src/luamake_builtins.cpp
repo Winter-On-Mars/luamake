@@ -649,6 +649,9 @@ auto install_impl(lua_State *state) -> int {
     } else {
       if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
         std::cout << std::format("Making archive for [{}]" LM_NL, mod.name);
+      } else if constexpr (mod_t == builtins::Module::DYNAMIC) {
+        std::cout << std::format("Making shared object for [{}]" LM_NL,
+                                 mod.name);
       } else {
         std::cout << std::format("Building [{}]" LM_NL, mod.name);
       }
@@ -675,8 +678,9 @@ auto install_impl(lua_State *state) -> int {
       return;
     }
 
-    // header things that are only (currently) for static libs
-    if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
+    // header things, should also be required for dynamic modules
+    if constexpr (mod_t == builtins::Module::STATIC ||
+                  mod_t == builtins::Module::DYNAMIC) {
       fs::create_directory(
           parent_path /
           fs::path(std::format("{}/{}", mod.install_dir, mod.name)));
@@ -2231,8 +2235,14 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
         mods.get_module_path(lib_to_be_linked) /
         fs::path(
             std::format("{}/{}", mod_linked.install_dir, mod_linked.name)));
-    mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
-                            ("lib" + mod_linked.name + ".a"));
+    if (mod_linked.type == Module::STATIC) {
+      mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
+                              ("lib" + mod_linked.name + ".a"));
+    } else {
+      // TODO: see todo around 640 about platform dependent file names
+      mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
+                              ("lib" + mod_linked.name + ".so"));
+    }
     // link all the stuff that the other mod also needs
     // TODO: idk how we should check that the path is correct, because i'm
     // currently using this for system includes (-lm, -llua, -lstdc++, etc)?
