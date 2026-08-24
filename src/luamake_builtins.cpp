@@ -75,6 +75,15 @@ extern "C" {
     }                                                                          \
   }
 
+// NOTE: wow i'm so lazy that i have a todo comment on a macro created to make
+// writing todo errors easier
+// TODO: have a parameter that get's interpolated for additional context on the
+// error
+#define TODO_ERROR()                                                           \
+  {                                                                            \
+    throw ::std::runtime_error(::std::format("{}:{}", __FILE__, __LINE__));    \
+  }
+
 namespace fs = std::filesystem;
 
 // TODO: reorder things in this namespace bc things are kind of all over the
@@ -707,10 +716,6 @@ auto install_impl(lua_State *state) -> int {
 // compile_commands.json, etc)
 template <builtins::Module::Module_t mod_t>
 auto install_dummy_impl(lua_State *state) -> int {
-  if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
-    throw std::runtime_error(
-        "Currently do not support installing dynamic lib projects");
-  }
   auto const mod_idx = builtins::ModIndex(lua_tointeger(state, -1));
   if (!builtins::mods.has_module_at(mod_idx)) {
     throw std::runtime_error(
@@ -718,7 +723,8 @@ auto install_dummy_impl(lua_State *state) -> int {
         "about." LM_NL LM_HELP "Hint" LM_NORMAL
         ": installing a module only works "
         "when the module has been previously defined, see documentation on "
-        "`new_(exe|static|dynamic)`, and/or `Git` for more information.");
+        "`new_(exe|static|dynamic)`, and/or the `git` module for more "
+        "information.");
   }
   auto &mod = builtins::mods.module_at(mod_idx);
   if (mod.type != mod_t) {
@@ -1863,14 +1869,85 @@ auto Builder::install_dynamic(lua_State *state) noexcept -> int {
 }
 
 auto Builder::install_dep(lua_State *state) noexcept -> int {
-  LUA_EXPECTED_ARGUMENTS(state, 1, install_dep);
-  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+  LUA_EXPECTED_ARGUMENTS(state, 2, install_dep);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
                     "Expected type of argument to `install_dep` "
-                    "to be of type integer, found [%s]",
+                    "to be of type table, found [%s]",
                     lua_typename(ret_t));
-  lua_pushstring(state, "install_dep is not currently working");
-  return lua_error(state);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `install_dep` "
+                    "to be of type table, found [%s]",
+                    lua_typename(ret_t));
   try {
+    // TODO: introduce a function/macro that get's a field from the state, one
+    // for if the field is optional, one for if it's not optional
+    auto const where = [&]() -> std::string {
+      auto res = std::string();
+      auto const where_t = lua_getfield(state, -1, "where");
+      switch (where_t) {
+      case LUA_TSTRING:
+        break;
+      case LUA_TNIL:
+        throw std::runtime_error(
+            "Missing field `where` to install_dep table input");
+      default:
+        throw std::runtime_error(
+            std::format("Expected install_dep table input field `where` to be "
+                        "of type string, found {}",
+                        lua_typename(where_t)));
+      }
+      auto str_size = size_t{};
+      auto const str = lua_tolstring(state, -1, &str_size);
+      res.append(str, str_size);
+      lua_pop(state, 1);
+      return res;
+    }();
+    expr_dbg(where);
+
+    auto const threads = [&]() -> size_t {
+      auto res = size_t{};
+      auto const threads_t = lua_getfield(state, -1, "threads");
+      switch (threads_t) {
+      case LUA_TNUMBER:
+        break;
+      case LUA_TNIL:
+        throw std::runtime_error(
+            "Missing field `threads` to install_dep table input");
+      default:
+        throw std::runtime_error(std::format(
+            "Expected install_dep table input field `threads` to be "
+            "of type integer, found {}",
+            lua_typename(threads_t)));
+      }
+      if (lua_isinteger(state, -1)) {
+        auto const tmp = lua_tointeger(state, -1);
+        lua_pop(state, 1);
+        if (tmp < 0)
+          throw std::runtime_error(
+              "Expected install_dep table input field `threads` to be a "
+              "positive integer, found a negative one");
+        res = static_cast<size_t>(tmp);
+      } else {
+        throw std::runtime_error(
+            "Expected install_dep table input field `threads` to be of type "
+            "integer, found number");
+      }
+      return res;
+    }();
+
+    auto const expecting_t = lua_getfield(state, -1, "expecting");
+    switch (expecting_t) {
+    case LUA_TTABLE:
+      break;
+    case LUA_TNIL:
+      TODO_ERROR();
+    default:
+      TODO_ERROR();
+    }
+    expr_dbg(threads);
+
+    lua_pushstring(state, "install_dep function isn't implimented");
+    return lua_error(state);
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
@@ -1989,14 +2066,12 @@ auto Builder::cmake(lua_State *state) noexcept -> int {
     lua_createtable(state, static_cast<int>(len), 0);
 
     for (auto i = lua_Integer{1}; i <= len; i++) {
-      expr_dbg(i);
       auto const val_t = lua_geti(state, -2, i);
       switch (val_t) {
       case LUA_TSTRING: {
         auto str_size = size_t{};
         auto const str = lua_tolstring(state, -1, &str_size);
         lua_pushfstring(state, "cmake %s", str);
-        expr_dbg(str);
         lua_seti(state, -3, i);
         lua_pop(state, 1); // pop ret[i]
       } break;
