@@ -1187,6 +1187,12 @@ auto Module::DepTree::vectorize() const -> std::vector<std::string_view> {
   return res;
 }
 
+auto Module::DepTree::is_empty() const noexcept -> bool {
+  // TODO: probably a good idea to have there be some variable we check, like
+  // using the unique_ptr's and doing a null check for this
+  return num_files == 0;
+}
+
 // TODO: optimize this, reorder equality checks, maybe in memory serialize the
 // objects and just compare the bytes(?)
 auto Module::operator==(Module const &that) const noexcept -> bool {
@@ -2327,7 +2333,7 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
     }
     auto &mod_d = mods.module_at(lib_d);
 
-    if (mod_l.tree.num_files != 0) {
+    if (!mod_l.tree.is_empty()) {
       mod_d.includes.push_back(mods.get_module_path(lib_l) / mod_l.install_dir);
       add_unique(mod_d.includes, mod_l.includes);
     } else {
@@ -2341,9 +2347,7 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
       mod_d.linking.push_back(fs::path(mod_l.install_dir) /
                               ("lib" + mod_l.name + ".a"));
     } else {
-      // HACK: when working with external modules, they don't have a dep tree,
-      // thus num_files == 0, which *should* be otherwise impossible
-      if (mod_l.tree.num_files != 0) {
+      if (!mod_l.tree.is_empty()) {
         // TODO: see todo around 640 about platform dependent file names
         mod_d.linking.push_back(fs::path(mod_l.install_dir) /
                                 ("lib" + mod_l.name + ".so"));

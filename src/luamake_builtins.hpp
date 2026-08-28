@@ -236,6 +236,7 @@ struct Module final {
     }
 
     auto vectorize() const -> std::vector<std::string_view>;
+    auto is_empty() const noexcept -> bool;
 
   private:
     // a parallel array for all of the source files

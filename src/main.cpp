@@ -785,6 +785,11 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
   }
 
   for (auto &&mod : luamake::builtins::mods) {
+    // HACK: when dealing with external modules, modules that are built using
+    // another build system, they don't have a dep tree, thus it will be empty
+    if (mod.tree.is_empty()) {
+      continue;
+    }
     auto const &directory = mod.install_dir;
     auto const arguments = [&]() -> std::string {
       auto res = std::string();
