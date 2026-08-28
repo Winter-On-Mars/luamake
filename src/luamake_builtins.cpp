@@ -2033,18 +2033,12 @@ auto Builder::install_dep(lua_State *state) noexcept -> int {
       }();
       auto dyn_mod = builtins::Module::from_external(
           Module::DYNAMIC, std::move(shared_obj), std::move(includes));
-#ifdef DEBUG_MOD
-      dyn_mod.display(std::cout);
-#endif // DEBUG
       // this seems to break things, because it should be 'where', but we
       // haven't introduced that to the LakeModules system, so it doesn't know
       // where it is
       // TODO: fix that, seems like it should work
       auto const index =
           mods.append_module_with_path(previous_path, std::move(dyn_mod));
-#ifdef DEBUG_MOD
-      mods.module_at(index).display(std::cout);
-#endif // DEBUG
       lua_pushinteger(state, static_cast<lua_Integer>(index));
       // TODO: have some way to reserve n threads so that we don't overload the
       // cpu
@@ -2336,10 +2330,10 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
     }
     auto &mod_d = mods.module_at(lib_d);
 
-    // this should be correct, basically stolen from the install_static
-    // function, there shouldn't be any issues, because the install_static
-    // function just dumps all the headers in the same out directory
-    add_unique(mod_d.sys_includes, mod_l.sys_includes);
+    if (mod_l.tree.num_files != 0) {
+      mod_d.includes.push_back(mods.get_module_path(lib_l) / mod_l.install_dir);
+    }
+    add_unique(mod_d.includes, mod_l.includes);
     // TODO: we should probably just have an output name that we can use instead
     // of this
     if (mod_l.type == Module::STATIC) {
