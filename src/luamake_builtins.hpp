@@ -296,7 +296,6 @@ struct Module final {
   std::vector<std::filesystem::path> roots;
   std::vector<std::filesystem::path> headers;
   std::vector<std::filesystem::path> includes;
-  std::vector<std::filesystem::path> dep_includes;
   std::vector<std::filesystem::path> sys_includes;
   std::vector<std::filesystem::path> linking;
   // NOTE: we need to seperate this into the macros that are predefined, and
@@ -319,6 +318,9 @@ struct Module final {
   std::string compiler;
   std::string name;
   std::string install_dir;
+
+  static auto from_external(Module_t &&, std::string &&,
+                            std::vector<std::string> &&) -> Module;
 
   Module() noexcept
       : type(), tree(), roots(), headers(), includes(), sys_includes(),

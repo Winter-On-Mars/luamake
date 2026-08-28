@@ -817,12 +817,6 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
         [](auto &&a, auto &&next) {
           return std::format("{}\"-isystem\",\"{}\",", a, next.string());
         });
-    auto const dep_includes =
-        std::accumulate(mod.dep_includes.cbegin(), mod.dep_includes.cend(),
-                        std::string(), [](auto &&a, auto &&next) {
-                          return std::format("{}\"-iquote\",\"{}\",", a,
-                                             next.parent_path().string());
-                        });
 
     auto cc_json_string = std::string(1, '[');
     for (auto i = size_t{}; i < mod.tree.size() - 1; ++i) {
@@ -834,7 +828,6 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
 
       cc_json_string.append(includes);
       cc_json_string.append(sys_includes);
-      cc_json_string.append(dep_includes);
 
       cc_json_string.append("\"-c\",\"-o\",");
       auto const fname = mod.tree.get_path(i).stem().string();
@@ -859,7 +852,6 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     cc_json_string.append(arguments);
     cc_json_string.append(includes);
     cc_json_string.append(sys_includes);
-    cc_json_string.append(dep_includes);
 
     cc_json_string.append("\"-c\",\"-o\",");
     auto const fname = mod.tree.get_path(mod.tree.size() - 1).stem().string();

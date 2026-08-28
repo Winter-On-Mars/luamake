@@ -245,7 +245,6 @@ template <> struct Serializer<builtins::Module> {
     span_serializer.serialize(mod.roots);
     span_serializer.serialize(mod.headers);
     span_serializer.serialize(mod.includes);
-    span_serializer.serialize(mod.dep_includes);
     span_serializer.serialize(mod.sys_includes);
     span_serializer.serialize(mod.linking);
 
@@ -352,7 +351,6 @@ template <> struct Deserializer<builtins::Module> {
     mod.roots = vec_deserial.deserialize();
     mod.headers = vec_deserial.deserialize();
     mod.includes = vec_deserial.deserialize();
-    mod.dep_includes = vec_deserial.deserialize();
     mod.sys_includes = vec_deserial.deserialize();
     mod.linking = vec_deserial.deserialize();
 
