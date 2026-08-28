@@ -320,7 +320,7 @@ struct Module final {
   std::string install_dir;
 
   static auto from_external(Module_t &&, std::string &&,
-                            std::vector<std::string> &&) -> Module;
+                            std::vector<std::filesystem::path> &&) -> Module;
 
   Module() noexcept
       : type(), tree(), roots(), headers(), includes(), sys_includes(),

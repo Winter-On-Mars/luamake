@@ -1259,15 +1259,11 @@ auto Module::display(std::ostream &out) const noexcept -> void {
 #endif // DEBUG_MOD
 
 auto Module::from_external(Module_t &&type, std::string &&links,
-                           std::vector<std::string> &&includes) -> Module {
+                           std::vector<fs::path> &&includes) -> Module {
   auto mod = Module();
   mod.type = type;
-  mod.linking.push_back(links);
-  // see todo in install_dep function
-  mod.sys_includes.reserve(includes.size());
-  for (auto &&include : includes) {
-    mod.sys_includes.push_back(include);
-  }
+  mod.linking.push_back(std::move(links));
+  mod.sys_includes = std::move(includes);
   return mod;
 }
 
@@ -2024,12 +2020,13 @@ auto Builder::install_dep(lua_State *state) noexcept -> int {
       auto shared_obj = std::format(
           "{}/{}", where, get_required_field<std::string>(state, -2, "so"));
       expr_dbg(shared_obj);
-      // TODO: have this be a vec<fs::path>
       auto includes = [&]() {
         auto tmp = concat_lua_array(state, -2, "includes");
-        for (auto &&val : tmp)
-          val = std::format("{}/{}", where, val);
-        return tmp;
+        auto res = std::vector<fs::path>();
+        res.reserve(tmp.size());
+        for (auto i = size_t{}; i < tmp.size(); ++i)
+          res.push_back(std::format("{}/{}", where, tmp[i]));
+        return res;
       }();
       auto dyn_mod = builtins::Module::from_external(
           Module::DYNAMIC, std::move(shared_obj), std::move(includes));
@@ -2332,8 +2329,12 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
 
     if (mod_l.tree.num_files != 0) {
       mod_d.includes.push_back(mods.get_module_path(lib_l) / mod_l.install_dir);
+      add_unique(mod_d.includes, mod_l.includes);
+    } else {
+      // we shouldn't need to add_unique, because they should always be unique,
+      // but this is fine
+      add_unique(mod_d.sys_includes, mod_l.sys_includes);
     }
-    add_unique(mod_d.includes, mod_l.includes);
     // TODO: we should probably just have an output name that we can use instead
     // of this
     if (mod_l.type == Module::STATIC) {
@@ -2351,9 +2352,7 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
     // link all the stuff that the other mod also needs
     // TODO: idk how we should check that the path is correct, because i'm
     // currently using this for system includes (-lm, -llua, -lstdc++, etc)?
-    for (auto &&link : mod_l.linking) {
-      mod_d.linking.push_back(link);
-    }
+    add_unique(mod_d.linking, mod_l.linking);
 
     return 0;
   } catch (std::exception const &e) {
@@ -2475,14 +2474,53 @@ auto Builder::install_dynamic_dummy(lua_State *state) noexcept -> int {
 }
 
 auto Builder::install_dep_dummy(lua_State *state) noexcept -> int {
-  LUA_EXPECTED_ARGUMENTS(state, 1, install_dep)
-  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
-                    "Expected type of argument to `install_dep` to be of type "
-                    "integer, found [%s]",
+  LUA_EXPECTED_ARGUMENTS(state, 2, install_dep)
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected type of argument to `install_dep` "
+                    "to be of type table, found [%s]",
                     lua_typename(ret_t));
-  lua_pushstring(state, "install_dep function is not currently working");
-  return lua_error(state);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `install_dep` "
+                    "to be of type table, found [%s]",
+                    lua_typename(ret_t));
   try {
+    auto const where = get_required_field<std::string>(state, -1, "where");
+
+    LUA_PUSH_REQUIRED_FIELD(state, -1, "expecting", LUA_TTABLE);
+
+    auto const type_str =
+        get_required_field<std::string_view>(state, -1, "type");
+
+    if (type_str == std::string_view{"dynamic"}) {
+      auto shared_obj = std::format(
+          "{}/{}", where, get_required_field<std::string>(state, -2, "so"));
+      expr_dbg(shared_obj);
+      // TODO: have this be a vec<fs::path>
+      auto includes = [&]() {
+        auto tmp = concat_lua_array(state, -2, "includes");
+        auto res = std::vector<fs::path>();
+        res.reserve(tmp.size());
+        for (auto i = size_t{}; i < tmp.size(); ++i)
+          res.push_back(std::format("{}/{}", where, tmp[i]));
+        return res;
+      }();
+      auto dyn_mod = builtins::Module::from_external(
+          Module::DYNAMIC, std::move(shared_obj), std::move(includes));
+      // this seems to break things, because it should be 'where', but we
+      // haven't introduced that to the LakeModules system, so it doesn't know
+      // where it is
+      // TODO: fix that, seems like it should work
+      auto const index =
+          mods.append_module_with_path(previous_path, std::move(dyn_mod));
+      lua_pushinteger(state, static_cast<lua_Integer>(index));
+      return 1;
+    } else if (type_str == std::string_view{"static"}) {
+      TODO_ERROR();
+    } else if (type_str == std::string_view{"executable"}) {
+      TODO_ERROR();
+    } else {
+      TODO_ERROR();
+    }
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
