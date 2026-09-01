@@ -39,6 +39,8 @@ struct CompilationPool final {
 
 private:
   auto busy() noexcept -> bool;
+  auto should_terminate() const noexcept -> bool;
+  auto set_terminate() noexcept -> void;
 
   auto _loop() noexcept -> void;
 
@@ -53,7 +55,9 @@ private:
   std::queue<std::function<void()>> tasks;
   std::condition_variable waiting;
   std::mutex task_mtx;
-  bool should_terminate = false;
+  // idk i'm using the top bit to represent
+  static auto constexpr terminate_bit = size_t{1} << 63;
+  size_t num_threads = size_t{};
 };
 extern CompilationPool threads;
 } // namespace luamake

@@ -17,6 +17,7 @@ CompilationPool threads = CompilationPool();
 CompilationPool::~CompilationPool() noexcept {}
 
 auto CompilationPool::init(size_t num_threads) noexcept -> void {
+  this->num_threads = num_threads;
   workers.reserve(num_threads);
   for (auto i = size_t{}; i < num_threads; ++i) {
     workers.push_back(std::thread([this]() { _loop(); }));
@@ -32,7 +33,7 @@ auto CompilationPool::deinit() noexcept -> void {
     std::this_thread::sleep_for(std::chrono::nanoseconds{1000});
     lock.lock();
   }
-  should_terminate = true;
+  set_terminate();
   lock.unlock();
   waiting.notify_all();
   for (auto &thread : workers) {
@@ -108,14 +109,22 @@ auto CompilationPool::busy() noexcept -> bool {
   return pool_busy;
 }
 
+auto CompilationPool::should_terminate() const noexcept -> bool {
+  return (num_threads & terminate_bit) != 0;
+}
+
+auto CompilationPool::set_terminate() noexcept -> void {
+  num_threads |= terminate_bit;
+}
+
 auto CompilationPool::_loop() noexcept -> void {
   while (true) {
     auto job = std::function<void()>();
     {
       auto lock = std::unique_lock(task_mtx);
       waiting.wait(lock,
-                   [this]() { return !tasks.empty() || should_terminate; });
-      if (should_terminate) {
+                   [this]() { return !tasks.empty() || should_terminate(); });
+      if (should_terminate()) {
         return;
       }
       job = tasks.front();
