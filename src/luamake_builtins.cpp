@@ -648,14 +648,17 @@ auto install_impl(lua_State *state) -> int {
       if constexpr (mod_t == builtins::Module::Module_t::STATIC)
         return std::format("ar crs {}/lib{}.a {}", mod.install_dir, mod.name,
                            compiled_files);
-      else if (mod_t == builtins::Module::Module_t::EXE)
+      else if constexpr (mod_t == builtins::Module::Module_t::EXE)
         return std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
                            mod.name, compiled_files, mod.format_links());
-      else if (mod_t == builtins::Module::Module_t::DYNAMIC)
+      else if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC)
         // TODO: change the .so to .dll and .dyn(?) for depending on platform
         return std::format("{} -shared -o {}/lib{}.so {} {}", mod.compiler,
                            mod.install_dir, mod.name, compiled_files,
                            mod.format_links());
+      else {
+        unreachable();
+      }
     }();
 
     if (builtins::cl_options.verbose) {
@@ -701,10 +704,8 @@ auto install_impl(lua_State *state) -> int {
 
       auto const formatted_files = std::accumulate(
           mod.headers.begin(), mod.headers.end(), std::string(),
-          [&parent_path](auto &&e, auto &&next) {
-            return std::format("{} {}/{}", e,
-                               parent_path.parent_path().string(),
-                               next.string());
+          [pp = parent_path.parent_path().string()](auto &&e, auto &&next) {
+            return std::format("{} {}/{}", e, pp, next.string());
           });
 
       auto const copy_headers = std::format(
@@ -724,7 +725,8 @@ auto install_impl(lua_State *state) -> int {
       }
     }
     // if everything went well then we can serialize the file
-    spl::serialize(mod, cache_path);
+    if (builtins::cl_options.cache)
+      spl::serialize(mod, cache_path);
   });
   return 1;
 }
@@ -2010,7 +2012,7 @@ auto Builder::install_dep(lua_State *state) noexcept -> int {
     auto const threads = get_required_field<size_t>(state, -1, "threads");
 
     // NOTE: the `&&` is included when building the string
-    auto const command_str =
+    auto command_str =
         std::format("cd {} {}", where,
                     flatten_lua_array(state, -1, std::string_view{"commands"},
                                       [](std::string_view const str) {
@@ -2022,6 +2024,12 @@ auto Builder::install_dep(lua_State *state) noexcept -> int {
     auto const type_str =
         get_required_field<std::string_view>(state, -1, "type");
 
+    // TODO: it seems we have to add something to the resulting command to get
+    // things to properly link
+    // we have to put some -Wl,-rpath=[path-to-so-dir]
+    // truthfully idk why this is, because linking against shared libs that
+    // luamake has made seemed to have worked, but now that we have an external
+    // so file to link against we need this(?) maybe it's a thing of size(?)
     if (type_str == std::string_view{"dynamic"}) {
       auto shared_obj = std::format(
           "{}/{}", where, get_required_field<std::string>(state, -2, "so"));
@@ -2036,17 +2044,16 @@ auto Builder::install_dep(lua_State *state) noexcept -> int {
       }();
       auto dyn_mod = builtins::Module::from_external(
           Module::DYNAMIC, std::move(shared_obj), std::move(includes));
-      // this seems to break things, because it should be 'where', but we
-      // haven't introduced that to the LakeModules system, so it doesn't know
-      // where it is
-      // TODO: fix that, seems like it should work
       auto const index =
           mods.append_module_with_path(previous_path, std::move(dyn_mod));
       lua_pushinteger(state, static_cast<lua_Integer>(index));
-      // TODO: have some way to reserve n threads so that we don't overload the
-      // cpu
       // TODO: signal to other modules that the deps are not yet built
-      luamake::threads.add_task([=]() { os_call(command_str); });
+      luamake::threads.add_task(
+          [threads, command_str = std::move(command_str)]() {
+            ::luamake::threads.reserve_threads(threads);
+            os_call(command_str);
+            ::luamake::threads.give_back_threads(threads);
+          });
       return 1;
     } else if (type_str == std::string_view{"static"}) {
       TODO_ERROR();
