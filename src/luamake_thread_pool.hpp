@@ -37,10 +37,17 @@ struct CompilationPool final {
     waiting.notify_one();
   }
 
+  // there are probably better ways to manage these threads, idk return an raii
+  // object that does this(?), also error handling :)
+  auto reserve_threads(size_t const num_threads) noexcept -> void;
+  auto give_back_threads(size_t const num_threads) noexcept -> void;
+
 private:
   auto busy() noexcept -> bool;
   auto should_terminate() const noexcept -> bool;
   auto set_terminate() noexcept -> void;
+
+  auto num_threads() const noexcept -> size_t;
 
   auto _loop() noexcept -> void;
 
@@ -55,9 +62,12 @@ private:
   std::queue<std::function<void()>> tasks;
   std::condition_variable waiting;
   std::mutex task_mtx;
-  // idk i'm using the top bit to represent
+  // idk i'm using the top bit to represent, we could probably switch this to
+  // the top byte, making it a bit faster to load, because then we only need to
+  // load a byte, not a bit, also 32bit support (idk if that's something i've
+  // tried to maintain but this currently breaks things)
   static auto constexpr terminate_bit = size_t{1} << 63;
-  size_t num_threads = size_t{};
+  size_t available_threads = size_t{};
 };
 extern CompilationPool threads;
 } // namespace luamake

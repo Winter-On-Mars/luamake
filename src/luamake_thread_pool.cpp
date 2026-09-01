@@ -17,7 +17,7 @@ CompilationPool threads = CompilationPool();
 CompilationPool::~CompilationPool() noexcept {}
 
 auto CompilationPool::init(size_t num_threads) noexcept -> void {
-  this->num_threads = num_threads;
+  available_threads = num_threads;
   workers.reserve(num_threads);
   for (auto i = size_t{}; i < num_threads; ++i) {
     workers.push_back(std::thread([this]() { _loop(); }));
@@ -99,6 +99,24 @@ auto CompilationPool::add_compile_tasks(
   waiting.notify_all();
 }
 
+auto CompilationPool::reserve_threads(size_t const num_threads) noexcept
+    -> void {
+  if (should_terminate())
+    return;
+  if (num_threads > available_threads) {
+    available_threads = 0;
+  } else {
+    available_threads -= num_threads;
+  }
+}
+
+auto CompilationPool::give_back_threads(size_t const num_threads) noexcept
+    -> void {
+  if (should_terminate())
+    return;
+  available_threads += num_threads;
+}
+
 auto CompilationPool::busy() noexcept -> bool {
   // std::this_thread::sleep_for(std::chrono::nanoseconds(100));
   auto pool_busy = true;
@@ -110,13 +128,19 @@ auto CompilationPool::busy() noexcept -> bool {
 }
 
 auto CompilationPool::should_terminate() const noexcept -> bool {
-  return (num_threads & terminate_bit) != 0;
+  return (available_threads & terminate_bit) != 0;
 }
 
 auto CompilationPool::set_terminate() noexcept -> void {
-  num_threads |= terminate_bit;
+  available_threads |= terminate_bit;
 }
 
+auto CompilationPool::num_threads() const noexcept -> size_t {
+  return available_threads & ~terminate_bit;
+}
+
+// TODO: get the thread count stuff working, something to do with updating how
+// this event loop works(?)
 auto CompilationPool::_loop() noexcept -> void {
   while (true) {
     auto job = std::function<void()>();
