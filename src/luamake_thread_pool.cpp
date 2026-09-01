@@ -88,6 +88,8 @@ auto CompilationPool::add_compile_tasks(
         if (os_call(invoked_command) == 0) {
           builtins::mods.add_compiled_file(idx, path.filename().string());
         } else {
+          fprintf(stderr, "Error compiling [%s]" LM_NL,
+                  invoked_command.c_str());
           builtins::mods.set_state_at(idx,
                                       builtins::LakeModules::ModState::error);
         }
