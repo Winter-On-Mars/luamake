@@ -243,6 +243,7 @@ enum class exit_t : unsigned char {
 static auto new_proj(std::string_view const,
                      luamake::builtins::CLOptions::ProjectType const) noexcept
     -> exit_t;
+static auto lua_ls(std::filesystem::path &&) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
 static auto build(lua_State *const) noexcept -> exit_t;
@@ -251,16 +252,6 @@ static auto compile_commands_json(lua_State *const) noexcept -> exit_t;
 static auto run(lua_State *const) noexcept -> exit_t;
 static auto test(lua_State *const) noexcept -> exit_t;
 
-// TODO: add a command option for package management, we will probably need to
-// depend on libcurl (and openssl) to do the networking to grab https urls,
-// but that would be nice.
-//  we can add things like --local as a cl arg to have it in the root project
-//  (adding it to a .gitignore or whatever), or just (probably by default)
-//  have it install in the $HOME/.luamake/package directory to be used for the
-//  user packages that they have installed
-// TODO: add a command to generate a luals definition file, or figure out some
-// way to ship it with the program, because depending on config you have to set
-// things up properly idk
 enum class Command : int {
   UNKNOWN_ARG,
   BUILD,
@@ -268,8 +259,9 @@ enum class Command : int {
   CLEAN,
   TEST,
   RUN,
-  HELP,
   CC_JSON,
+  LUA_LS,
+  HELP,
 };
 
 auto determine_command(int argc, char **argv) noexcept -> Command {
@@ -277,12 +269,9 @@ auto determine_command(int argc, char **argv) noexcept -> Command {
     return Command::RUN;
   }
 
-  // TODO: (Winter-On-Mars) i'm pretty sure this is a saftey issue by not doing
-  // stringlen bounds checking, but also i don't see how that could cause an
-  // issue in this case
-  if (strcmp(argv[1], "b") == 0 || strcmp(argv[1], "build") == 0) {
+  if (matches(argv[1], "b") || matches(argv[1], "build")) {
     return Command::BUILD;
-  } else if (strcmp(argv[1], "n") == 0 || strcmp(argv[1], "new") == 0) {
+  } else if (matches(argv[1], "n") || matches(argv[1], "new")) {
     if (argc < 3) {
       error_message("Expected string for the name of the "
                     "project, found nothing" LM_NL
@@ -290,17 +279,24 @@ auto determine_command(int argc, char **argv) noexcept -> Command {
       return Command::HELP;
     }
     return Command::NEW;
-  } else if (strcmp(argv[1], "c") == 0 || strcmp(argv[1], "clean") == 0) {
+  } else if (matches(argv[1], "c") || matches(argv[1], "clean")) {
     return Command::CLEAN;
-  } else if (strcmp(argv[1], "t") == 0 || strcmp(argv[1], "test") == 0) {
+  } else if (matches(argv[1], "t") || matches(argv[1], "test")) {
     return Command::TEST;
-  } else if (strcmp(argv[1], "r") == 0 || strcmp(argv[1], "run") == 0) {
+  } else if (matches(argv[1], "r") || matches(argv[1], "run")) {
     return Command::RUN;
-  } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
+  } else if (matches(argv[1], "-h") || matches(argv[1], "--help")) {
     return Command::HELP;
-  } else if (strcmp(argv[1], "cc") == 0 ||
-             strcmp(argv[1], "compile_commands") == 0) {
+  } else if (matches(argv[1], "cc") || matches(argv[1], "compile_commands")) {
     return Command::CC_JSON;
+  } else if (matches(argv[1], "luals")) {
+    if (argc < 3) {
+      error_message("Expected string for the dir to write the luals files, "
+                    "found nothing" LM_NL
+                    "\tDisplaying help message for more information" LM_NL);
+      return Command::HELP;
+    }
+    return Command::LUA_LS;
   } else {
     fwarning_message("Unknown argument [%s]" LM_NL
                      "\tDisplaying help for list of accepted arguments",
@@ -318,6 +314,8 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     return new_proj(std::string_view{argv[2]},
                     luamake::builtins::cl_options.proj_t);
   }
+  case Command::LUA_LS:
+    return lua_ls(argv[2]);
   case Command::HELP:
     return help();
   case Command::CLEAN:
@@ -395,6 +393,8 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   case Command::CC_JSON:
     res = compile_commands_json(state);
     break;
+  case Command::LUA_LS:
+    [[fallthrough]];
   case Command::UNKNOWN_ARG:
     [[fallthrough]];
   case Command::NEW:
@@ -439,7 +439,8 @@ new_proj(std::string_view const project_name,
     return exit_t::internal_error;
   }
 
-  // these are all format strings, so they need to be passed to std::format
+  // NOTE: these are all format strings, so they need to be passed to
+  // std::format
   auto constexpr lua_f_content = std::array<std::string_view, 3>{
       // clang-format off
     std::string_view{"function Build(b)" LM_NL
@@ -650,14 +651,181 @@ new_proj(std::string_view const project_name,
   return exit_t::ok;
 }
 
+static auto lua_ls(fs::path &&dir) noexcept -> exit_t {
+  if (!fs::exists(dir))
+    std::filesystem::create_directories(dir);
+  fs::create_directory(dir / "library");
+
+  // creating default `luamake.lua`
+  auto config_json = luamake::File(
+      dir / "config.json", luamake::File::WRITE | luamake::File::CREATE);
+  if (!config_json) {
+    ferror_message("Unable to open file at [%s]." LM_NL
+                   "\tThis could be an issue "
+                   "with permissions, or out of space.",
+                   (fs::current_path() / "config.json").c_str());
+    return exit_t::internal_error;
+  }
+
+  auto constexpr config_json_content = std::string_view{
+      // clang-format off
+  "{" LM_NL
+    "\"$schema\": \"https://raw.githubusercontent.com/LuaLS/LLS-Addons/main/schemas/addon_config.schema.json\"," LM_NL
+    "\"words\": [" LM_NL
+      "\"function Build%(%s%)\"" LM_NL
+    "]," LM_NL
+    "\"files\": [" LM_NL
+      "\"luamake.lua\"" LM_NL
+    "]," LM_NL
+    "\"settings\": {" LM_NL
+      "\"Lua.workspace.library\": [" LM_NL
+        "\"${3rd}/luamake/library\"" LM_NL
+      "]" LM_NL
+    "}" LM_NL
+  "}"
+      // clang-format on
+  };
+  if (config_json.write(config_json_content.data(),
+                        config_json_content.length(),
+                        1) != config_json_content.length()) {
+    ferror_message("Unable to write full config.json at [%s]", dir.c_str());
+    return exit_t::internal_error;
+  }
+  config_json.flush();
+
+  auto constexpr luamake_lua_content = std::string_view{
+      R"0(---@meta luamake
+
+---@class ExeConfig
+---@field name string
+---@field root string
+---@field compiler CompilerConfig
+---@field install_dir string
+---@field version string?
+---@field include string[]?
+---@field linking string[]?
+---@field macros string[]?
+
+---@class LibConfig
+---@field name string
+---@field roots string[]
+---@field headers string[]
+---@field compiler CompilerConfig
+---@field install_dir string
+---@field version string?
+---@field include string[]?
+---@field linking string[]?
+---@field macros string[]?
+
+---@alias CCOptions table<string, string|table<string,string>>
+
+---@class CompilerConfig
+---@field compiler string
+---@field opt_args table<any, any>
+---@field optimize string?
+---@field warnings string[]?
+
+---@class LibType
+
+---@class DepConfig
+---@field where string
+---@field threads integer
+---@field commands string[]
+---@field expecting LibType
+
+---@alias ModuleIndex integer
+
+---@alias OsType 'windows'|'linux'|'osx'|'bsd'|nil
+
+---@alias BuildType 'release'|'debug'|'debug_and_release'|'release_min'
+
+---@class BuildCtx
+---@field requires fun(self: BuildCtx, path: string): ModuleIndex
+---@field new_exe fun(self: BuildCtx, config: ExeConfig): ModuleIndex
+---@field new_static fun(self: BuildCtx, config: LibConfig): ModuleIndex
+---@field new_dynamic fun(self: BuildCtx, config: LibConfig): ModuleIndex
+---@field link_lib fun(library: ModuleIndex, link_to: ModuleIndex): nil
+---@field install_exe fun(mod: ModuleIndex): ModuleIndex
+---@field install_static fun(mod: ModuleIndex): ModuleIndex
+---@field install_dynamic fun(mod: ModuleIndex): ModuleIndex
+---@field install_dep fun(self: BuildCtx, config: DepConfig): ModuleIndex
+---@field clang fun(cc_options: CCOptions): CompilerConfig
+---@field gcc fun(cc_options: CCOptions): CompilerConfig
+---@field gcc_bare fun(cc_options: CCOptions): CompilerConfig
+---@field clang_bare fun(cc_options: CCOptions): CompilerConfig
+---@field cmake fun(commands: string[]): string[]
+---@field get_os fun(): OsType
+---@field build_type fun(): BuildType
+
+---@class RunConfig
+---@field name string
+---@field path string
+---@field args string[]?
+
+---@class RunCtx
+---@field run fun(runable_config: RunConfig): integer
+
+---@class TestCtx
+---@field set_exe fun(self: TestCtx, command: string)
+---@field add_arg fun(self: TestCtx, arg: string)
+---@field add_args fun(self: TestCtx, args: string[])
+---@field expect_success fun(self: TestCtx)
+---@field expect_failure fun(self: TestCtx)
+---@field expect_output fun(self: TestCtx, output: string, from_fd?: 'stdout' | 'stderr')
+
+---@param name string name of value
+---@param arg any value will be recursively displayed to stdout
+function Dump(name, arg) end
+
+---@type table<string, string>
+args = {}
+
+---@class CloneConfig
+---@field name string
+---@field url string
+---@field branch string
+---@field shallow ?boolean Default=true
+---@field install_level 'project'
+
+git = {
+	---@param config CloneConfig
+	---@return string
+	clone = function(config) end,
+})0"};
+
+  auto luamake_lua =
+      luamake::File(dir / "library/luamake.lua",
+                    luamake::File::WRITE | luamake::File::CREATE);
+  if (!luamake_lua) {
+    ferror_message("Unable to open file at [%s]." LM_NL "\t" LM_HELP
+                   "HINT" LM_NORMAL ": This could be an issue "
+                   "with permissions, or out of space.",
+                   (fs::current_path() / "library/luamake.lua").c_str());
+    return exit_t::internal_error;
+  }
+  if (luamake_lua.write(luamake_lua_content.data(),
+                        luamake_lua_content.length(),
+                        1) != luamake_lua_content.length()) {
+    ferror_message(
+        "Unable to write full luamake.lua file for luals support at [%s]",
+        (dir / "library").c_str());
+    return exit_t::internal_error;
+  }
+
+  luamake_lua.flush();
+
+  return exit_t::ok;
+}
+
 static auto help() noexcept -> exit_t {
   // clang-format off
   printf(
       "Usage: luamake [options]?" LM_NL
       "options:" LM_NL
-      "\t-h, help                            : Displays this help message." LM_NL
+      "\t-h, --help                          : Displays this help message." LM_NL
       "\tc, clean                            : Cleans the cache dir and removes the output." LM_NL
       "\tcc, compile_commands                : Generates `compile_commands.json` file in `install_dir`, defined in the respective `luamake.lua` file." LM_NL
+      "\tluals <dir>                         : Generates LuaLS project files in <dir>." LM_NL
       "\tn, new <project-name> [project-args]: Creates a new subdir with name <project-name>, "
       "creating a default luamake build script." LM_NL
       "\ti, init <project-name> [init-args]  :" LM_NL
