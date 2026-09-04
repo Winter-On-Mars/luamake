@@ -645,18 +645,18 @@ auto install_impl(lua_State *state) -> int {
 
     // only way i could think to get this to work :) *should* be optimized away
     auto const invoked_command = [&]() -> std::string {
-      if constexpr (mod_t == builtins::Module::Module_t::STATIC)
+      if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
         return std::format("ar crs {}/lib{}.a {}", mod.install_dir, mod.name,
                            compiled_files);
-      else if constexpr (mod_t == builtins::Module::Module_t::EXE)
+      } else if constexpr (mod_t == builtins::Module::Module_t::EXE) {
         return std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
                            mod.name, compiled_files, mod.format_links());
-      else if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC)
+      } else if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
         // TODO: change the .so to .dll and .dyn(?) for depending on platform
         return std::format("{} -shared -o {}/lib{}.so {} {}", mod.compiler,
                            mod.install_dir, mod.name, compiled_files,
                            mod.format_links());
-      else {
+      } else {
         unreachable();
       }
     }();
@@ -1222,9 +1222,11 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
 
 #ifdef DEBUG_MOD
 auto Module::display(std::ostream &out) const noexcept -> void {
-  auto _display = [&](auto x) { out << x << ", "; };
+  auto _display = [&](auto x) { out << "\t\t" << x << ", "; };
 
-  out << "type = ";
+  out << "mod = {" LM_NL;
+
+  out << "\ttype = ";
   switch (type) {
   case EXE:
     out << "EXE";
@@ -1239,29 +1241,34 @@ auto Module::display(std::ostream &out) const noexcept -> void {
 
   out << LM_NL;
 
-  out << "roots = [";
+  out << "\troots = [";
   std::for_each(roots.begin(), roots.end(), _display);
-  out << "]" LM_NL;
+  out << "\t]" LM_NL;
 
-  out << "headers = [";
+  out << "\theaders = [";
   std::for_each(headers.begin(), headers.end(), _display);
-  out << "]" LM_NL;
+  out << "\t]" LM_NL;
 
-  out << "includes= [";
+  out << "\tincludes= [";
   std::for_each(includes.begin(), includes.end(), _display);
-  out << "]" LM_NL;
+  out << "\t]" LM_NL;
 
-  out << "sys_includes= [";
+  out << "\tsys_includes= [";
   std::for_each(sys_includes.begin(), sys_includes.end(), _display);
-  out << "]" LM_NL;
+  out << "\t]" LM_NL;
 
-  out << "linking = [";
-  std::for_each(linking.begin(), linking.end(), _display);
-  out << "]" LM_NL;
+  out << "\tlinks= [";
+  std::for_each(links.begin(), links.end(), _display);
+  out << "\t]" LM_NL;
 
-  out << "compiler = " << compiler << LM_NL;
-  out << "name = " << name << LM_NL;
-  out << "install_dir = " << install_dir << LM_NL;
+  out << "\tsys_links = [";
+  std::for_each(sys_links.begin(), sys_links.end(), _display);
+  out << "\t]" LM_NL;
+
+  out << "\tcompiler = " << compiler << LM_NL;
+  out << "\tname = " << name << LM_NL;
+  out << "\tinstall_dir = " << install_dir << LM_NL;
+  out << "}" LM_NL;
   out.flush();
 }
 #endif // DEBUG_MOD
@@ -1270,7 +1277,7 @@ auto Module::from_external(Module_t &&type, std::string &&links,
                            std::vector<fs::path> &&includes) -> Module {
   auto mod = Module();
   mod.type = type;
-  mod.linking.push_back(std::move(links));
+  mod.links.push_back(std::move(links));
   mod.sys_includes = std::move(includes);
   return mod;
 }
@@ -1521,7 +1528,8 @@ auto Module::append_predefined_macros(std::string const &compiler)
 // more info
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     : type(type), tree(8), roots(), headers(), includes(), sys_includes(),
-      linking(), interpreter(nullptr), compiler(), name(), install_dir() {
+      links(), sys_links(), interpreter(nullptr), compiler(), name(),
+      install_dir() {
   switch (auto const compiler_t = lua_getfield(state, -1, "compiler")) {
   case LUA_TTABLE:
     compiler = Module::parse_compiler_table(state);
@@ -1660,17 +1668,15 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
   lua_pop(state, 1);
 
-  // TODO: rework this, only use it for system/library includes that we
-  // (luamake) doesn't control
   switch (auto const linking_t = lua_getfield(state, -1, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
-    linking.reserve(len);
+    sys_links.reserve(len);
     auto linking_idx = -1;
     for (auto i = 1; i <= len; ++i) {
       switch (auto const value_t = lua_geti(state, linking_idx, i)) {
       case LUA_TSTRING:
-        linking.push_back(lua_tolstring(state, -1, nullptr));
+        sys_links.push_back(lua_tolstring(state, -1, nullptr));
         break;
       default:
         throw unexpected_type("linking[i]", LUA_TSTRING, value_t);
@@ -1772,13 +1778,20 @@ auto Module::format_includes() const -> std::string {
 }
 
 auto Module::format_links() const -> std::string {
-  // when we add dynamic library support, we'll have to worry about the -L
-  // flag and shit
+  fn_print();
   auto res = std::string();
-  res.reserve(256); // idk random number can def be optimized :)
-  for (auto const &path : linking) {
-    res += std::format("{} ", path.string());
-  }
+  res.reserve(512);
+  res += std::accumulate(
+      links.cbegin(), links.cend(), std::string(), [](auto &&a, auto &&next) {
+        auto const parent_path = next.parent_path();
+        return std::format("{} -Wl,-rpath={} {}", a, parent_path.string(),
+                           next.string());
+      });
+
+  res += std::accumulate(sys_links.cbegin(), sys_links.cend(), std::string(),
+                         [](auto &&a, auto &&next) {
+                           return std::format("{} -l{}", a, next.string());
+                         });
   return res;
 }
 
@@ -2024,16 +2037,9 @@ auto Builder::install_dep(lua_State *state) noexcept -> int {
     auto const type_str =
         get_required_field<std::string_view>(state, -1, "type");
 
-    // TODO: it seems we have to add something to the resulting command to get
-    // things to properly link
-    // we have to put some -Wl,-rpath=[path-to-so-dir]
-    // truthfully idk why this is, because linking against shared libs that
-    // luamake has made seemed to have worked, but now that we have an external
-    // so file to link against we need this(?) maybe it's a thing of size(?)
     if (type_str == std::string_view{"dynamic"}) {
       auto shared_obj = std::format(
           "{}/{}", where, get_required_field<std::string>(state, -2, "so"));
-      expr_dbg(shared_obj);
       auto includes = [&]() {
         auto tmp = concat_lua_array(state, -2, "includes");
         auto res = std::vector<fs::path>();
@@ -2351,19 +2357,19 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
     // TODO: we should probably just have an output name that we can use instead
     // of this
     if (mod_l.type == Module::STATIC) {
-      mod_d.linking.push_back(fs::path(mod_l.install_dir) /
-                              ("lib" + mod_l.name + ".a"));
+      mod_d.links.push_back(fs::path(mod_l.install_dir) /
+                            ("lib" + mod_l.name + ".a"));
     } else {
       if (!mod_l.tree.is_empty()) {
         // TODO: see todo around 640 about platform dependent file names
-        mod_d.linking.push_back(fs::path(mod_l.install_dir) /
-                                ("lib" + mod_l.name + ".so"));
+        mod_d.links.push_back(fs::path(mod_l.install_dir) /
+                              ("lib" + mod_l.name + ".so"));
       }
     }
     // link all the stuff that the other mod also needs
     // TODO: idk how we should check that the path is correct, because i'm
     // currently using this for system includes (-lm, -llua, -lstdc++, etc)?
-    add_unique(mod_d.linking, mod_l.linking);
+    add_unique(mod_d.links, mod_l.links);
 
     return 0;
   } catch (std::exception const &e) {
@@ -2505,7 +2511,6 @@ auto Builder::install_dep_dummy(lua_State *state) noexcept -> int {
     if (type_str == std::string_view{"dynamic"}) {
       auto shared_obj = std::format(
           "{}/{}", where, get_required_field<std::string>(state, -2, "so"));
-      expr_dbg(shared_obj);
       // TODO: have this be a vec<fs::path>
       auto includes = [&]() {
         auto tmp = concat_lua_array(state, -2, "includes");
