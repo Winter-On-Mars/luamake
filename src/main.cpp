@@ -62,31 +62,67 @@ auto constexpr find_eq(char const *str) -> ssize_t {
   return -1;
 }
 
+auto constexpr cstrlen(char const *str) noexcept -> size_t {
+  auto pos = size_t{};
+  for (;;) {
+    if (str[pos] == '\0')
+      break;
+    else
+      ++pos;
+  }
+  return pos;
+}
+
+auto constexpr matches(char const *a, std::string_view const b) noexcept
+    -> bool {
+  return (cstrlen(a) == b.length()) && strncmp(a, b.data(), b.length()) == 0;
+}
+
+auto constexpr partial_matches(char const *a, std::string_view const b) noexcept
+    -> bool {
+  return (cstrlen(a) > b.length()) && strncmp(a, b.data(), b.length()) == 0;
+}
+
 auto get_cl_args(lua_State *state, int argc, char **argv) noexcept -> void {
   auto start_lua_args = 0;
   for (; start_lua_args < argc; ++start_lua_args) {
-    if (strlen(argv[start_lua_args]) == 2 &&
-        strncmp(argv[start_lua_args], "-v", sizeof("-v")) == 0) {
+    if (matches(argv[start_lua_args], std::string_view{"-v"}) ||
+        matches(argv[start_lua_args], std::string_view{"--verbose"})) {
       luamake::builtins::cl_options.verbose = true;
-      // we could add a check for if you just pass in `-nthreads=`, giving a
-      // warning like the original, but for now this is fine
-    } else if (strlen(argv[start_lua_args]) > sizeof("-nthreads=") - 1 &&
-               strncmp(argv[start_lua_args],
-                       "-nthreads=", sizeof("-nthreads="))) {
+    } else if (partial_matches(argv[start_lua_args],
+                               std::string_view{"-nthreads="})) {
       // NOTE: (Winter-On-Mars) sizeof on the string literal includes the null
       // terminator, so we have to subtract that off
       auto const *num_start = argv[start_lua_args] + sizeof("-nthreads=") - 1;
-      auto const n_threads = std::atoi(num_start);
-      if (n_threads > 0) {
-        luamake::builtins::cl_options.num_threads = n_threads;
+      auto n_threads = size_t{};
+      auto const n_match = sscanf(num_start, "%zu", &n_threads);
+      if (n_match != 1) {
+        fwarning_message("Unable to read number of threads specified using all "
+                         "allowed minus 1." LM_NL LM_HELP "Hint" LM_NORMAL
+                         ": expected format string `-nthreads=%%zu`, got `%s`",
+                         argv[start_lua_args]);
+        luamake::builtins::cl_options.num_threads =
+            std::thread::hardware_concurrency() - 1;
       } else {
-        fwarning_message(
-            "Attempting to use %s threads." LM_NL
-            "\tIgnoring, using the max number of threads possible (minus 1)",
-            n_threads == 0 ? "zero" : "a negative amount of");
+        luamake::builtins::cl_options.num_threads =
+            n_threads > std::thread::hardware_concurrency()
+                ? std::thread::hardware_concurrency()
+                : n_threads;
       }
-    } else if (strlen(argv[start_lua_args]) == 2 &&
-               strncmp(argv[start_lua_args], "--", 2) == 0) {
+    } else if (matches(argv[start_lua_args],
+                       std::string_view{"--everything"})) {
+      luamake::builtins::cl_options.clean_everything = true;
+    } else if (matches(argv[start_lua_args],
+                       std::string_view{"--executable"})) {
+      luamake::builtins::cl_options.proj_t =
+          luamake::builtins::CLOptions::ProjectType::executable;
+    } else if (matches(argv[start_lua_args], std::string_view{"--static"})) {
+      luamake::builtins::cl_options.proj_t =
+          luamake::builtins::CLOptions::ProjectType::static_;
+    } else if (matches(argv[start_lua_args], std::string_view{"--dynamic"})) {
+      luamake::builtins::cl_options.proj_t =
+          luamake::builtins::CLOptions::ProjectType::dynamic;
+    } else if (matches(argv[start_lua_args], std::string_view{"--"})) {
       ++start_lua_args;
       break;
     }
@@ -204,13 +240,9 @@ enum class exit_t : unsigned char {
   useage_error,
 };
 
-enum class proj_t : unsigned char {
-  Executable,
-  Dynamic,
-  Static,
-};
-
-static auto new_proj(std::string_view const, proj_t const) noexcept -> exit_t;
+static auto new_proj(std::string_view const,
+                     luamake::builtins::CLOptions::ProjectType const) noexcept
+    -> exit_t;
 static auto help() noexcept -> exit_t;
 
 static auto build(lua_State *const) noexcept -> exit_t;
@@ -283,19 +315,8 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   case Command::UNKNOWN_ARG:
     return help();
   case Command::NEW: {
-    auto project_type = proj_t::Executable;
-    for (int i = 0; i < argc; ++i) {
-      if (strcmp("--static", argv[i]) == 0) {
-        project_type = proj_t::Static;
-        break;
-      } else if (strcmp("--executable", argv[i]) == 0) {
-        break;
-      } else if (strcmp("--dynamic", argv[i]) == 0) {
-        project_type = proj_t::Dynamic;
-        break;
-      }
-    }
-    return new_proj(std::string_view{argv[2]}, project_type);
+    return new_proj(std::string_view{argv[2]},
+                    luamake::builtins::cl_options.proj_t);
   }
   case Command::HELP:
     return help();
@@ -355,10 +376,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   }
 
   luamake::builtins::mods.init();
-  luamake::threads.init(
-      luamake::builtins::cl_options.num_threads != -1
-          ? static_cast<size_t>(luamake::builtins::cl_options.num_threads)
-          : std::thread::hardware_concurrency() - 1);
+  luamake::threads.init(luamake::builtins::cl_options.num_threads);
 
   auto res = exit_t::ok;
   switch (command) {
@@ -372,16 +390,7 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     res = run(state);
     break;
   case Command::CLEAN: {
-    auto rm_everything = false;
-    // TODO: update this, it also seems to be triggering the -nthreads check for
-    // some reason :?, so that's an annoying bug, but either way we should
-    // probably restructure how we handle cl args
-    for (auto i = 0; i < argc; ++i) {
-      if (strncmp(argv[i], "--everything", sizeof("--everything")) == 0) {
-        rm_everything = true;
-      }
-    }
-    res = clean(state, rm_everything);
+    res = clean(state, luamake::builtins::cl_options.clean_everything);
   } break;
   case Command::CC_JSON:
     res = compile_commands_json(state);
@@ -399,8 +408,10 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   return res;
 }
 
-static auto new_proj(std::string_view const project_name,
-                     proj_t const type) noexcept -> exit_t {
+static auto
+new_proj(std::string_view const project_name,
+         luamake::builtins::CLOptions::ProjectType const type) noexcept
+    -> exit_t {
   auto const project_root = fs::current_path() / project_name;
 
   if (fs::exists(project_root)) {
@@ -438,6 +449,7 @@ static auto new_proj(std::string_view const project_name,
                      "        compiler = b.clang({{}})," LM_NL
                      "        version = \"0.0.1\"," LM_NL
                      "        install_dir = \"build\"," LM_NL
+                     "        linking = {{ \"stdc++\" }}," LM_NL
                      "    }})" LM_NL
                      LM_NL
                      "    return b.install_exe(exe)" LM_NL
@@ -500,9 +512,10 @@ static auto new_proj(std::string_view const project_name,
       // clang-format on
   };
 
-  auto const actual_string = std::vformat(
-      lua_f_content[static_cast<std::underlying_type_t<proj_t>>(type)],
-      std::make_format_args(project_name));
+  auto const actual_string =
+      std::vformat(lua_f_content[static_cast<std::underlying_type_t<
+                       luamake::builtins::CLOptions::ProjectType>>(type)],
+                   std::make_format_args(project_name));
 
   if (luamake_lua.write(actual_string.c_str(), actual_string.size(), 1) !=
       actual_string.size()) {
@@ -587,16 +600,17 @@ static auto new_proj(std::string_view const project_name,
               }),
       };
 
-  auto &&[header_f_name, impl_f_name] =
-      file_paths[static_cast<std::underlying_type_t<proj_t>>(type)];
+  auto &&[header_f_name, impl_f_name] = file_paths[static_cast<
+      std::underlying_type_t<luamake::builtins::CLOptions::ProjectType>>(type)];
 
-  auto &&[header_string, impl_string] =
-      hpp_cpp_f_content[static_cast<std::underlying_type_t<proj_t>>(type)];
+  auto &&[header_string, impl_string] = hpp_cpp_f_content[static_cast<
+      std::underlying_type_t<luamake::builtins::CLOptions::ProjectType>>(type)];
 
   auto *header = (!header_f_name.empty())
                      ? fopen((project_root / header_f_name).c_str(), "w")
                      : nullptr;
-  if (type != proj_t::Executable && header == nullptr) {
+  if (type != luamake::builtins::CLOptions::ProjectType::executable &&
+      header == nullptr) {
     ferror_message("Unable to open file at [%s]." LM_NL
                    "\tThis could be an issue "
                    "with permissions, or out of space.",
@@ -614,7 +628,7 @@ static auto new_proj(std::string_view const project_name,
     return exit_t::internal_error;
   }
 
-  if (type != proj_t::Executable &&
+  if (type != luamake::builtins::CLOptions::ProjectType::executable &&
       fprintf(header, "%s", header_string.data()) != header_string.length()) {
     ferror_message("Unable to write full hpp file template string at [%s]",
                    (project_root / header_f_name).c_str());
@@ -743,6 +757,9 @@ static auto clean(lua_State *const state, bool const rm_everything) noexcept
   }
 
   for (auto &&mod : luamake::builtins::mods) {
+    if (mod.tree.is_empty()) {
+      continue;
+    }
     auto const cache_path = fs::path(
         std::format("{}/__luamake_cache/{}.cache", mod.install_dir, mod.name));
     (void)fs::remove(cache_path);
