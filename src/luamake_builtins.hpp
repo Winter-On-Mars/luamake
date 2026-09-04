@@ -298,7 +298,8 @@ struct Module final {
   std::vector<std::filesystem::path> headers;
   std::vector<std::filesystem::path> includes;
   std::vector<std::filesystem::path> sys_includes;
-  std::vector<std::filesystem::path> linking;
+  std::vector<std::filesystem::path> links;
+  std::vector<std::filesystem::path> sys_links;
   // NOTE: we need to seperate this into the macros that are predefined, and
   // those that are then defined in files, as an example we could have something
   // like this
@@ -324,8 +325,8 @@ struct Module final {
                             std::vector<std::filesystem::path> &&) -> Module;
 
   Module() noexcept
-      : type(), tree(), roots(), headers(), includes(), sys_includes(),
-        linking(), interpreter({}, {}), compiler(), name(), install_dir() {}
+      : type(), tree(), roots(), headers(), includes(), sys_includes(), links(),
+        sys_links(), interpreter({}, {}), compiler(), name(), install_dir() {}
 
 #ifdef DEBUG_MOD
   auto display(std::ostream &) const noexcept -> void;
