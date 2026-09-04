@@ -373,6 +373,9 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     break;
   case Command::CLEAN: {
     auto rm_everything = false;
+    // TODO: update this, it also seems to be triggering the -nthreads check for
+    // some reason :?, so that's an annoying bug, but either way we should
+    // probably restructure how we handle cl args
     for (auto i = 0; i < argc; ++i) {
       if (strncmp(argv[i], "--everything", sizeof("--everything")) == 0) {
         rm_everything = true;
