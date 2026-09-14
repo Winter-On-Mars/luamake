@@ -1,7 +1,10 @@
 #include "common.hpp"
 
+#include <cstdio>
 #include <fcntl.h>
+#include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string_view>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -19,9 +22,20 @@
 
 namespace luamake {
 #ifndef PERF_TESTING
-// shouldn't fail(?)
-static auto dev_null = open("/dev/null", O_WRONLY);
-auto os_call(std::string_view const cmd) -> int {
+OS::OS() noexcept {
+  error_log = fopen(
+      (std::filesystem::temp_directory_path() / "luamake_error.log").c_str(),
+      "w+b");
+}
+
+OS::~OS() noexcept {
+  if (error_log != nullptr) {
+    fclose(error_log);
+  }
+}
+OS os = OS();
+
+auto OS::call(std::string_view const cmd) -> int {
   auto const pid = fork();
   // should probably throw?
   if (pid < 0) {
@@ -34,8 +48,12 @@ auto os_call(std::string_view const cmd) -> int {
     // all or nothing, but it would be nice if we could parse the errors to give
     // some advice on the issues detected
     if (!builtins::cl_options.verbose) {
-      dup2(dev_null, STDERR_FILENO);
-      dup2(dev_null, STDOUT_FILENO);
+      if (!is_ready()) {
+        return -2;
+      }
+      auto error_no = fileno(error_log);
+      dup2(error_no, STDERR_FILENO);
+      dup2(error_no, STDOUT_FILENO);
     }
     if (execl("/bin/sh", "sh", "-c", cmd.data(), nullptr) == -1) {
       std::cerr << "something in execl failed\n";
@@ -44,6 +62,9 @@ auto os_call(std::string_view const cmd) -> int {
   } break;
   default: {
     (void)waitpid(pid, &child_status, 0);
+    if (child_status == -2) {
+      throw std::runtime_error("Unable to set up logging file when need");
+    }
   } break;
   }
   return child_status;

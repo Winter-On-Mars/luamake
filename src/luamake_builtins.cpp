@@ -688,7 +688,7 @@ auto install_impl(lua_State *state) -> int {
     // it's fine to do this, kind of, but also because this is executed
     // async, we might no longer be in the pcall function, so we really just
     // need to change how we store + handle errors :)
-    if (os_call(invoked_command) != 0) {
+    if (os.call(invoked_command) != 0) {
       fprintf(stderr, "Error compiling [%s]" LM_NL, invoked_command.c_str());
       builtins::mods.set_state_at(mod_idx,
                                   builtins::LakeModules::ModState::error);
@@ -716,7 +716,7 @@ auto install_impl(lua_State *state) -> int {
       } else {
         std::cout << std::format("Copying [{}] headers" LM_NL, mod.name);
       }
-      if (os_call(copy_headers) != 0) {
+      if (os.call(copy_headers) != 0) {
         fprintf(stderr, "Error moving headers [%s]" LM_NL,
                 copy_headers.c_str());
         builtins::mods.set_state_at(mod_idx,
@@ -2057,7 +2057,7 @@ auto Builder::install_dep(lua_State *state) noexcept -> int {
       luamake::threads.add_task(
           [threads, command_str = std::move(command_str)]() {
             ::luamake::threads.reserve_threads(threads);
-            os_call(command_str);
+            os.call(command_str);
             ::luamake::threads.give_back_threads(threads);
           });
       return 1;
@@ -2591,7 +2591,7 @@ auto Runner::run(lua_State *state) noexcept -> int {
     std::cout << "[" << exe_path << "]" LM_NL;
     std::cout.flush();
 
-    os_call(exe_path);
+    os.call(exe_path);
 
     return 0;
   } catch (std::exception const &e) {

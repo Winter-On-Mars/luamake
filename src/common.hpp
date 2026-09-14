@@ -2,6 +2,7 @@
 #define __LUAMAKE_COMMON_HPP
 
 #include <cstdint>
+#include <cstdio>
 #include <string_view>
 
 // TODO: add fmt as a subproject, that way we can used their color system to
@@ -105,7 +106,19 @@ using u16 = std::uint16_t;
 using u32 = std::uint32_t;
 
 namespace luamake {
-auto os_call(std::string_view const) -> int;
-}
+struct OS final {
+  auto call(std::string_view const) -> int;
+
+  OS() noexcept;
+  ~OS() noexcept;
+
+private:
+  constexpr auto is_ready() const noexcept -> bool {
+    return error_log != nullptr;
+  }
+  std::FILE *error_log = nullptr;
+};
+extern OS os;
+} // namespace luamake
 
 #endif

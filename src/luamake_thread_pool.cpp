@@ -85,7 +85,7 @@ auto CompilationPool::add_compile_tasks(
         } else {
           fprintf(stdout, "Building [%s]" LM_NL, path.c_str());
         }
-        if (os_call(invoked_command) == 0) {
+        if (os.call(invoked_command) == 0) {
           builtins::mods.add_compiled_file(idx, path.filename().string());
         } else {
           fprintf(stderr, "Error compiling [%s]" LM_NL,
