@@ -106,19 +106,9 @@ using u16 = std::uint16_t;
 using u32 = std::uint32_t;
 
 namespace luamake {
-struct OS final {
-  auto call(std::string_view const) -> int;
-
-  OS() noexcept;
-  ~OS() noexcept;
-
-private:
-  constexpr auto is_ready() const noexcept -> bool {
-    return error_log != nullptr;
-  }
-  std::FILE *error_log = nullptr;
-};
-extern OS os;
+namespace os {
+auto call(std::string_view const) noexcept -> int;
+}
 } // namespace luamake
 
 #endif
