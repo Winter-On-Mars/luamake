@@ -85,11 +85,15 @@ auto CompilationPool::add_compile_tasks(
         } else {
           fprintf(stdout, "Building [%s]" LM_NL, path.c_str());
         }
-        if (os.call(invoked_command) == 0) {
+        if (os::call(invoked_command) == 0) {
           builtins::mods.add_compiled_file(idx, path.filename().string());
         } else {
-          fprintf(stderr, "Error compiling [%s]" LM_NL,
-                  invoked_command.c_str());
+          if (builtins::cl_options.verbose) {
+            fprintf(stderr, "Error with command [%s]" LM_NL,
+                    invoked_command.c_str());
+          } else {
+            fprintf(stderr, "Error compiling [%s]" LM_NL, path.c_str());
+          }
           builtins::mods.set_state_at(idx,
                                       builtins::LakeModules::ModState::error);
         }
