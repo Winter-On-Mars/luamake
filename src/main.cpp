@@ -122,6 +122,8 @@ auto get_cl_args(lua_State *state, int argc, char **argv) noexcept -> void {
     } else if (matches(argv[start_lua_args], std::string_view{"--dynamic"})) {
       luamake::builtins::cl_options.proj_t =
           luamake::builtins::CLOptions::ProjectType::dynamic;
+    } else if (matches(argv[start_lua_args], std::string_view{"--no-cache"})) {
+      luamake::builtins::cl_options.cache = false;
     } else if (matches(argv[start_lua_args], std::string_view{"--"})) {
       ++start_lua_args;
       break;
