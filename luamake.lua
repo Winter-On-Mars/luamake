@@ -1,5 +1,6 @@
 ---@param b BuildCtx
 function Build(b)
+	-- TODO: sorry for not including lua as a part of the project, we should check the license and try to have lua as a part of the project, that way we can also include the luamake.lua file the lua project
 	local lua = b:requires("lua/luamake")
 
 	local cc = (function()
@@ -26,13 +27,13 @@ function Build(b)
 		return b.clang_bare(base)
 	end)()
 
-	local lm = b:new_exe({
+	local luamake = b:new_exe({
 		name = args["luamake.bin"] and args["luamake.bin"] or "luamake_lua",
 		root = "src/main.cpp",
 		compiler = cc,
 		install_dir = args["luamake.build"] ~= nil and args["luamake.build"] or "build",
-		linking = { "-lstdc++" },
+		linking = { "stdc++" },
 	})
-	b.link_lib(lua, lm)
-	return b.install_exe(lm)
+	b.link_lib(lua, luamake)
+	return b.install_exe(luamake)
 end
