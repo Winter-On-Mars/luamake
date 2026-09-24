@@ -78,33 +78,15 @@ auto constexpr skip_until(size_t i, std::span<T> const buf, T delim) -> size_t {
   return i;
 }
 
-// TODO: refactor this, omg who fucking wrote this shit
-enum class delims : size_t {
-  LEXEME,
-  BINARY_FAIL,
-  ALLOWED_DECIMAL,
-  ALLOWED_HEX,
-  ALLOWED_OCTAL,
-  ALLOWED_BINARY,
-  ALPHA_SANS_HEX,
-  HEX_SANS_DIGITS,
-};
-
-auto constexpr delims_list = std::array<std::string_view, 9>{{
-    std::string_view{" \t\n\r(){}[]+-*/<>=#"},  // LEXEME
-    std::string_view{"23456789abcdefABCDEF"},   // BINARY_FAIL
-    std::string_view{"0123456789"},             // ALLOWED_DECIMAL
-    std::string_view{"0123456789abcdefABCDEF"}, // ALLOWED_HEX
-    std::string_view{"01234567"},               // ALLOWED_OCTAL
-    std::string_view{"01"},                     // ALLOWED_BINARY
-    std::string_view{
-        "ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ"}, // ALPHA_SANS_HEX
-    std::string_view{"abcdefABCDEF"}                 // HEX_SANS_DIGITS
-}};
-
-auto constexpr delims_at(delims &&del) -> std::string_view {
-  return delims_list[static_cast<std::underlying_type_t<delims>>(del)];
-}
+struct Delimiters final {
+  static auto constexpr lexeme = std::string_view{" \t\n\r(){}[]+-*/<>=#"};
+  static auto constexpr allowed_dec = std::string_view{"0123456789"};
+  static auto constexpr allowed_hex =
+      std::string_view{"0123456789abcdefABCDEF"};
+  static auto constexpr allocwed_octal = std::string_view{"01234567"};
+  static auto constexpr allowed_bin = std::string_view{"01"};
+  static auto constexpr ws = std::string_view{" \t\n\r"};
+} delims;
 
 auto is_defined(std::string_view const str, pp::MacroMap const &macros,
                 pp::StringSet const &defs) noexcept -> bool {
@@ -141,7 +123,6 @@ enum class ir_t : u8 {
   // tokens needed during parsing
   SPACE,
   LANGLE,
-  RANGLE,
   QUOTE,
   LPAREN,
   RPAREN,
@@ -617,6 +598,14 @@ struct LocalIncludeNode final : AstNode {
   fs::path path;
 };
 
+struct MacroIncludeNode final : AstNode {
+  MacroIncludeNode(std::string const &str) noexcept : path(str) {}
+  ~MacroIncludeNode() final = default;
+  auto accept(AstVisitor &) -> void final;
+
+  fs::path path;
+};
+
 // TODO: there is a bug where an extraneous MACRO tkn is being pushed back,
 // causing this #define node to be treated like it has a value, as opposed to
 // just being a #define MACRO
@@ -897,6 +886,7 @@ struct AstVisitor {
   virtual auto visit_else(ElseNode &) -> void = 0;
   virtual auto visit_global_include(GlobalIncludeNode &) -> void = 0;
   virtual auto visit_local_include(LocalIncludeNode &) -> void = 0;
+  virtual auto visit_macro_include(MacroIncludeNode &) -> void = 0;
   virtual auto visit_define(DefineNode &) -> void = 0;
   virtual auto visit_define_func(DefineFuncNode &) -> void = 0;
   virtual auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void = 0;
@@ -925,6 +915,9 @@ auto GlobalIncludeNode::accept(AstVisitor &visitor) -> void {
 }
 auto LocalIncludeNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_local_include(*this);
+}
+auto MacroIncludeNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_macro_include(*this);
 }
 auto DefineNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_define(*this);
@@ -972,6 +965,7 @@ struct AstPrinter final : AstVisitor {
   auto visit_else(ElseNode &) -> void final;
   auto visit_global_include(GlobalIncludeNode &) -> void final;
   auto visit_local_include(LocalIncludeNode &) -> void final;
+  auto visit_macro_include(MacroIncludeNode &) -> void final;
   auto visit_define(DefineNode &) -> void final;
   auto visit_define_func(DefineFuncNode &) -> void final;
   auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void final;
@@ -1010,6 +1004,7 @@ struct AstIncluder final : AstVisitor {
   auto visit_else(ElseNode &) -> void final;
   auto visit_global_include(GlobalIncludeNode &) -> void final;
   auto visit_local_include(LocalIncludeNode &) -> void final;
+  auto visit_macro_include(MacroIncludeNode &) -> void final;
   auto visit_define(DefineNode &) -> void final;
   auto visit_define_func(DefineFuncNode &) -> void final;
   auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void final;
@@ -1046,8 +1041,6 @@ auto constexpr to_string(ir_t t) -> std::string_view {
     return std::string_view("INCLUDE");
   case ir_t::LANGLE:
     return std::string_view("LANGLE");
-  case ir_t::RANGLE:
-    return std::string_view("RANGLE");
   case ir_t::QUOTE:
     return std::string_view("QUOTE");
   case ir_t::LPAREN:
@@ -1066,7 +1059,7 @@ auto constexpr to_string(ir_t t) -> std::string_view {
   unreachable();
 }
 
-auto Lexer::lex(std::string_view const file) -> Lexer {
+auto Lexer::lex(std::string_view const buffer) -> Lexer {
   // clang-format off
   static auto const keywords = std::unordered_map<std::string_view, ir_t>{{
     {std::string_view{"#if"}, ir_t::IF},
@@ -1089,9 +1082,9 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
 
   // this can be removed idk i'm just leaving it here rn because i don't want to
   // do a big refactor of this system rn
-  auto const fcontent = file;
+  auto const fcontent = buffer;
   auto const start = fcontent.begin();
-  for (auto i = size_t{}; i < file.size();) {
+  for (auto i = size_t{}; i < buffer.size();) {
     switch (fcontent[i]) {
     case '#': {
       auto end = luamake::skip_until(std::string_view(" \t\r\n"), fcontent, i);
@@ -1108,36 +1101,46 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
 
       switch (keyword->second) {
       case ir_t::INCLUDE: {
-        if (i >= file.size())
+        if (i >= buffer.size())
           throw std::runtime_error("Unable to parse include parameter");
         i = skip_ws(fcontent, i);
-        if (i >= file.size())
+        if (i >= buffer.size())
           throw std::runtime_error("Unable to parse include parameter");
         lex.types.push_back(ir_t::INCLUDE);
         switch (fcontent[i]) {
         case '<': {
           lex.types.push_back(ir_t::LANGLE);
           end = luamake::skip_until('>', fcontent, i + 1);
-          if (end >= file.size())
+          if (end >= buffer.size())
             throw std::runtime_error("Non terminated global include");
           lex.types.push_back(ir_t::LIT_STRING);
           lex.lexemes.push_back(std::string(start + i + 1, start + end));
           i = end + 1;
-          lex.types.push_back(ir_t::RANGLE);
         } break;
         case '"': {
           lex.types.push_back(ir_t::QUOTE);
           end = luamake::skip_until('"', fcontent, i + 1);
-          if (end >= file.size())
+          if (end >= buffer.size())
             throw std::runtime_error("Non terminated local include");
           lex.types.push_back(ir_t::LIT_STRING);
           lex.lexemes.push_back(std::string(start + i + 1, start + end));
           i = end + 1;
-          lex.types.push_back(ir_t::QUOTE);
         } break;
-        default:
-          throw std::runtime_error(
-              std::format("character found = {}", fcontent[i]));
+        default: {
+          // NOTE: according to
+          // `https://stackoverflow.com/questions/39038867/string-concatenation-for-include-path`,
+          // you can just have anything at the end of this we'll have to deal
+          // with this later idk why this is something you can do, it seems like
+          // a really annoying patch included because people don't want build
+          // systems but fucking fine we'll just have to deal with it
+          end = luamake::skip_until(delims.ws, fcontent, i + 1);
+          if (end >= buffer.size()) {
+            // TODO: idk get line numbers for better error reporting or whatever
+            throw std::runtime_error("Non terminated #include statement");
+          }
+          lex.types.push_back(ir_t::MACRO);
+          lex.lexemes.push_back(std::string(start + i, start + end));
+        }
         }
       } break;
       case ir_t::IFDEF: {
@@ -1232,7 +1235,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       }
     } break;
     case '/': {
-      if (!(i + 1 < file.size())) {
+      if (!(i + 1 < buffer.size())) {
         throw std::runtime_error("'/' found at end of file");
       }
       ++i;
@@ -1242,7 +1245,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
       } break;
       case '*': { // skip until */
         i = skip_until_close_multicomment(fcontent, i + 2) + 1;
-        if (i >= file.size())
+        if (i >= buffer.size())
           throw std::runtime_error("Unterminated multi-line comment");
       } break;
       default: // probably just an op /
@@ -1258,7 +1261,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         // +1 b/c fcontent[i] == '"' | '\'', and if not then we'll be out of
         // bounds so it doesn't matter
         i = luamake::skip_until(ch, fcontent, i + 1);
-        if (!(i < file.size())) {
+        if (!(i < buffer.size())) {
           throw std::runtime_error("Non terminated char");
         }
         // the case when you have '\\'
@@ -1902,17 +1905,25 @@ auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
   ++cur_t;
   switch (types[cur_t]) {
   case ir_t::LANGLE: {
-    cur_t += 3;
+    cur_t += 2;
     return std::make_unique<GlobalIncludeNode>(lexemes[cur_lex++]);
   } break;
   case ir_t::QUOTE: {
-    cur_t += 3;
+    cur_t += 2;
     return std::make_unique<LocalIncludeNode>(lexemes[cur_lex++]);
   } break;
+  case ir_t::MACRO: {
+#ifdef DEBUG_CPP
+    // display(std::cout);
+#endif // DEBUG_CPP
+    ++cur_t;
+    return std::make_unique<MacroIncludeNode>(lexemes[cur_lex++]);
+  } break;
   default: {
-    throw std::runtime_error(std::format("Malformed #include statement, "
-                                         "expected '<' or '\"', found [{}]",
-                                         to_string(types[cur_t])));
+    throw std::runtime_error(
+        std::format("Malformed #include statement, "
+                    "expected '<', '\"', or MACRO, found [{}]",
+                    to_string(types[cur_t])));
   }
   }
 }
@@ -2825,7 +2836,7 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
         tkns.push_back(expr_t::DEFINED);
       } else {
         auto const start = i;
-        i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
+        i = luamake::skip_until(delims.lexeme, str, i);
         tkns.push_back(expr_t::MACRO);
         macros.push_back(std::string(str.data() + start, str.data() + i));
       }
@@ -2844,7 +2855,7 @@ auto Expressions::lex(std::string_view const str) -> ExprLexer {
         // property XID_Start
         // [[https://en.cppreference.com/cpp/language/identifiers]]
         auto const start = i;
-        i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
+        i = luamake::skip_until(delims.lexeme, str, i);
         tkns.push_back(expr_t::MACRO);
         macros.push_back(std::string(str.data() + start, str.data() + i));
       } else {
@@ -2865,7 +2876,7 @@ auto Expressions::lex_integer(std::string_view const str, size_t &i,
   auto constexpr integer_suffix = std::string_view{"ulzULZ"};
   if (str[i] != '0') {
     auto const start = i;
-    i = luamake::skip_while(delims_at(delims::ALLOWED_DECIMAL), str, i);
+    i = luamake::skip_while(delims.allowed_dec, str, i);
     tkns.push_back(expr_t::LIT_DEC);
     macros.push_back(std::string(str.data() + start, str.data() + i));
     // NOTE: we technically need to worry about the order of things, for
@@ -2929,13 +2940,13 @@ auto Expressions::lex_integer(std::string_view const str, size_t &i,
   auto constexpr is_allowed_char = [](int_type int_t, char ch) -> bool {
     switch (int_t) {
     case int_type::DECIMAL:
-      return is_any_of(delims_at(delims::ALLOWED_DECIMAL), ch);
+      return is_any_of(delims.allowed_dec, ch);
     case int_type::BINARY:
-      return is_any_of(delims_at(delims::ALLOWED_BINARY), ch);
+      return is_any_of(delims.allowed_bin, ch);
     case int_type::HEX:
-      return is_any_of(delims_at(delims::ALLOWED_HEX), ch);
+      return is_any_of(delims.allowed_hex, ch);
     case int_type::OCTAL:
-      return is_any_of(delims_at(delims::ALLOWED_OCTAL), ch);
+      return is_any_of(delims.allocwed_octal, ch);
     }
     unreachable();
   };
@@ -2996,7 +3007,15 @@ auto Expressions::eval(std::string_view const expr, allocator::Page &alloc,
                           .ast(page);
                           */
     auto const expr_lex = Expressions::lex(expr);
+#ifdef DEBUG_CPP
+    expr_dbg("expr_lex");
+    expr_lex.display(std::cout).flush();
+#endif
     auto const expansion = Expressions::expand(expr_lex, macros, defs);
+#ifdef DEBUG_CPP
+    expr_dbg("expansion");
+    expansion.display(std::cout).flush();
+#endif
     if (expansion.tkns.size() == 0) {
       // TODO: remove the catch ..., so that this can get through
       throw std::runtime_error(
@@ -3230,6 +3249,8 @@ auto Expressions::expand(Expressions::ExprLexer const &lexer,
         ++tkn_i; // LPAREN
         ++tkn_i; // MACRO
         ++tkn_i; // RPAREN
+      } else {
+        ++tkn_i; // MACRO
       }
       auto const mac = lexer.macros[macro_i];
       ++macro_i;
@@ -3358,6 +3379,12 @@ auto AstPrinter::visit_local_include(LocalIncludeNode &local) -> void {
   out << get_indents() << "(include local (" << local.path << "))" LM_NL;
 }
 
+auto AstPrinter::visit_macro_include(MacroIncludeNode &bitch_ass_stupid_case)
+    -> void {
+  out << get_indents() << "(include MACRO (" << bitch_ass_stupid_case.path
+      << "))" LM_NL;
+}
+
 auto AstPrinter::visit_define(DefineNode &d) -> void {
   out << get_indents() << "(define (" << d.name;
   if (d.lexeme) {
@@ -3473,6 +3500,10 @@ auto AstIncluder::visit_global_include(GlobalIncludeNode &global) -> void {
 
 auto AstIncluder::visit_local_include(LocalIncludeNode &local) -> void {
   paths.push_back(local.path);
+}
+
+auto AstIncluder::visit_macro_include(MacroIncludeNode &local) -> void {
+  throw std::runtime_error("Fuck you not doing that");
 }
 
 auto AstIncluder::visit_define(DefineNode &d) -> void {
@@ -4360,9 +4391,9 @@ auto get_includes(std::string_view const file, allocator::Page &alloc,
 } // namespace B
 } // namespace
 
-auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
-    -> std::vector<fs::path> {
-  auto ast = Lexer::lex(file).ast();
+auto Interpreter::interpret(std::string_view const buffer,
+                            allocator::Page &alloc) -> std::vector<fs::path> {
+  auto ast = Lexer::lex(buffer).ast();
   auto vec = std::vector<fs::path>();
 #ifdef DEBUG_CPP
   auto ast_p = AstPrinter(std::cout);
@@ -4372,6 +4403,7 @@ auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
   includer.get_includes(ast);
   alloc.reset();
 #ifdef DEBUG_CPP
+  /*
   // technically not A, but this is just for some idea of ab testing
   std::cout << "files from the A\n";
   for (auto &&f : vec) {
@@ -4381,8 +4413,7 @@ auto Interpreter::interpret(std::string_view const file, allocator::Page &alloc)
 
   auto macros_b = pp::MacroMap();
   auto defs_b = pp::StringSet();
-  /*
-  auto const test = B::get_includes(file, alloc, macros_b, defs_b);
+  auto const test = B::get_includes(buffer, alloc, macros_b, defs_b);
   std::cout << "files from the B\n";
   for (auto &&f : test) {
     std::cout << f << '\n';
