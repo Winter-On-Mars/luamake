@@ -7,6 +7,7 @@
 #include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
 #include "luamake_thread_pool.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <concepts>
@@ -547,7 +548,6 @@ auto install_impl(lua_State *state) -> int {
   // every time in case somebody changes the install_dir variable
   auto const install_dir =
       parent_path / fs::path(std::format("{}/{}.o", mod.install_dir, mod.name));
-  std::cout << std::format("making directory [{}]" LM_NL, install_dir.string());
   auto ec = std::error_code{};
   if (fs::create_directories(install_dir, ec); ec) {
     // TODO: update to push the ec message
@@ -558,7 +558,6 @@ auto install_impl(lua_State *state) -> int {
   }
   auto const cache_dir =
       fs::path(std::format("{}/__luamake_cache", mod.install_dir));
-  std::cout << std::format("making directory [{}]" LM_NL, cache_dir.string());
   if (fs::create_directories(cache_dir, ec); ec) {
     std::cerr << ec.message() << LM_NL;
     lua_pushstring(state, "Unable to create directory");
@@ -754,7 +753,7 @@ auto install_dummy_impl(lua_State *state) -> int {
         static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
             mod.type)));
   }
-  (void)mod.tree.gen_dep_tree(mod, *mod.interpreter, mod_idx);
+  mod.tree.gen_dep_tree(mod, *mod.interpreter, mod_idx);
   return 1;
 }
 
@@ -897,7 +896,8 @@ auto Module::DepTree::append_path(fs::path const &path) -> StringViews {
   }
 #ifdef DEBUG_MOD
   std::cout << std::format(
-      "File not found yet, so returning str = ({}, {})" LM_NL, start, end);
+      "File `{}` not found yet, so returning str = ({}, {})" LM_NL,
+      path.string(), start, end);
 #endif // DEBUG_MOD
   return StringViews{static_cast<unsigned int>(start),
                      static_cast<unsigned int>(end)};
@@ -946,7 +946,7 @@ auto Module::DepTree::append_dep(Module const &mod,
   auto const ftype = DepTree::determine_file_type(dep.extension());
   if (ftype == DepTree::SourceFile_t::HEADER) {
     auto constexpr potential_extensions =
-        std::array<std::string_view, 2>{{".cpp", ".c"}};
+        std::array<std::string_view, 4>{{".cpp", ".c", ".cc", ".cxx"}};
     auto const potential_impl = (dep.parent_path() / dep.stem()).string();
     for (auto const &potential_extension : potential_extensions) {
       auto const possible_path =
@@ -956,7 +956,7 @@ auto Module::DepTree::append_dep(Module const &mod,
                    this_idx);
       }
     }
-    // HOL
+    // HOL (?)
   }
 
   types[this_idx] = ftype;
@@ -964,52 +964,59 @@ auto Module::DepTree::append_dep(Module const &mod,
 
   // HACK: didn't want to rewrite all of the interpreter code to work with
   // explicitly utf8 strings
-  auto const files_deps = interpreter.interpret(
-      std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize),
-      mods.get_allocator());
+  try {
+    auto const files_deps = interpreter.interpret(
+        std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize),
+        mods.get_allocator());
 
 #ifdef DEBUG_MOD
-  std::cout << std::format("Possible includes for {}: {{" LM_NL, dep.string());
-  for (auto &&include : files_deps) {
-    std::cout << std::format("\t{}" LM_NL, include.string());
-  }
-  std::cout << "}" LM_NL;
-  std::cout.flush();
+    std::cout << std::format("Possible includes for {}: {{" LM_NL,
+                             dep.string());
+    for (auto &&include : files_deps) {
+      std::cout << std::format("\t{}" LM_NL, include.string());
+    }
+    std::cout << "}" LM_NL;
+    std::cout.flush();
 
-  mods.dump_paths(std::cout);
+    mods.dump_paths(std::cout);
 #endif // DEBUG_MOD
 
-  auto ec = std::error_code{};
-  for (auto &&file : files_deps) {
-    for (auto &&include : mod.includes) {
-      auto const include_rel_path =
-          fs::relative(include / file, parent_path, ec);
-      if (ec) {
-        // idk maybe block these behind a verbose check(?)
-        std::cerr << std::format("\t{}" LM_NL, ec.message());
-        ec.clear();
-        continue;
-      }
+    auto ec = std::error_code{};
+    for (auto &&file : files_deps) {
+      for (auto &&include : mod.includes) {
+        auto const include_rel_path =
+            fs::relative(include / file, parent_path, ec);
+        if (ec) {
+          // idk maybe block these behind a verbose check(?)
+          std::cerr << std::format("\t{}" LM_NL, ec.message());
+          ec.clear();
+          continue;
+        }
 
-      if (!fs::exists(include_rel_path, ec)) {
-        // we should probably report an error, the issue is that we have to also
-        // worry about if it's in the deps, if so then we have to worry about
-        // false positives, so for now we'll just ignore things
-        continue;
-      }
+        if (!fs::exists(include_rel_path, ec)) {
+          // we should probably report an error, the issue is that we have to
+          // also worry about if it's in the deps, if so then we have to worry
+          // about false positives, so for now we'll just ignore things
+          continue;
+        }
 
-      if (ec) {
-        std::cerr << std::format("\t{}" LM_NL, ec.message());
-        ec.clear();
-        continue;
-      }
+        if (ec) {
+          std::cerr << std::format("\t{}" LM_NL, ec.message());
+          ec.clear();
+          continue;
+        }
 
-      append_dep(mod, interpreter, mod_idx, parent_path, include_rel_path,
-                 this_idx);
+        append_dep(mod, interpreter, mod_idx, parent_path, include_rel_path,
+                   this_idx);
+      }
     }
-  }
 
-  hashes[this_idx] = hash_fut.get();
+    hashes[this_idx] = hash_fut.get();
+  } catch (std::runtime_error &e) {
+    e = std::runtime_error(
+        std::format("file `{}`: {}", dep.string(), e.what()));
+    throw e;
+  }
 }
 
 auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
@@ -1099,16 +1106,18 @@ auto Module::DepTree::reserve(size_t min) noexcept(false) -> void {
 
 #ifdef DEBUG_MOD
 auto Module::DepTree::display(std::ostream &out,
-                              unsigned int const depth) const noexcept -> void {
+                              unsigned int const depth) const noexcept
+    -> std::ostream & {
   out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
       << "]" LM_NL;
   out.flush();
   out << std::hex;
   display_impl(out, depth, 0);
   out << std::dec;
+  return out;
 }
 
-auto Module::DepTree::dump(std::ostream &out) const noexcept -> void {
+auto Module::DepTree::dump(std::ostream &out) const noexcept -> std::ostream & {
   out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
       << "]" LM_NL;
   out << std::format("num_files = [{}]" LM_NL, num_files);
@@ -1132,6 +1141,7 @@ auto Module::DepTree::dump(std::ostream &out) const noexcept -> void {
     out << std::format("hashes[{}] = [{}]" LM_NL, i, hashes[i]);
   }
   out << std::dec;
+  return out;
 }
 
 auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
@@ -1221,8 +1231,8 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
 }
 
 #ifdef DEBUG_MOD
-auto Module::display(std::ostream &out) const noexcept -> void {
-  auto _display = [&](auto x) { out << "\t\t" << x << ", "; };
+auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
+  auto _display = [&](auto x) { out << "\t\t" << x << "," LM_NL; };
 
   out << "mod = {" LM_NL;
 
@@ -1269,7 +1279,7 @@ auto Module::display(std::ostream &out) const noexcept -> void {
   out << "\tname = " << name << LM_NL;
   out << "\tinstall_dir = " << install_dir << LM_NL;
   out << "}" LM_NL;
-  out.flush();
+  return out;
 }
 #endif // DEBUG_MOD
 
@@ -1759,6 +1769,8 @@ auto Module::DepTree::gen_dep_tree(Module const &mod,
                                    pp::Interpreter &interpreter,
                                    ModIndex const idx) -> void {
   auto const parent = mods.get_module_path(idx).parent_path();
+  // NOTE: (Winter-On-Mars) because we are only pushing back the roots, if there
+  // is an issue with one of the header files, we don't see it(?)
   for (auto const &root : mod.roots) {
     append_dep(mod, interpreter, idx, parent, root, DepTree::NIL_IDX);
   }
@@ -2348,7 +2360,7 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
 
     if (!mod_l.tree.is_empty()) {
       mod_d.includes.push_back(mods.get_module_path(lib_l) / mod_l.install_dir);
-      add_unique(mod_d.includes, mod_l.includes);
+      add_unique(mod_d.sys_links, mod_l.sys_links);
     } else {
       // we shouldn't need to add_unique, because they should always be unique,
       // but this is fine

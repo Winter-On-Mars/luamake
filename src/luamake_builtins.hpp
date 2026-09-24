@@ -207,9 +207,9 @@ struct Module final {
 #ifdef DEBUG_MOD
     // displays the function in a pseudo json format
     auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
-        -> void;
+        -> std::ostream &;
 
-    auto dump(std::ostream &out) const noexcept -> void;
+    auto dump(std::ostream &out) const noexcept -> std::ostream &;
 #endif // DEBUG_MOD
 
     [[nodiscard]]
@@ -330,7 +330,7 @@ struct Module final {
         sys_links(), interpreter({}, {}), compiler(), name(), install_dir() {}
 
 #ifdef DEBUG_MOD
-  auto display(std::ostream &) const noexcept -> void;
+  auto display(std::ostream &) const noexcept -> std::ostream &;
 #endif // DEBUG_MOD
 
   // @throws std::runtime_error
