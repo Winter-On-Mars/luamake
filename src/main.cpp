@@ -124,6 +124,20 @@ auto get_cl_args(lua_State *state, int argc, char **argv) noexcept -> void {
           luamake::builtins::CLOptions::ProjectType::dynamic;
     } else if (matches(argv[start_lua_args], std::string_view{"--no-cache"})) {
       luamake::builtins::cl_options.cache = false;
+    } else if (matches(argv[start_lua_args], std::string_view{"--debug"})) {
+      luamake::builtins::cl_options.built_t =
+          luamake::builtins::CLOptions::BuildType::dbg;
+    } else if (matches(argv[start_lua_args], std::string_view{"--release"})) {
+      luamake::builtins::cl_options.built_t =
+          luamake::builtins::CLOptions::BuildType::rel;
+    } else if (matches(argv[start_lua_args],
+                       std::string_view{"--debug-release"})) {
+      luamake::builtins::cl_options.built_t =
+          luamake::builtins::CLOptions::BuildType::dbg_w_rel;
+    } else if (matches(argv[start_lua_args],
+                       std::string_view{"--release-min"})) {
+      luamake::builtins::cl_options.built_t =
+          luamake::builtins::CLOptions::BuildType::min_rel;
     } else if (matches(argv[start_lua_args], std::string_view{"--"})) {
       ++start_lua_args;
       break;
