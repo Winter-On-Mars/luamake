@@ -16,6 +16,10 @@
 #include <sys/stat.h>
 #endif
 
+#ifdef DEBUG
+#include <format>
+#endif // DEBUG
+
 namespace luamake {
 // TODO: add a macro to test if on unix system, and use unix os functions like
 // open, read, write, etc..., also update this to not be as bad :)
@@ -78,8 +82,8 @@ struct File final {
                            ? max_length_perms[1] != 0 ? 2 : 1
                            : 0] = 'c';
     }
-    std::cerr << "Opening [" << path << "] with options [" << max_length_perms
-              << "]" NL;
+    std::cerr << std::format("Opening [{}] with options [{}]" LM_NL,
+                             path.string(), max_length_perms);
 #else
     std::cerr << "Opening [" << path << "] with options [" << max_length_perms
               << "]" NL;
@@ -150,7 +154,7 @@ struct File final {
 
     auto const res = ::fstat(fd, &file_stats);
     if (res == -1) {
-      std::cerr << "Error reading stats of file" NL;
+      std::cerr << "Error reading stats of file" LM_NL;
       std::terminate();
     }
     auto const fsize = static_cast<size_t>(file_stats.st_size);

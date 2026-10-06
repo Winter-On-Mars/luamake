@@ -2,6 +2,7 @@
 #include "luamake_allocator.hpp"
 #include "luamake_builtins.hpp"
 #include "luamake_file.hpp"
+#include "luamake_git.hpp"
 #include "luamake_thread_pool.hpp"
 
 #include <array>
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <format>
 #include <numeric>
+#include <string>
 #include <string_view>
 #include <sys/types.h>
 #include <thread>
@@ -23,12 +25,16 @@
 #endif
 
 extern "C" {
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
+#include "lua/lauxlib.h"
+#include "lua/lua.h"
+#include "lua/lualib.h"
 }
 
 namespace fs = std::filesystem;
+
+#ifndef LM_LUA_ALLOC_SIZE
+#define LM_LUA_ALLOC_SIZE 2 << 12
+#endif
 
 namespace {
 enum class Value_t { NUMBER, STRING, BOOL_TRUE, BOOL_FALSE, NIL };
@@ -56,28 +62,96 @@ auto constexpr find_eq(char const *str) -> ssize_t {
   return -1;
 }
 
-// TODO: (Winter-On-Mars) try moving the args table to be a userdata with
-// indexing operator overloaded, then just use our own hashmap/unordered_map
-// under the hood(?), it might not be faster but worth a try
-auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
-  lua_createtable(state, 0, 0);
+auto constexpr cstrlen(char const *str) noexcept -> size_t {
+  auto pos = size_t{};
+  for (;;) {
+    if (str[pos] == '\0')
+      break;
+    else
+      ++pos;
+  }
+  return pos;
+}
+
+auto constexpr matches(char const *a, std::string_view const b) noexcept
+    -> bool {
+  return (cstrlen(a) == b.length()) && strncmp(a, b.data(), b.length()) == 0;
+}
+
+auto constexpr partial_matches(char const *a, std::string_view const b) noexcept
+    -> bool {
+  return (cstrlen(a) > b.length()) && strncmp(a, b.data(), b.length()) == 0;
+}
+
+auto get_cl_args(lua_State *state, int argc, char **argv) noexcept -> void {
   auto start_lua_args = 0;
   for (; start_lua_args < argc; ++start_lua_args) {
-    if (argv[start_lua_args][0] == '-' && strlen(argv[start_lua_args]) == 2 &&
-        argv[start_lua_args][1] == '-') {
+    if (matches(argv[start_lua_args], std::string_view{"-v"}) ||
+        matches(argv[start_lua_args], std::string_view{"--verbose"})) {
+      luamake::builtins::cl_options.verbose = true;
+    } else if (partial_matches(argv[start_lua_args],
+                               std::string_view{"-nthreads="})) {
+      // NOTE: (Winter-On-Mars) sizeof on the string literal includes the null
+      // terminator, so we have to subtract that off
+      auto const *num_start = argv[start_lua_args] + sizeof("-nthreads=") - 1;
+      auto n_threads = size_t{};
+      auto const n_match = sscanf(num_start, "%zu", &n_threads);
+      if (n_match != 1) {
+        fwarning_message("Unable to read number of threads specified using all "
+                         "allowed minus 1." LM_NL LM_HELP "Hint" LM_NORMAL
+                         ": expected format string `-nthreads=%%zu`, got `%s`",
+                         argv[start_lua_args]);
+        luamake::builtins::cl_options.num_threads =
+            std::thread::hardware_concurrency() - 1;
+      } else {
+        luamake::builtins::cl_options.num_threads =
+            n_threads > std::thread::hardware_concurrency()
+                ? std::thread::hardware_concurrency()
+                : n_threads;
+      }
+    } else if (matches(argv[start_lua_args],
+                       std::string_view{"--everything"})) {
+      luamake::builtins::cl_options.clean_everything = true;
+    } else if (matches(argv[start_lua_args],
+                       std::string_view{"--executable"})) {
+      luamake::builtins::cl_options.proj_t =
+          luamake::builtins::CLOptions::ProjectType::executable;
+    } else if (matches(argv[start_lua_args], std::string_view{"--static"})) {
+      luamake::builtins::cl_options.proj_t =
+          luamake::builtins::CLOptions::ProjectType::static_;
+    } else if (matches(argv[start_lua_args], std::string_view{"--dynamic"})) {
+      luamake::builtins::cl_options.proj_t =
+          luamake::builtins::CLOptions::ProjectType::dynamic;
+    } else if (matches(argv[start_lua_args], std::string_view{"--no-cache"})) {
+      luamake::builtins::cl_options.cache = false;
+    } else if (matches(argv[start_lua_args], std::string_view{"--debug"})) {
+      luamake::builtins::cl_options.built_t =
+          luamake::builtins::CLOptions::BuildType::dbg;
+    } else if (matches(argv[start_lua_args], std::string_view{"--release"})) {
+      luamake::builtins::cl_options.built_t =
+          luamake::builtins::CLOptions::BuildType::rel;
+    } else if (matches(argv[start_lua_args],
+                       std::string_view{"--debug-release"})) {
+      luamake::builtins::cl_options.built_t =
+          luamake::builtins::CLOptions::BuildType::dbg_w_rel;
+    } else if (matches(argv[start_lua_args],
+                       std::string_view{"--release-min"})) {
+      luamake::builtins::cl_options.built_t =
+          luamake::builtins::CLOptions::BuildType::min_rel;
+    } else if (matches(argv[start_lua_args], std::string_view{"--"})) {
       ++start_lua_args;
       break;
     }
   }
 
+  lua_createtable(state, 0, argc - start_lua_args);
   for (; start_lua_args < argc; ++start_lua_args) {
     auto arg = argv[start_lua_args];
-    // auto arg = argv[start_lua_args];
     auto const eq_pos = find_eq(argv[start_lua_args]);
     if (eq_pos == ssize_t{-1}) {
       fwarning_message("Arguments passed to the args table should be of the "
                        "form <arg_name>=<arg_value>, here arg_value is a lua "
-                       "literal value (no spaces between the '=')." NL
+                       "literal value (no spaces between the '=')." LM_NL
                        "\tIgnoring arg_name = %s",
                        arg);
       continue;
@@ -85,8 +159,7 @@ auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
     // NOTE: (Winter-On-Mars) we have to do this bc lua_setfield internally
     // calls strlen, looking for a '\0'
     arg[eq_pos] = '\0';
-    auto const arg_name = arg; // don't really need this, but conceptually bc we
-                               // added a \0 it's nice to have
+    auto const arg_name = arg;
     auto const value_str = arg + eq_pos + 1;
     switch (determine_type(value_str)) {
     case Value_t::NUMBER: {
@@ -116,6 +189,7 @@ auto create_args(lua_State *state, int argc, char **argv) noexcept -> void {
   lua_setglobal(state, "args");
 }
 
+// <lua vm stuff>
 struct LuaError final {
   std::string message;
 };
@@ -142,6 +216,38 @@ auto std_panic(lua_State *L) -> int {
   return 0; /* return to Lua to abort */
 }
 
+// TODO: (Winter-On-Mars) SECURITY concerns, review each module and see if there
+// are any that we **need** to get rid of, and if so, if there are some features
+// that can be useful that we should provide though our own mock std lib
+auto constexpr supported_libs = std::array<luaL_Reg, 9>{
+    luaL_Reg{LUA_GNAME, luaopen_base},
+    luaL_Reg{LUA_LOADLIBNAME, luaopen_package},
+    luaL_Reg{LUA_COLIBNAME,
+             luaopen_coroutine}, // this might cause some issues, because we
+                                 // haven't really thought about what will
+                                 // happen when coroutines are running, but for
+                                 // now i'll leave it in
+    luaL_Reg{LUA_TABLIBNAME, luaopen_table},
+    luaL_Reg{LUA_IOLIBNAME, luaopen_io}, // should probably remove(?)
+    // big security issue, though we should probably expose some of these, like
+    // os.clock
+    // {LUA_OSLIBNAME, luaopen_os},
+    luaL_Reg{LUA_STRLIBNAME, luaopen_string},
+    luaL_Reg{LUA_MATHLIBNAME, luaopen_math},
+    luaL_Reg{LUA_UTF8LIBNAME, luaopen_utf8},
+    //  {LUA_DBLIBNAME, luaopen_debug},
+    luaL_Reg{"git", &luamake::builtins::luaopen_git},
+    // luaL_Reg{NULL, NULL}
+};
+// see linit.c 57
+auto open_libs(lua_State *state) -> void {
+  for (auto &&[name, func] : supported_libs) {
+    luaL_requiref(state, name, func, 1);
+    lua_pop(state, 1); // remove lib
+  }
+}
+// </lua vm stuff>
+
 enum class exit_t : unsigned char {
   ok,
   internal_error,
@@ -150,13 +256,10 @@ enum class exit_t : unsigned char {
   useage_error,
 };
 
-enum class proj_t : unsigned char {
-  Executable,
-  Dynamic,
-  Static,
-};
-
-static auto new_proj(std::string_view const, proj_t const) noexcept -> exit_t;
+static auto new_proj(std::string_view const,
+                     luamake::builtins::CLOptions::ProjectType const) noexcept
+    -> exit_t;
+static auto lua_ls(std::filesystem::path &&) noexcept -> exit_t;
 static auto help() noexcept -> exit_t;
 
 static auto build(lua_State *const) noexcept -> exit_t;
@@ -165,13 +268,6 @@ static auto compile_commands_json(lua_State *const) noexcept -> exit_t;
 static auto run(lua_State *const) noexcept -> exit_t;
 static auto test(lua_State *const) noexcept -> exit_t;
 
-// TODO: add a command option for package management, we will probably need to
-// depend on libcurl (and openssl) to do the networking to grab https urls,
-// but that would be nice.
-//  we can add things like --local as a cl arg to have it in the root project
-//  (adding it to a .gitignore or whatever), or just (probably by default)
-//  have it install in the $HOME/.luamake/package directory to be used for the
-//  user packages that they have installed
 enum class Command : int {
   UNKNOWN_ARG,
   BUILD,
@@ -179,8 +275,9 @@ enum class Command : int {
   CLEAN,
   TEST,
   RUN,
-  HELP,
   CC_JSON,
+  LUA_LS,
+  HELP,
 };
 
 auto determine_command(int argc, char **argv) noexcept -> Command {
@@ -188,32 +285,36 @@ auto determine_command(int argc, char **argv) noexcept -> Command {
     return Command::RUN;
   }
 
-  // TODO: (Winter-On-Mars) i'm pretty sure this is a saftey issue by not doing
-  // stringlen bounds checking, but also i don't see how that could cause an
-  // issue in this case
-  if (strcmp(argv[1], "b") == 0 || strcmp(argv[1], "build") == 0) {
+  if (matches(argv[1], "b") || matches(argv[1], "build")) {
     return Command::BUILD;
-  } else if (strcmp(argv[1], "n") == 0 || strcmp(argv[1], "new") == 0) {
+  } else if (matches(argv[1], "n") || matches(argv[1], "new")) {
     if (argc < 3) {
       error_message("Expected string for the name of the "
-                    "project, found nothing" NL
-                    "\tDisplaying help message for more information" NL);
+                    "project, found nothing" LM_NL
+                    "\tDisplaying help message for more information" LM_NL);
       return Command::HELP;
     }
     return Command::NEW;
-  } else if (strcmp(argv[1], "c") == 0 || strcmp(argv[1], "clean") == 0) {
+  } else if (matches(argv[1], "c") || matches(argv[1], "clean")) {
     return Command::CLEAN;
-  } else if (strcmp(argv[1], "t") == 0 || strcmp(argv[1], "test") == 0) {
+  } else if (matches(argv[1], "t") || matches(argv[1], "test")) {
     return Command::TEST;
-  } else if (strcmp(argv[1], "r") == 0 || strcmp(argv[1], "run") == 0) {
+  } else if (matches(argv[1], "r") || matches(argv[1], "run")) {
     return Command::RUN;
-  } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "help") == 0) {
+  } else if (matches(argv[1], "-h") || matches(argv[1], "--help")) {
     return Command::HELP;
-  } else if (strcmp(argv[1], "cc") == 0 ||
-             strcmp(argv[1], "compile_commands") == 0) {
+  } else if (matches(argv[1], "cc") || matches(argv[1], "compile_commands")) {
     return Command::CC_JSON;
+  } else if (matches(argv[1], "luals")) {
+    if (argc < 3) {
+      error_message("Expected string for the dir to write the luals files, "
+                    "found nothing" LM_NL
+                    "\tDisplaying help message for more information" LM_NL);
+      return Command::HELP;
+    }
+    return Command::LUA_LS;
   } else {
-    fwarning_message("Unknown argument [%s]" NL
+    fwarning_message("Unknown argument [%s]" LM_NL
                      "\tDisplaying help for list of accepted arguments",
                      argv[1]);
     return Command::UNKNOWN_ARG;
@@ -226,20 +327,11 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   case Command::UNKNOWN_ARG:
     return help();
   case Command::NEW: {
-    auto project_type = proj_t::Executable;
-    for (int i = 0; i < argc; ++i) {
-      if (strcmp("--static", argv[i]) == 0) {
-        project_type = proj_t::Static;
-        break;
-      } else if (strcmp("--executable", argv[i]) == 0) {
-        break;
-      } else if (strcmp("--dynamic", argv[i]) == 0) {
-        project_type = proj_t::Dynamic;
-        break;
-      }
-    }
-    return new_proj(std::string_view{argv[2]}, project_type);
+    return new_proj(std::string_view{argv[2]},
+                    luamake::builtins::cl_options.proj_t);
   }
+  case Command::LUA_LS:
+    return lua_ls(argv[2]);
   case Command::HELP:
     return help();
   case Command::CLEAN:
@@ -254,12 +346,11 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     break;
   }
 
-  [[maybe_unused]]
-  auto page_allocator = luamake::allocator::Page();
+  auto page_allocator = luamake::allocator::Page(LM_LUA_ALLOC_SIZE);
   auto *state = lua_newstate(page_allocator.to_lua_alloc(), &page_allocator);
   if (state == nullptr) {
     error_message(
-        "Unable to init luavm." NL
+        "Unable to init luavm." LM_NL
         "\tThere may be some issue with your lua lib, if "
         "not feel free to message me on discord/ open an issue on the "
         "gh");
@@ -272,84 +363,36 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   auto lake =
       luamake::File(fs::current_path() / "luamake.lua", luamake::File::READ);
   if (!lake) {
-    ferror_message("Unable to discover `luamake.lua` in current dir at [%s]" NL
-                   "\tRun "
-                   "init <proj-name> to create a initialize a new project, "
-                   "or new <proj-name> to create a new subproject.",
-                   fs::current_path().c_str());
+    ferror_message(
+        "Unable to discover `luamake.lua` in current dir at [%s]" LM_NL "\tRun "
+        "init <proj-name> to create a initialize a new project, "
+        "or new <proj-name> to create a new subproject.",
+        fs::current_path().c_str());
     return exit_t::config_error;
   }
-  // TODO: check if this is worth leaving around, or if letting the gc run
-  // whenever is alright
   (void)lua_gc(state, LUA_GCSTOP);
 
-  // TODO: (Winter-On-Mars) SECURITY concerns, gives the user access to the os,
-  // io, etc modules, allowing for arbitrary code execution at the users
-  // privilege level, also makes reproducability harder because some scripts
-  // could depend on os features that are not shared, and that we can't check
-  // exist beforehand
-  luaL_openlibs(state);
+  open_libs(state);
   lua_register(state, "Dump", luamake::builtins::dump);
 
-  create_args(state, argc, argv);
+  get_cl_args(state, argc, argv);
 
   auto &&[len, str] = lake.dump_content();
   // basically the same thing as the luaL_dostring macro, but we just have the
   // buffer already
   if ((luaL_loadbufferx(state, reinterpret_cast<char const *>(str.get()), len,
-                        "luamake:root", nullptr) ||
+                        "luamake.lua", nullptr) ||
        lua_pcall(state, 0, 0, 0)) != LUA_OK) {
     ferror_message("unable to run the discovered `luamake.lua` file at "
-                   "[%s]" NL "\tLua error message [%s]",
+                   "[%s]" LM_NL "\tLua error message [%s]",
                    fs::current_path().c_str(), lua_tostring(state, -1));
     return exit_t::config_error;
   }
 
-  auto res = exit_t::ok;
-
-  for (int i = 0; i < argc; ++i) {
-    if (strncmp(argv[i], "-v", sizeof("-v")) == 0 ||
-        strncmp(argv[i], "--verbose", sizeof("--verbose")) == 0) {
-      luamake::builtins::cl_options.verbose = true;
-    }
-    // i know it's inconsistent to have this be formatted as --num_threads
-    // <nthreads>, while the arguments must be formatted as
-    // <arg_name>=<arg_value>, but idk this is the only way i can get this to
-    // work and it's (probably) not a big deal
-    else if (strncmp(argv[i], "--num_threads", sizeof("--num_threads")) == 0) {
-      ++i;
-      if (!(i < argc)) {
-        error_message("Improperly formatted --num_threads argument, expected "
-                      "`--num_threads <nthreads>`, but no <nthreads> parameter "
-                      "was passed in.");
-        return exit_t::useage_error;
-      }
-      auto const n_threads = std::atoi(argv[i]);
-      if (n_threads == 0) {
-        // NOTE: this does *technically* also catch cases like '012', but if
-        // you're doing that idk don't
-        if (argv[i][0] == '0') {
-          warning_message("Ignoring 0 for <nthreads> argument.");
-          --i;
-        } else {
-          warning_message(
-              "Parsing for '--num_threads <nthreads>' failed, using "
-              "max number of threads possible (minus 1)");
-        }
-      } else {
-        luamake::builtins::cl_options.num_threads =
-            static_cast<int8_t>(n_threads);
-      }
-    }
-  }
-
   luamake::builtins::mods.init();
-  // this can arguably be moved into just the build function, because that's the
-  // only one that really needs a thread pool, but for now we'll do it here
-  luamake::threads.init(
-      luamake::builtins::cl_options.num_threads != -1
-          ? static_cast<size_t>(luamake::builtins::cl_options.num_threads)
-          : std::thread::hardware_concurrency() - 1);
+  luamake::threads.init(luamake::builtins::cl_options.num_threads);
+
+  auto res = exit_t::ok;
   switch (command) {
   case Command::BUILD:
     res = build(state);
@@ -361,17 +404,13 @@ auto run_command(Command const command, int argc, char **argv) noexcept
     res = run(state);
     break;
   case Command::CLEAN: {
-    auto rm_everything = false;
-    for (auto i = 0; i < argc; ++i) {
-      if (strncmp(argv[i], "--everything", sizeof("--everything")) == 0) {
-        rm_everything = true;
-      }
-    }
-    res = clean(state, rm_everything);
+    res = clean(state, luamake::builtins::cl_options.clean_everything);
   } break;
   case Command::CC_JSON:
     res = compile_commands_json(state);
     break;
+  case Command::LUA_LS:
+    [[fallthrough]];
   case Command::UNKNOWN_ARG:
     [[fallthrough]];
   case Command::NEW:
@@ -385,12 +424,14 @@ auto run_command(Command const command, int argc, char **argv) noexcept
   return res;
 }
 
-static auto new_proj(std::string_view const project_name,
-                     proj_t const type) noexcept -> exit_t {
+static auto
+new_proj(std::string_view const project_name,
+         luamake::builtins::CLOptions::ProjectType const type) noexcept
+    -> exit_t {
   auto const project_root = fs::current_path() / project_name;
 
   if (fs::exists(project_root)) {
-    ferror_message("Project [%s] already exists at [%s]" NL "\tExiting",
+    ferror_message("Project [%s] already exists at [%s]" LM_NL "\tExiting",
                    project_name.data(), project_root.c_str());
     return exit_t::useage_error;
   }
@@ -407,87 +448,91 @@ static auto new_proj(std::string_view const project_name,
       luamake::File(project_root / "luamake.lua",
                     luamake::File::WRITE | luamake::File::CREATE);
   if (!luamake_lua) {
-    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
+    ferror_message("Unable to open file at [%s]." LM_NL
+                   "\tThis could be an issue "
                    "with permissions, or out of space.",
                    (fs::current_path() / "luamake.lua").c_str());
     return exit_t::internal_error;
   }
 
-  // these are all format strings, so they need to be passed to std::format
+  // NOTE: these are all format strings, so they need to be passed to
+  // std::format
   auto constexpr lua_f_content = std::array<std::string_view, 3>{
       // clang-format off
-    std::string_view{"function Build(b)" NL
-                     "    local exe = b:new_exe({{" NL
-                     "        name = \"{0}\"," NL
-                     "        root = \"src/main.cpp\"," NL
-                     "        compiler = b.clang({{}})," NL
-                     "        version = \"0.0.1\"," NL
-                     "        install_dir = \"build\"," NL
-                     "    }})" NL
-                     NL
-                     "    return b.install_exe(exe)" NL
-                     "end" NL
-                     NL
-                     "function Run(r)" NL
-                     "    local exe = {{" NL
-                     "        name = \"{0}\"," NL
-                     "        path = \"build/{0}\"," NL
-                     "        args = {{}}," NL
-                     "    }}" NL
-                     NL
-                     "    r.run(exe)" NL
-                     "end" NL
-                     NL
-                     "Tests = {{" NL
-                     "    {{" NL
-                     "        fun = function(t)" NL
-                     "            t.exe = \"build/{0}\"" NL
-                     "            t.args = {{\"This does nothing\"}}" NL
-                     "        end," NL
-                     "        output = {{" NL
-                     "            expected = \"Hello World!\\n\"," NL
-                     "            from = \"stdout\"," NL
-                     "        }}," NL
-                     "    }}" NL
-                     "}}" NL},
-      std::string_view{"local function Build(b)" NL
-                  "    local dlib = b:new_dynamic({{" NL
-                  "        roots = {{ \"src/dyn.cpp\" }}," NL
-                  "        headers = {{ \"src/dyn.hpp\" }}," NL
-                  "        compiler = b.clang({{}})," NL
-                  "        name = \"{0}\"," NL
-                  "        version = \"0.0.1\"," NL
-                  "        install_dir = \"build\"," NL
-                  "    }})" NL
-                  "    return b.install_dynamic(dlib)" NL
-                  "end" NL
-                  NL
-                  "return {{" NL
-                  "    Build = Build" NL
+    std::string_view{"function Build(b)" LM_NL
+                     "    local exe = b:new_exe({{" LM_NL
+                     "        name = \"{0}\"," LM_NL
+                     "        root = \"src/main.cpp\"," LM_NL
+                     "        compiler = b.clang({{}})," LM_NL
+                     "        version = \"0.0.1\"," LM_NL
+                     "        install_dir = \"build\"," LM_NL
+                     "        linking = {{ \"stdc++\" }}," LM_NL
+                     "    }})" LM_NL
+                     LM_NL
+                     "    return b.install_exe(exe)" LM_NL
+                     "end" LM_NL
+                     LM_NL
+                     "function Run(r)" LM_NL
+                     "    local exe = {{" LM_NL
+                     "        name = \"{0}\"," LM_NL
+                     "        path = \"build/{0}\"," LM_NL
+                     "        args = {{}}," LM_NL
+                     "    }}" LM_NL
+                     LM_NL
+                     "    r.run(exe)" LM_NL
+                     "end" LM_NL
+                     LM_NL
+                     "Tests = {{" LM_NL
+                     "    {{" LM_NL
+                     "        fun = function(t)" LM_NL
+                     "            t.exe = \"build/{0}\"" LM_NL
+                     "            t.args = {{\"This does nothing\"}}" LM_NL
+                     "        end," LM_NL
+                     "        output = {{" LM_NL
+                     "            expected = \"Hello World!\\n\"," LM_NL
+                     "            from = \"stdout\"," LM_NL
+                     "        }}," LM_NL
+                     "    }}" LM_NL
+                     "}}" LM_NL},
+      std::string_view{"local function Build(b)" LM_NL
+                  "    local dlib = b:new_dynamic({{" LM_NL
+                  "        roots = {{ \"src/dyn.cpp\" }}," LM_NL
+                  "        headers = {{ \"src/dyn.hpp\" }}," LM_NL
+                  "        compiler = b.clang({{}})," LM_NL
+                  "        name = \"{0}\"," LM_NL
+                  "        version = \"0.0.1\"," LM_NL
+                  "        install_dir = \"build\"," LM_NL
+                  "    }})" LM_NL
+                  "    return b.install_dynamic(dlib)" LM_NL
+                  "end" LM_NL
+                  LM_NL
+                  "return {{" LM_NL
+                  "    Build = Build" LM_NL
                   "}}"
                   },
-      std::string_view{"local function Build(b)" NL
-                  "    local slib = b:new_static({{" NL
-                  "        roots = {{ \"src/static.cpp\" }}," NL
-                  "        headers = {{ \"src/static.hpp\" }}," NL
-                  "        compiler = b.clang({{}})," NL
-                  "        name = \"{0}\"," NL
-                  "        version = \"0.0.1\"," NL
-                  "        install_dir = \"build\"," NL
-                  "    }})" NL
-                  "    return b.install_static(slib)" NL
-                  "end" NL
-                  NL
-                  "return {{" NL
-                  "    Build = Build" NL
+      std::string_view{"local function Build(b)" LM_NL
+                  "    local slib = b:new_static({{" LM_NL
+                  "        roots = {{ \"src/static.cpp\" }}," LM_NL
+                  "        headers = {{ \"src/static.hpp\" }}," LM_NL
+                  "        compiler = b.clang({{}})," LM_NL
+                  "        name = \"{0}\"," LM_NL
+                  "        version = \"0.0.1\"," LM_NL
+                  "        install_dir = \"build\"," LM_NL
+                  "    }})" LM_NL
+                  "    return b.install_static(slib)" LM_NL
+                  "end" LM_NL
+                  LM_NL
+                  "return {{" LM_NL
+                  "    Build = Build" LM_NL
                   "}}"
                   },
       // clang-format on
   };
 
-  auto const actual_string = std::vformat(
-      lua_f_content[static_cast<std::underlying_type_t<proj_t>>(type)],
-      std::make_format_args(project_name));
+  auto const actual_string =
+      std::vformat(lua_f_content[static_cast<std::underlying_type_t<
+                       luamake::builtins::CLOptions::ProjectType>>(type)],
+                   std::make_format_args(project_name));
 
   if (luamake_lua.write(actual_string.c_str(), actual_string.size(), 1) !=
       actual_string.size()) {
@@ -512,77 +557,79 @@ static auto new_proj(std::string_view const project_name,
                     std::string_view{
                         ""
                         // clang-format off
-               "#include <iostream>" NL
-               NL
-               "auto main() -> int {" NL
-               "    using std::cout;" NL
-               "    cout << \"Hello World!\" << std::endl;" NL
-               "}" NL
+               "#include <iostream>" LM_NL
+               LM_NL
+               "auto main() -> int {" LM_NL
+               "    using std::cout;" LM_NL
+               "    cout << \"Hello World!\" << std::endl;" LM_NL
+               "}" LM_NL
                         // clang-format on
                     }),
           std::pair(
               std::string_view{
                   ""
                   // clang-format off
-              "#pragma once" NL
-              NL
-              "namespace dlib {" NL
-              "[[nodiscard]]" NL
-              "auto call_me(int) noexcept -> int;" NL
-              "}" NL
+              "#pragma once" LM_NL
+              LM_NL
+              "namespace dlib {" LM_NL
+              "[[nodiscard]]" LM_NL
+              "auto call_me(int) noexcept -> int;" LM_NL
+              "}" LM_NL
                   // clang-format on
               },
               std::string_view{
                   ""
                   // clang-format off
-              "#include \"dyn.hpp\"" NL
-              NL
-              "namespace dlib {" NL
-              "[[nodiscard]]" NL
-              "auto call_me(int i) noexcept -> int {" NL
-              "    return i + 1;" NL
-              "}" NL
-              "}" NL
+              "#include \"dyn.hpp\"" LM_NL
+              LM_NL
+              "namespace dlib {" LM_NL
+              "[[nodiscard]]" LM_NL
+              "auto call_me(int i) noexcept -> int {" LM_NL
+              "    return i + 1;" LM_NL
+              "}" LM_NL
+              "}" LM_NL
                   // clang-format on
               }),
           std::pair(
               std::string_view{
                   ""
                   // clang-format off
-              "#pragma once" NL
-              NL
-              "namespace slib {" NL
-              "[[nodiscard]]" NL
-              "auto call_me(int) noexcept -> int;" NL
-              "}" NL
+              "#pragma once" LM_NL
+              LM_NL
+              "namespace slib {" LM_NL
+              "[[nodiscard]]" LM_NL
+              "auto call_me(int) noexcept -> int;" LM_NL
+              "}" LM_NL
                   // clang-format on
               },
               std::string_view{
                   ""
                   // clang-format off
-              "#include \"static.hpp\"" NL
-              NL
-              "namespace slib {" NL
-              "[[nodiscard]]" NL
-              "auto call_me(int i) noexcept -> int {" NL
-              "    return i + 1;" NL
-              "}" NL
-              "}" NL
+              "#include \"static.hpp\"" LM_NL
+              LM_NL
+              "namespace slib {" LM_NL
+              "[[nodiscard]]" LM_NL
+              "auto call_me(int i) noexcept -> int {" LM_NL
+              "    return i + 1;" LM_NL
+              "}" LM_NL
+              "}" LM_NL
                   // clang-format on
               }),
       };
 
-  auto &&[header_f_name, impl_f_name] =
-      file_paths[static_cast<std::underlying_type_t<proj_t>>(type)];
+  auto &&[header_f_name, impl_f_name] = file_paths[static_cast<
+      std::underlying_type_t<luamake::builtins::CLOptions::ProjectType>>(type)];
 
-  auto &&[header_string, impl_string] =
-      hpp_cpp_f_content[static_cast<std::underlying_type_t<proj_t>>(type)];
+  auto &&[header_string, impl_string] = hpp_cpp_f_content[static_cast<
+      std::underlying_type_t<luamake::builtins::CLOptions::ProjectType>>(type)];
 
   auto *header = (!header_f_name.empty())
                      ? fopen((project_root / header_f_name).c_str(), "w")
                      : nullptr;
-  if (type != proj_t::Executable && header == nullptr) {
-    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
+  if (type != luamake::builtins::CLOptions::ProjectType::executable &&
+      header == nullptr) {
+    ferror_message("Unable to open file at [%s]." LM_NL
+                   "\tThis could be an issue "
                    "with permissions, or out of space.",
                    (project_root / header_f_name).c_str());
     return exit_t::internal_error;
@@ -591,13 +638,14 @@ static auto new_proj(std::string_view const project_name,
   auto impl = luamake::File(project_root / impl_f_name,
                             luamake::File::WRITE | luamake::File::CREATE);
   if (!impl) {
-    ferror_message("Unable to open file at [%s]." NL "\tThis could be an issue "
+    ferror_message("Unable to open file at [%s]." LM_NL
+                   "\tThis could be an issue "
                    "with permissions, or out of space.",
                    (project_root / impl_f_name).c_str());
     return exit_t::internal_error;
   }
 
-  if (type != proj_t::Executable &&
+  if (type != luamake::builtins::CLOptions::ProjectType::executable &&
       fprintf(header, "%s", header_string.data()) != header_string.length()) {
     ferror_message("Unable to write full hpp file template string at [%s]",
                    (project_root / header_f_name).c_str());
@@ -619,32 +667,199 @@ static auto new_proj(std::string_view const project_name,
   return exit_t::ok;
 }
 
+static auto lua_ls(fs::path &&dir) noexcept -> exit_t {
+  if (!fs::exists(dir))
+    std::filesystem::create_directories(dir);
+  fs::create_directory(dir / "library");
+
+  // creating default `luamake.lua`
+  auto config_json = luamake::File(
+      dir / "config.json", luamake::File::WRITE | luamake::File::CREATE);
+  if (!config_json) {
+    ferror_message("Unable to open file at [%s]." LM_NL
+                   "\tThis could be an issue "
+                   "with permissions, or out of space.",
+                   (fs::current_path() / "config.json").c_str());
+    return exit_t::internal_error;
+  }
+
+  auto constexpr config_json_content = std::string_view{
+      // clang-format off
+  "{" LM_NL
+    "\"$schema\": \"https://raw.githubusercontent.com/LuaLS/LLS-Addons/main/schemas/addon_config.schema.json\"," LM_NL
+    "\"words\": [" LM_NL
+      "\"function Build%(%s%)\"" LM_NL
+    "]," LM_NL
+    "\"files\": [" LM_NL
+      "\"luamake.lua\"" LM_NL
+    "]," LM_NL
+    "\"settings\": {" LM_NL
+      "\"Lua.workspace.library\": [" LM_NL
+        "\"${3rd}/luamake/library\"" LM_NL
+      "]" LM_NL
+    "}" LM_NL
+  "}"
+      // clang-format on
+  };
+  if (config_json.write(config_json_content.data(),
+                        config_json_content.length(),
+                        1) != config_json_content.length()) {
+    ferror_message("Unable to write full config.json at [%s]", dir.c_str());
+    return exit_t::internal_error;
+  }
+  config_json.flush();
+
+  auto constexpr luamake_lua_content = std::string_view{
+      R"0(---@meta luamake
+
+---@class ExeConfig
+---@field name string
+---@field root string
+---@field compiler CompilerConfig
+---@field install_dir string
+---@field version string?
+---@field include string[]?
+---@field linking string[]?
+---@field macros string[]?
+
+---@class LibConfig
+---@field name string
+---@field roots string[]
+---@field headers string[]
+---@field compiler CompilerConfig
+---@field install_dir string
+---@field version string?
+---@field include string[]?
+---@field linking string[]?
+---@field macros string[]?
+
+---@alias CCOptions table<string, string|table<string,string>>
+
+---@class CompilerConfig
+---@field compiler string
+---@field opt_args table<any, any>
+---@field optimize string?
+---@field warnings string[]?
+
+---@class LibType
+
+---@class DepConfig
+---@field where string
+---@field threads integer
+---@field commands string[]
+---@field expecting LibType
+
+---@alias ModuleIndex integer
+
+---@alias OsType 'windows'|'linux'|'osx'|'bsd'|nil
+
+---@alias BuildType 'release'|'debug'|'debug_and_release'|'release_min'
+
+---@class BuildCtx
+---@field requires fun(self: BuildCtx, path: string): ModuleIndex
+---@field new_exe fun(self: BuildCtx, config: ExeConfig): ModuleIndex
+---@field new_static fun(self: BuildCtx, config: LibConfig): ModuleIndex
+---@field new_dynamic fun(self: BuildCtx, config: LibConfig): ModuleIndex
+---@field link_lib fun(library: ModuleIndex, link_to: ModuleIndex): nil
+---@field install_exe fun(mod: ModuleIndex): ModuleIndex
+---@field install_static fun(mod: ModuleIndex): ModuleIndex
+---@field install_dynamic fun(mod: ModuleIndex): ModuleIndex
+---@field install_dep fun(self: BuildCtx, config: DepConfig): ModuleIndex
+---@field clang fun(cc_options: CCOptions): CompilerConfig
+---@field gcc fun(cc_options: CCOptions): CompilerConfig
+---@field gcc_bare fun(cc_options: CCOptions): CompilerConfig
+---@field clang_bare fun(cc_options: CCOptions): CompilerConfig
+---@field cmake fun(commands: string[]): string[]
+---@field get_os fun(): OsType
+---@field build_type fun(): BuildType
+
+---@class RunConfig
+---@field name string
+---@field path string
+---@field args string[]?
+
+---@class RunCtx
+---@field run fun(runable_config: RunConfig): integer
+
+---@class TestCtx
+---@field set_exe fun(self: TestCtx, command: string)
+---@field add_arg fun(self: TestCtx, arg: string)
+---@field add_args fun(self: TestCtx, args: string[])
+---@field expect_success fun(self: TestCtx)
+---@field expect_failure fun(self: TestCtx)
+---@field expect_output fun(self: TestCtx, output: string, from_fd?: 'stdout' | 'stderr')
+
+---@param name string name of value
+---@param arg any value will be recursively displayed to stdout
+function Dump(name, arg) end
+
+---@type table<string, string>
+args = {}
+
+---@class CloneConfig
+---@field name string
+---@field url string
+---@field branch string
+---@field shallow ?boolean Default=true
+---@field install_level 'project'
+
+git = {
+	---@param config CloneConfig
+	---@return string
+	clone = function(config) end,
+})0"};
+
+  auto luamake_lua =
+      luamake::File(dir / "library/luamake.lua",
+                    luamake::File::WRITE | luamake::File::CREATE);
+  if (!luamake_lua) {
+    ferror_message("Unable to open file at [%s]." LM_NL "\t" LM_HELP
+                   "HINT" LM_NORMAL ": This could be an issue "
+                   "with permissions, or out of space.",
+                   (fs::current_path() / "library/luamake.lua").c_str());
+    return exit_t::internal_error;
+  }
+  if (luamake_lua.write(luamake_lua_content.data(),
+                        luamake_lua_content.length(),
+                        1) != luamake_lua_content.length()) {
+    ferror_message(
+        "Unable to write full luamake.lua file for luals support at [%s]",
+        (dir / "library").c_str());
+    return exit_t::internal_error;
+  }
+
+  luamake_lua.flush();
+
+  return exit_t::ok;
+}
+
 static auto help() noexcept -> exit_t {
   // clang-format off
   printf(
-      "Usage: luamake [options]?" NL
-      "options:" NL
-      "\t-h, help                            : Displays this help message." NL
-      "\tc, clean                            : Cleans the cache dir and removes the output." NL
-      "\tcc, compile_commands                : Generates `compile_commands.json` file in `install_dir`, defined in the respective `luamake.lua` file." NL
+      "Usage: luamake [options]?" LM_NL
+      "options:" LM_NL
+      "\t-h, --help                          : Displays this help message." LM_NL
+      "\tc, clean                            : Cleans the cache dir and removes the output." LM_NL
+      "\tcc, compile_commands                : Generates `compile_commands.json` file in `install_dir`, defined in the respective `luamake.lua` file." LM_NL
+      "\tluals <dir>                         : Generates LuaLS project files in <dir>." LM_NL
       "\tn, new <project-name> [project-args]: Creates a new subdir with name <project-name>, "
-      "creating a default luamake build script." NL
-      "\ti, init <project-name> [init-args]  :" NL
+      "creating a default luamake build script." LM_NL
+      "\ti, init <project-name> [init-args]  :" LM_NL
       "\tb, build                            : Builds the project based on the `Build` function "
-      "defined in the `luamake.lua` file in the current dir." NL
+      "defined in the `luamake.lua` file in the current dir." LM_NL
       "\tt, test                             : Builds the project based on the `Build` function "
       "in the `luamake.lua` file in the current dir, with the additional macro "
       "`LUAMAKE_TESTS` defined. Then runs the tests defined in the `Test` "
       "function "
       "defined in the `luamake.lua` file in the current dir, displaying the "
-      "number of tests that succeeded." NL
+      "number of tests that succeeded." LM_NL
       "\tr, run                              : Builds the project based on the `Build` function "
       "defined in the `luamake.lua` file in the current dir. Then runs the "
       "program, based on the `Run` function defined in the current dirs "
-      "`luamake.lua` file." NL
-      "If no options are passed in, it is the same as calling `luamake -r`" NL
+      "`luamake.lua` file." LM_NL
+      "If no options are passed in, it is the same as calling `luamake -r`" LM_NL
       "For more information see the `README.md` at "
-      "[[https://github.com/Winter-On-Mars/luamake]]" NL);
+      "[[https://github.com/Winter-On-Mars/luamake]]" LM_NL);
   // clang-format on
   fflush(stdout);
   return exit_t::ok;
@@ -655,14 +870,14 @@ static auto build(lua_State *const state) noexcept -> exit_t {
   // function undefined in `luamake.lua`
   if (build_lua_fn == LUA_TNIL) {
     error_message(
-        "Unable to find function `Build` in discovered `luamake.lua`." NL
+        "Unable to find function `Build` in discovered `luamake.lua`." LM_NL
         "\tSee README/wiki for more info");
     return exit_t::config_error;
   }
   // value Build is defined as a global, but isn't a function
   if (build_lua_fn != LUA_TFUNCTION) {
     error_message("`Build` value found in `luamake.lua`, but is not a "
-                  "function (might be callable [why would you do that?])." NL
+                  "function (might be callable [why would you do that?])." LM_NL
                   "\tSee README/wiki for more info, and if is a callable, feel "
                   "free to open a gh issue to fix this problem (and maybe "
                   "explain why the code's formatted this way lol)");
@@ -686,7 +901,7 @@ static auto build(lua_State *const state) noexcept -> exit_t {
 
   if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
-    ferror_message("While in the lua vm, Build function" NL "\t[%s]",
+    ferror_message("While in the lua vm, Build function" LM_NL "\t%s",
                    err_message);
     return exit_t::lua_vm_error; // ?
   }
@@ -702,12 +917,12 @@ static auto clean(lua_State *const state, bool const rm_everything) noexcept
     break;
   case LUA_TNIL:
     error_message(
-        "Unable to find function `Build` in discovered `luamake.lua`." NL
+        "Unable to find function `Build` in discovered `luamake.lua`." LM_NL
         "\tSee README/wiki for more info");
     return exit_t::config_error;
   default:
     error_message("`Build` value found in `luamake.lua`, but is not a "
-                  "function (might be callable [why would you do that?])." NL
+                  "function (might be callable [why would you do that?])." LM_NL
                   "\tSee README/wiki for more info, and if is a callable, feel "
                   "free to open a gh issue to fix this problem (and maybe "
                   "explain why the code's formatted this way lol)");
@@ -720,12 +935,15 @@ static auto clean(lua_State *const state, bool const rm_everything) noexcept
   luamake::builtins::make_builder_dummy(state);
   if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
-    ferror_message("While in the lua vm, Build function" NL "\t[%s]",
+    ferror_message("While in the lua vm, Build function" LM_NL "\t[%s]",
                    err_message);
     return exit_t::lua_vm_error; // ?
   }
 
   for (auto &&mod : luamake::builtins::mods) {
+    if (mod.tree.is_empty()) {
+      continue;
+    }
     auto const cache_path = fs::path(
         std::format("{}/__luamake_cache/{}.cache", mod.install_dir, mod.name));
     (void)fs::remove(cache_path);
@@ -747,12 +965,12 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     break;
   case LUA_TNIL:
     error_message(
-        "Unable to find function `Build` in discovered `luamake.lua`." NL
+        "Unable to find function `Build` in discovered `luamake.lua`." LM_NL
         "\tSee README/wiki for more info");
     return exit_t::config_error;
   default:
     error_message("`Build` value found in `luamake.lua`, but is not a "
-                  "function (might be callable [why would you do that?])." NL
+                  "function (might be callable [why would you do that?])." LM_NL
                   "\tSee README/wiki for more info, and if is a callable, feel "
                   "free to open a gh issue to fix this problem (and maybe "
                   "explain why the code's formatted this way lol)");
@@ -765,12 +983,17 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
   luamake::builtins::make_builder_dummy(state);
   if (lua_pcall(state, 1, 1, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
-    ferror_message("While in the lua vm, Build function" NL "\t[%s]",
+    ferror_message("While in the lua vm, Build function" LM_NL "\t[%s]",
                    err_message);
     return exit_t::lua_vm_error; // ?
   }
 
   for (auto &&mod : luamake::builtins::mods) {
+    // HACK: when dealing with external modules, modules that are built using
+    // another build system, they don't have a dep tree, thus it will be empty
+    if (mod.tree.is_empty()) {
+      continue;
+    }
     auto const &directory = mod.install_dir;
     auto const arguments = [&]() -> std::string {
       auto res = std::string();
@@ -803,12 +1026,6 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
         [](auto &&a, auto &&next) {
           return std::format("{}\"-isystem\",\"{}\",", a, next.string());
         });
-    auto const dep_includes =
-        std::accumulate(mod.dep_includes.cbegin(), mod.dep_includes.cend(),
-                        std::string(), [](auto &&a, auto &&next) {
-                          return std::format("{}\"-iquote\",\"{}\",", a,
-                                             next.parent_path().string());
-                        });
 
     auto cc_json_string = std::string(1, '[');
     for (auto i = size_t{}; i < mod.tree.size() - 1; ++i) {
@@ -820,7 +1037,6 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
 
       cc_json_string.append(includes);
       cc_json_string.append(sys_includes);
-      cc_json_string.append(dep_includes);
 
       cc_json_string.append("\"-c\",\"-o\",");
       auto const fname = mod.tree.get_path(i).stem().string();
@@ -845,7 +1061,6 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     cc_json_string.append(arguments);
     cc_json_string.append(includes);
     cc_json_string.append(sys_includes);
-    cc_json_string.append(dep_includes);
 
     cc_json_string.append("\"-c\",\"-o\",");
     auto const fname = mod.tree.get_path(mod.tree.size() - 1).stem().string();
@@ -886,7 +1101,7 @@ static auto run(lua_State *const state) noexcept -> exit_t {
   auto run_fn = lua_getglobal(state, "Run");
   if (run_fn == LUA_TNIL) {
     error_message("Function `Run` is undefined in the "
-                  "discovered `luamake.lua`." NL
+                  "discovered `luamake.lua`." LM_NL
                   "\tSee README in [[github link]] for more info.");
     return exit_t::config_error;
   }
@@ -912,7 +1127,7 @@ static auto run(lua_State *const state) noexcept -> exit_t {
 
   if (lua_pcall(state, 1, 0, 0) != LUA_OK) {
     auto const err_message = lua_tolstring(state, -1, nullptr);
-    ferror_message("While in the lua vm, Run function" NL "\t[%s]",
+    ferror_message("While in the lua vm, Run function" LM_NL "\t[%s]",
                    err_message);
     return exit_t::lua_vm_error;
   }

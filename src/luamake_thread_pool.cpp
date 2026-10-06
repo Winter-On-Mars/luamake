@@ -17,6 +17,7 @@ CompilationPool threads = CompilationPool();
 CompilationPool::~CompilationPool() noexcept {}
 
 auto CompilationPool::init(size_t num_threads) noexcept -> void {
+  available_threads = num_threads;
   workers.reserve(num_threads);
   for (auto i = size_t{}; i < num_threads; ++i) {
     workers.push_back(std::thread([this]() { _loop(); }));
@@ -32,7 +33,7 @@ auto CompilationPool::deinit() noexcept -> void {
     std::this_thread::sleep_for(std::chrono::nanoseconds{1000});
     lock.lock();
   }
-  should_terminate = true;
+  set_terminate();
   lock.unlock();
   waiting.notify_all();
   for (auto &thread : workers) {
@@ -80,13 +81,19 @@ auto CompilationPool::add_compile_tasks(
             "{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path, path.c_str(),
             install_dir, name, path.filename().c_str());
         if (builtins::cl_options.verbose) {
-          fprintf(stdout, "[%s]" NL, invoked_command.c_str());
+          fprintf(stdout, "[%s]" LM_NL, invoked_command.c_str());
         } else {
-          fprintf(stdout, "Building [%s]" NL, path.c_str());
+          fprintf(stdout, "Building [%s]" LM_NL, path.c_str());
         }
-        if (os_call(invoked_command) == 0) {
+        if (os::call(invoked_command) == 0) {
           builtins::mods.add_compiled_file(idx, path.filename().string());
         } else {
+          if (builtins::cl_options.verbose) {
+            fprintf(stderr, "Error with command [%s]" LM_NL,
+                    invoked_command.c_str());
+          } else {
+            fprintf(stderr, "Error compiling [%s]" LM_NL, path.c_str());
+          }
           builtins::mods.set_state_at(idx,
                                       builtins::LakeModules::ModState::error);
         }
@@ -96,6 +103,24 @@ auto CompilationPool::add_compile_tasks(
     builtins::mods.remaining_files[idx.mods] = num_remaining_files;
   }
   waiting.notify_all();
+}
+
+auto CompilationPool::reserve_threads(size_t const num_threads) noexcept
+    -> void {
+  if (should_terminate())
+    return;
+  if (num_threads > available_threads) {
+    available_threads = 0;
+  } else {
+    available_threads -= num_threads;
+  }
+}
+
+auto CompilationPool::give_back_threads(size_t const num_threads) noexcept
+    -> void {
+  if (should_terminate())
+    return;
+  available_threads += num_threads;
 }
 
 auto CompilationPool::busy() noexcept -> bool {
@@ -108,14 +133,28 @@ auto CompilationPool::busy() noexcept -> bool {
   return pool_busy;
 }
 
+auto CompilationPool::should_terminate() const noexcept -> bool {
+  return (available_threads & terminate_bit) != 0;
+}
+
+auto CompilationPool::set_terminate() noexcept -> void {
+  available_threads |= terminate_bit;
+}
+
+auto CompilationPool::num_threads() const noexcept -> size_t {
+  return available_threads & ~terminate_bit;
+}
+
+// TODO: get the thread count stuff working, something to do with updating how
+// this event loop works(?)
 auto CompilationPool::_loop() noexcept -> void {
   while (true) {
     auto job = std::function<void()>();
     {
       auto lock = std::unique_lock(task_mtx);
       waiting.wait(lock,
-                   [this]() { return !tasks.empty() || should_terminate; });
-      if (should_terminate) {
+                   [this]() { return !tasks.empty() || should_terminate(); });
+      if (should_terminate()) {
         return;
       }
       job = tasks.front();

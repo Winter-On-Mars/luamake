@@ -1,19 +1,23 @@
 #include "luamake_builtins.hpp"
 
 #include "common.hpp"
+#include "luamake_allocator.hpp"
 #include "luamake_file.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
 #include "luamake_thread_pool.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <set>
+#include <span>
 #include <thread>
 
 extern "C" {
-#include "lauxlib.h"
-#include "lua.h"
+#include "lua/lauxlib.h"
+#include "lua/lua.h"
 }
 
 #include <array>
@@ -71,6 +75,27 @@ extern "C" {
           L, "Expected " #expected_args " arguments to " #fn_name ", got %d.", \
           num_args);                                                           \
       return lua_error(L);                                                     \
+    }                                                                          \
+  }
+
+// NOTE: wow i'm so lazy that i have a todo comment on a macro created to make
+// writing todo errors easier
+// TODO: have a parameter that get's interpolated for additional context on the
+// error
+#define TODO_ERROR()                                                           \
+  {                                                                            \
+    throw ::std::runtime_error(::std::format("{}:{}", __FILE__, __LINE__));    \
+  }
+
+#define LUA_PUSH_REQUIRED_FIELD(L, idx, str, field_t)                          \
+  {                                                                            \
+    switch (lua_getfield(L, idx, str)) {                                       \
+    case field_t:                                                              \
+      break;                                                                   \
+    case LUA_TNIL:                                                             \
+      TODO_ERROR();                                                            \
+    default:                                                                   \
+      TODO_ERROR();                                                            \
     }                                                                          \
   }
 
@@ -480,17 +505,14 @@ static auto default_compiler_impl(lua_State *state,
 
 template <builtins::Module::Module_t mod_t>
 auto install_impl(lua_State *state) -> int {
-  if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
-    throw std::runtime_error(
-        "Currently do not support installing dynamic lib projects");
-  }
   // mod_idx is at the top of the stack, and we'll just return it at the
   // end, assuming everything else has gone well
   auto const mod_idx = builtins::ModIndex(lua_tointeger(state, -1));
   if (!builtins::mods.has_module_at(mod_idx)) {
     throw std::runtime_error(
         "Attempting to install module that the system does not know "
-        "about." NL DBG "Hint" NORMAL ": installing a module only works "
+        "about." LM_NL LM_HELP "Hint" LM_NORMAL
+        ": installing a module only works "
         "when the module has been previously defined, see documentation on "
         "`new_(exe|static|dynamic)`, and/or `Git` for more information.");
   }
@@ -513,7 +535,7 @@ auto install_impl(lua_State *state) -> int {
   // point, any sooner and we run into linking errors, everybodys favorite :)
   // TODO: try to move this into the threads structure with threads.add_task
   auto gen_dep_tree_fut = std::async(std::launch::async, [&]() -> void {
-    return mod.tree.gen_dep_tree(mod, mod.interpreter, mod_idx);
+    return mod.tree.gen_dep_tree(mod, *mod.interpreter, mod_idx);
   });
 
   // TODO: try to move these calls to create directory to be do when the
@@ -526,20 +548,18 @@ auto install_impl(lua_State *state) -> int {
   // every time in case somebody changes the install_dir variable
   auto const install_dir =
       parent_path / fs::path(std::format("{}/{}.o", mod.install_dir, mod.name));
-  std::cout << std::format("making directory [{}]" NL, install_dir.string());
   auto ec = std::error_code{};
-  if (fs::create_directory(install_dir, ec); ec) {
+  if (fs::create_directories(install_dir, ec); ec) {
     // TODO: update to push the ec message
-    std::cerr << ec.message() << NL;
+    std::cerr << ec.message() << LM_NL;
     lua_pushfstring(state, "Unable to create directory [%s]",
                     install_dir.c_str());
     return lua_error(state);
   }
   auto const cache_dir =
       fs::path(std::format("{}/__luamake_cache", mod.install_dir));
-  std::cout << std::format("making directory [{}]" NL, cache_dir.string());
   if (fs::create_directories(cache_dir, ec); ec) {
-    std::cerr << ec.message() << NL;
+    std::cerr << ec.message() << LM_NL;
     lua_pushstring(state, "Unable to create directory");
     return lua_error(state);
   }
@@ -553,14 +573,14 @@ auto install_impl(lua_State *state) -> int {
   auto files_to_compile = std::vector<std::string_view>();
   switch (maybe_cached_mod.index()) {
   case 0: {
-    std::cout << std::format("Checking [{}] cache" NL, mod.name);
+    std::cout << std::format("Checking [{}] cache" LM_NL, mod.name);
     auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
     gen_dep_tree_fut.get();
     if (mod == cached_mod) {
       files_to_compile =
           builtins::mods.get_tree_diff(mod_idx, mod.tree, cached_mod.tree);
       if (files_to_compile.empty()) {
-        std::cout << std::format("\t[{}] already built" NL, mod.name);
+        std::cout << std::format("\t[{}] already built" LM_NL, mod.name);
         return 1;
       }
     } else {
@@ -575,7 +595,7 @@ auto install_impl(lua_State *state) -> int {
   case 1: {
     // TODO: update this because it's not really an error
     auto const &error_message = std::get<std::string>(maybe_cached_mod);
-    std::cerr << std::format("[{}]" NL, error_message);
+    std::cerr << std::format("[{}]" LM_NL, error_message);
     gen_dep_tree_fut.get();
     // we don't have a cached tree to comp against, so we just push back
     // everything to be compiled
@@ -591,6 +611,9 @@ auto install_impl(lua_State *state) -> int {
   std::cout << std::endl;
 #endif // DEBUG_MOD
 
+  // TODO: i'm pretty sure we need to add -fpic/-fpie to the individual
+  // calls to the compiler when building the .o files when building a DYNAMIC
+  // lib
   threads.add_compile_tasks(files_to_compile, mod_idx);
   // TODO: have some way of keeping track of if an error occurs when
   // building a module, that way we don't try to build with extraneous
@@ -621,21 +644,32 @@ auto install_impl(lua_State *state) -> int {
 
     // only way i could think to get this to work :) *should* be optimized away
     auto const invoked_command = [&]() -> std::string {
-      if constexpr (mod_t == builtins::Module::Module_t::STATIC)
+      if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
         return std::format("ar crs {}/lib{}.a {}", mod.install_dir, mod.name,
                            compiled_files);
-      else if (mod_t == builtins::Module::Module_t::EXE)
+      } else if constexpr (mod_t == builtins::Module::Module_t::EXE) {
         return std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
                            mod.name, compiled_files, mod.format_links());
+      } else if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
+        // TODO: change the .so to .dll and .dyn(?) for depending on platform
+        return std::format("{} -shared -o {}/lib{}.so {} {}", mod.compiler,
+                           mod.install_dir, mod.name, compiled_files,
+                           mod.format_links());
+      } else {
+        unreachable();
+      }
     }();
 
     if (builtins::cl_options.verbose) {
-      std::cout << std::format("[{}]" NL, invoked_command);
+      std::cout << std::format("[{}]" LM_NL, invoked_command);
     } else {
       if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
-        std::cout << std::format("Making archive for [{}]" NL, mod.name);
+        std::cout << std::format("Making archive for [{}]" LM_NL, mod.name);
+      } else if constexpr (mod_t == builtins::Module::DYNAMIC) {
+        std::cout << std::format("Making shared object for [{}]" LM_NL,
+                                 mod.name);
       } else {
-        std::cout << std::format("Building [{}]" NL, mod.name);
+        std::cout << std::format("Building [{}]" LM_NL, mod.name);
       }
     }
     // NOTE: figure out how to handle errors with the lua vm, if there's
@@ -653,44 +687,45 @@ auto install_impl(lua_State *state) -> int {
     // it's fine to do this, kind of, but also because this is executed
     // async, we might no longer be in the pcall function, so we really just
     // need to change how we store + handle errors :)
-    if (os_call(invoked_command) != 0) {
-      fprintf(stderr, "Error compiling [%s]" NL, invoked_command.c_str());
+    if (os::call(invoked_command) != 0) {
+      fprintf(stderr, "Error compiling [%s]" LM_NL, invoked_command.c_str());
       builtins::mods.set_state_at(mod_idx,
                                   builtins::LakeModules::ModState::error);
       return;
     }
 
-    // header things that are only (currently) for static libs
-    if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
+    // header things, should also be required for dynamic modules
+    if constexpr (mod_t == builtins::Module::STATIC ||
+                  mod_t == builtins::Module::DYNAMIC) {
       fs::create_directory(
           parent_path /
           fs::path(std::format("{}/{}", mod.install_dir, mod.name)));
 
       auto const formatted_files = std::accumulate(
           mod.headers.begin(), mod.headers.end(), std::string(),
-          [&parent_path](auto &&e, auto &&next) {
-            return std::format("{} {}/{}", e,
-                               parent_path.parent_path().string(),
-                               next.string());
+          [pp = parent_path.parent_path().string()](auto &&e, auto &&next) {
+            return std::format("{} {}/{}", e, pp, next.string());
           });
 
       auto const copy_headers = std::format(
           "cp --target-directory={} {}",
           (parent_path / mod.install_dir / mod.name).string(), formatted_files);
       if (builtins::cl_options.verbose) {
-        std::cout << std::format("[{}]" NL, copy_headers);
+        std::cout << std::format("[{}]" LM_NL, copy_headers);
       } else {
-        std::cout << std::format("Copying [{}] headers" NL, mod.name);
+        std::cout << std::format("Copying [{}] headers" LM_NL, mod.name);
       }
-      if (os_call(copy_headers) != 0) {
-        fprintf(stderr, "Error moving headers [%s]" NL, copy_headers.c_str());
+      if (os::call(copy_headers) != 0) {
+        fprintf(stderr, "Error moving headers [%s]" LM_NL,
+                copy_headers.c_str());
         builtins::mods.set_state_at(mod_idx,
                                     builtins::LakeModules::ModState::error);
         return;
       }
     }
     // if everything went well then we can serialize the file
-    spl::serialize(mod, cache_path);
+    if (builtins::cl_options.cache)
+      spl::serialize(mod, cache_path);
   });
   return 1;
 }
@@ -700,17 +735,15 @@ auto install_impl(lua_State *state) -> int {
 // compile_commands.json, etc)
 template <builtins::Module::Module_t mod_t>
 auto install_dummy_impl(lua_State *state) -> int {
-  if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
-    throw std::runtime_error(
-        "Currently do not support installing dynamic lib projects");
-  }
   auto const mod_idx = builtins::ModIndex(lua_tointeger(state, -1));
   if (!builtins::mods.has_module_at(mod_idx)) {
     throw std::runtime_error(
         "Attempting to install module that the system does not know "
-        "about." NL DBG "Hint" NORMAL ": installing a module only works "
+        "about." LM_NL LM_HELP "Hint" LM_NORMAL
+        ": installing a module only works "
         "when the module has been previously defined, see documentation on "
-        "`new_(exe|static|dynamic)`, and/or `Git` for more information.");
+        "`new_(exe|static|dynamic)`, and/or the `git` module for more "
+        "information.");
   }
   auto &mod = builtins::mods.module_at(mod_idx);
   if (mod.type != mod_t) {
@@ -720,14 +753,113 @@ auto install_dummy_impl(lua_State *state) -> int {
         static_cast<std::underlying_type_t<builtins::Module::Module_t>>(
             mod.type)));
   }
-  (void)mod.tree.gen_dep_tree(mod, mod.interpreter, mod_idx);
+  mod.tree.gen_dep_tree(mod, *mod.interpreter, mod_idx);
   return 1;
+}
+
+template <class Field_t>
+auto constexpr get_required_field(lua_State *state, int index,
+                                  std::string_view const name) -> Field_t {
+  // check if field is missing
+  auto const field_t = lua_getfield(state, index, name.data());
+  if (field_t == LUA_TNIL)
+    throw missing_field(name);
+  using T = std::remove_cvref_t<Field_t>;
+  if constexpr (std::same_as<T, std::string>) {
+    if (field_t == LUA_TSTRING) {
+      auto size = size_t{};
+      auto const str = lua_tolstring(state, -1, &size);
+      auto const res = std::string(str, size);
+      lua_pop(state, 1);
+      return res;
+    } else {
+      throw unexpected_type(name, LUA_TSTRING, field_t);
+    }
+  } else if constexpr (std::same_as<T, size_t>) {
+    if (lua_isinteger(state, -1)) {
+      auto const tmp = lua_tointeger(state, -1);
+      if (tmp < 0) {
+        throw std::runtime_error(
+            "Integer conversion is out of range to convert to a size_t");
+      }
+      lua_pop(state, 1);
+      return static_cast<size_t>(tmp);
+    } else {
+      throw unexpected_type(name, LUA_TNUMBER, field_t);
+    }
+  } else if constexpr (std::same_as<T, std::string_view>) {
+    if (field_t == LUA_TSTRING) {
+      auto size = size_t{};
+      auto const str = lua_tolstring(state, -1, &size);
+      if (str == nullptr) {
+        throw std::runtime_error(
+            std::format("unable to convert value `{}` to string", name));
+      }
+      return std::string_view{str, size};
+    } else {
+      throw unexpected_type(name, LUA_TSTRING, field_t);
+    }
+  }
+}
+
+auto constexpr flatten_lua_array(lua_State *state, int index,
+                                 std::string_view name, auto &&func)
+    -> std::string {
+  auto res = std::string();
+  if (lua_getfield(state, index, name.data()) != LUA_TTABLE) {
+    throw std::runtime_error("Attempting to flatten non array");
+  }
+  auto const len = luaL_len(state, -1);
+  for (auto i = lua_Integer{1}; i <= len; ++i) {
+    if (lua_geti(state, static_cast<int>(-i), i) != LUA_TSTRING) {
+      throw std::runtime_error("flatten function is expecting an array of "
+                               "strings in the current implimentation");
+    }
+    auto size = size_t{};
+    auto const str = lua_tolstring(state, -1, &size);
+    res += func(std::string_view{str, size});
+  }
+  lua_pop(state, static_cast<int>(len + 1));
+  return res;
+}
+
+auto constexpr concat_lua_array(lua_State *state, int index,
+                                std::string_view name)
+    -> std::vector<std::string> {
+  auto res = std::vector<std::string>();
+  if (lua_getfield(state, index, name.data()) != LUA_TTABLE) {
+    // bad error message :)
+    throw std::runtime_error("Attempting to concatinate non array");
+  }
+  auto const len = luaL_len(state, -1);
+  res.reserve(static_cast<size_t>(len));
+  for (auto i = lua_Integer{1}; i <= len; ++i) {
+    if (lua_geti(state, static_cast<int>(-i), i) != LUA_TSTRING) {
+      throw std::runtime_error("flatten function is expecting an array of "
+                               "strings in the current implimentation");
+    }
+    auto size = size_t{};
+    auto const str = lua_tolstring(state, -1, &size);
+    res.push_back(std::string(str, size));
+  }
+  lua_pop(state, static_cast<int>(len + 1));
+  return res;
+}
+
+auto constexpr add_unique(std::vector<std::filesystem::path> &to,
+                          std::span<std::filesystem::path const> const from)
+    -> void {
+  for (auto &&path : from) {
+    if (std::find(to.cbegin(), to.cend(), path) == to.cend()) {
+      to.push_back(path);
+    }
+  }
 }
 } // namespace
 
 namespace builtins {
 LakeModules mods = LakeModules();
-CLOptions cl_options = CLOptions{false, -1};
+CLOptions cl_options = CLOptions{};
 
 Module::DepTree::DepTree(size_t const num_files) {
   types = std::make_unique<SourceFile_t[]>(num_files);
@@ -763,8 +895,9 @@ auto Module::DepTree::append_path(fs::path const &path) -> StringViews {
         std::numeric_limits<unsigned int>::max()));
   }
 #ifdef DEBUG_MOD
-  std::cout << std::format("File not found yet, so returning str = ({}, {})" NL,
-                           start, end);
+  std::cout << std::format(
+      "File `{}` not found yet, so returning str = ({}, {})" LM_NL,
+      path.string(), start, end);
 #endif // DEBUG_MOD
   return StringViews{static_cast<unsigned int>(start),
                      static_cast<unsigned int>(end)};
@@ -784,7 +917,7 @@ auto Module::DepTree::append_dep(Module const &mod,
   if (possible_idx != DepTree::NIL_IDX) {
 #ifdef DEBUG_MOD
     std::cout << std::format(
-        "Already found dep [{}], pushing back it's info and returning" NL,
+        "Already found dep [{}], pushing back it's info and returning" LM_NL,
         dep.string());
 #endif // DEBUG_MOD
     if (parent_idx != DepTree::NIL_IDX) {
@@ -813,7 +946,7 @@ auto Module::DepTree::append_dep(Module const &mod,
   auto const ftype = DepTree::determine_file_type(dep.extension());
   if (ftype == DepTree::SourceFile_t::HEADER) {
     auto constexpr potential_extensions =
-        std::array<std::string_view, 2>{{".cpp", ".c"}};
+        std::array<std::string_view, 4>{{".cpp", ".c", ".cc", ".cxx"}};
     auto const potential_impl = (dep.parent_path() / dep.stem()).string();
     for (auto const &potential_extension : potential_extensions) {
       auto const possible_path =
@@ -823,7 +956,7 @@ auto Module::DepTree::append_dep(Module const &mod,
                    this_idx);
       }
     }
-    // HOL
+    // HOL (?)
   }
 
   types[this_idx] = ftype;
@@ -831,64 +964,65 @@ auto Module::DepTree::append_dep(Module const &mod,
 
   // HACK: didn't want to rewrite all of the interpreter code to work with
   // explicitly utf8 strings
-  auto const files_deps = interpreter.interpret(
-      std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize));
+  try {
+    auto const files_deps = interpreter.interpret(
+        std::string_view(reinterpret_cast<char const *>(fcontent.get()), fsize),
+        mods.get_allocator());
 
 #ifdef DEBUG_MOD
-  std::cout << std::format("Possible includes for {}: {{" NL, dep.string());
-  for (auto &&include : files_deps) {
-    std::cout << std::format("\t{}" NL, include.string());
-  }
-  std::cout << "}" NL;
-  std::cout.flush();
+    std::cout << std::format("Possible includes for {}: {{" LM_NL,
+                             dep.string());
+    for (auto &&include : files_deps) {
+      std::cout << std::format("\t{}" LM_NL, include.string());
+    }
+    std::cout << "}" LM_NL;
+    std::cout.flush();
 
-  mods.dump_paths(std::cout);
+    mods.dump_paths(std::cout);
 #endif // DEBUG_MOD
 
-  auto ec = std::error_code{};
-  for (auto &&file : files_deps) {
-    for (auto &&include : mod.includes) {
-      auto const include_rel_path =
-          fs::relative(include / file, parent_path, ec);
-      if (ec) {
-        // idk maybe block these behind a verbose check(?)
-        std::cerr << std::format("\t{}" NL, ec.message());
-        ec.clear();
-        continue;
-      }
+    auto ec = std::error_code{};
+    for (auto &&file : files_deps) {
+      for (auto &&include : mod.includes) {
+        auto const include_rel_path =
+            fs::relative(include / file, parent_path, ec);
+        if (ec) {
+          // idk maybe block these behind a verbose check(?)
+          std::cerr << std::format("\t{}" LM_NL, ec.message());
+          ec.clear();
+          continue;
+        }
 
-      if (!fs::exists(include_rel_path, ec)) {
-        // we should probably report an error, the issue is that we have to also
-        // worry about if it's in the deps, if so then we have to worry about
-        // false positives, so for now we'll just ignore things
-        continue;
-      }
+        if (!fs::exists(include_rel_path, ec)) {
+          // we should probably report an error, the issue is that we have to
+          // also worry about if it's in the deps, if so then we have to worry
+          // about false positives, so for now we'll just ignore things
+          continue;
+        }
 
-      if (ec) {
-        std::cerr << std::format("\t{}" NL, ec.message());
-        ec.clear();
-        continue;
-      }
+        if (ec) {
+          std::cerr << std::format("\t{}" LM_NL, ec.message());
+          ec.clear();
+          continue;
+        }
 
-      append_dep(mod, interpreter, mod_idx, parent_path, include_rel_path,
-                 this_idx);
+        append_dep(mod, interpreter, mod_idx, parent_path, include_rel_path,
+                   this_idx);
+      }
     }
-  }
 
-  hashes[this_idx] = hash_fut.get();
+    hashes[this_idx] = hash_fut.get();
+  } catch (std::runtime_error &e) {
+    e = std::runtime_error(
+        std::format("file `{}`: {}", dep.string(), e.what()));
+    throw e;
+  }
 }
 
 auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   if (idx == NIL_IDX)
     return fs::current_path();
   auto &&[start, end] = files[idx];
-  // HACK: idk theres some bug happening, this "fixes" it, but we have to
-  // figure out where the acutal issue is
-  if (end == 0) {
-    std::cerr << std::format("end == 0, something is wrong with idx [{}]" NL,
-                             idx);
-    return fs::current_path();
-  }
   // NOTE: -1 because otherwise it includes the null term, and that fucks with
   // fs::path comparing to strings and checking the extension type
   return fs::path(all_paths.buffer + start, all_paths.buffer + end - 1);
@@ -972,39 +1106,42 @@ auto Module::DepTree::reserve(size_t min) noexcept(false) -> void {
 
 #ifdef DEBUG_MOD
 auto Module::DepTree::display(std::ostream &out,
-                              unsigned int const depth) const noexcept -> void {
+                              unsigned int const depth) const noexcept
+    -> std::ostream & {
   out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
-      << "]" NL;
+      << "]" LM_NL;
   out.flush();
   out << std::hex;
   display_impl(out, depth, 0);
   out << std::dec;
+  return out;
 }
 
-auto Module::DepTree::dump(std::ostream &out) const noexcept -> void {
+auto Module::DepTree::dump(std::ostream &out) const noexcept -> std::ostream & {
   out << "All string = [" << std::string_view{all_paths.buffer, all_paths.size}
-      << "]" NL;
-  out << std::format("num_files = [{}]" NL, num_files);
-  out << std::format("cap_files = [{}]" NL, cap_files);
+      << "]" LM_NL;
+  out << std::format("num_files = [{}]" LM_NL, num_files);
+  out << std::format("cap_files = [{}]" LM_NL, cap_files);
   for (auto i = size_t{}; i < num_files; ++i) {
     out << std::format(
-        "types[{}] = [{}]" NL, i,
+        "types[{}] = [{}]" LM_NL, i,
         static_cast<std::underlying_type_t<SourceFile_t>>(types[i]));
   }
   for (auto i = size_t{}; i < num_files; ++i) {
     auto &&[start, end] = files[i];
-    out << std::format("files[{}] = [{}, {}]" NL, i, start, end);
+    out << std::format("files[{}] = [{}, {}]" LM_NL, i, start, end);
   }
   for (auto i = size_t{}; i < num_files; ++i) {
     for (auto j = size_t{}; j < deps[i].size(); ++j) {
-      out << std::format("deps[{}][{}] = [{}]" NL, i, j, deps[i][j]);
+      out << std::format("deps[{}][{}] = [{}]" LM_NL, i, j, deps[i][j]);
     }
   }
   out << std::hex;
   for (auto i = size_t{}; i < num_files; ++i) {
-    out << std::format("hashes[{}] = [{}]" NL, i, hashes[i]);
+    out << std::format("hashes[{}] = [{}]" LM_NL, i, hashes[i]);
   }
   out << std::dec;
+  return out;
 }
 
 auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
@@ -1012,7 +1149,7 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
     -> void {
   auto const indents = std::string(depth, '\t');
 
-  out << indents << "{" NL;
+  out << indents << "{" LM_NL;
   out << indents << "\"type\":\"";
   switch (types[idx]) {
   case SourceFile_t::IMPL:
@@ -1028,24 +1165,24 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
     out << "MISC";
     break;
   };
-  out << "\"," NL;
+  out << "\"," LM_NL;
 
   out << indents << "\"path\":\""
       << std::string_view{all_paths.buffer + files[idx].start,
                           all_paths.buffer + files[idx].end}
-      << "\"," NL;
+      << "\"," LM_NL;
 
-  out << indents << "\"hash\":" << hashes[idx] << "," NL;
+  out << indents << "\"hash\":" << hashes[idx] << "," LM_NL;
 
-  out << indents << "\"deps\":[" NL;
+  out << indents << "\"deps\":[" LM_NL;
 
   for (auto const dep_idx : deps[idx]) {
     display_impl(out, depth + 1, dep_idx);
   }
 
-  out << indents << "]" NL;
+  out << indents << "]" LM_NL;
 
-  out << indents << "}" NL;
+  out << indents << "}" LM_NL;
 }
 #endif // DEBUG_MOD
 
@@ -1060,6 +1197,12 @@ auto Module::DepTree::vectorize() const -> std::vector<std::string_view> {
   }
 
   return res;
+}
+
+auto Module::DepTree::is_empty() const noexcept -> bool {
+  // TODO: probably a good idea to have there be some variable we check, like
+  // using the unique_ptr's and doing a null check for this
+  return num_files == 0;
 }
 
 // TODO: optimize this, reorder equality checks, maybe in memory serialize the
@@ -1088,10 +1231,12 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
 }
 
 #ifdef DEBUG_MOD
-auto Module::display(std::ostream &out) const noexcept -> void {
-  auto _display = [&](auto x) { out << x << ", "; };
+auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
+  auto _display = [&](auto x) { out << "\t\t" << x << "," LM_NL; };
 
-  out << "type = ";
+  out << "mod = {" LM_NL;
+
+  out << "\ttype = ";
   switch (type) {
   case EXE:
     out << "EXE";
@@ -1104,47 +1249,53 @@ auto Module::display(std::ostream &out) const noexcept -> void {
     break;
   }
 
-  out << NL;
+  out << LM_NL;
 
-  out << "roots = [";
+  out << "\troots = [";
   std::for_each(roots.begin(), roots.end(), _display);
-  out << "]" NL;
+  out << "\t]" LM_NL;
 
-  out << "headers = [";
+  out << "\theaders = [";
   std::for_each(headers.begin(), headers.end(), _display);
-  out << "]" NL;
+  out << "\t]" LM_NL;
 
-  out << "includes= [";
+  out << "\tincludes= [";
   std::for_each(includes.begin(), includes.end(), _display);
-  out << "]" NL;
+  out << "\t]" LM_NL;
 
-  out << "dep_includes= [";
-  std::for_each(dep_includes.begin(), dep_includes.end(), _display);
-  out << "]" NL;
-
-  out << "sys_includes= [";
+  out << "\tsys_includes= [";
   std::for_each(sys_includes.begin(), sys_includes.end(), _display);
-  out << "]" NL;
+  out << "\t]" LM_NL;
 
-  out << "linking = [";
-  std::for_each(linking.begin(), linking.end(), _display);
-  out << "]" NL;
+  out << "\tlinks= [";
+  std::for_each(links.begin(), links.end(), _display);
+  out << "\t]" LM_NL;
 
-  out << "compiler = " << compiler << NL;
-  out << "name = " << name << NL;
-  out << "install_dir = " << install_dir << NL;
-  out.flush();
+  out << "\tsys_links = [";
+  std::for_each(sys_links.begin(), sys_links.end(), _display);
+  out << "\t]" LM_NL;
+
+  out << "\tcompiler = " << compiler << LM_NL;
+  out << "\tname = " << name << LM_NL;
+  out << "\tinstall_dir = " << install_dir << LM_NL;
+  out << "}" LM_NL;
+  return out;
 }
 #endif // DEBUG_MOD
 
+auto Module::from_external(Module_t &&type, std::string &&links,
+                           std::vector<fs::path> &&includes) -> Module {
+  auto mod = Module();
+  mod.type = type;
+  mod.links.push_back(std::move(links));
+  mod.sys_includes = std::move(includes);
+  return mod;
+}
+
 static auto include_path_cache =
     std::unordered_map<std::string, std::vector<fs::path>>();
-// TODO: i think i'm not properly handling child procs, so see about fixing it
-// in these two functions :)
-// from some basic perf testing, these two functions seem to be the biggest
-// slow downs, they should be run in parallel (or just in the background)
-// which will help speed things up. We could rework the thread pool to allow
-// for arbitrary functions to be run(?)
+// TODO: probably switch this to using popen, it seems like it will be more
+// performant, plus it *should* be more portable
 auto Module::append_include_paths(std::string const &compiler) -> void {
   // TODO: see if we need to cache the whole compiler string, or if it's
   // enough to just cache the path to the binary, i.e. if we can get away with
@@ -1249,13 +1400,13 @@ auto Module::append_include_paths(std::string const &compiler) -> void {
 
 // TODO: add another field for function macros, so that they can be added more
 // easily, and (if needed) evaluated easier
+// TODO: switch this to use the pp::StringHasher, so that we can avoid some
+// allocations, while also avoiding the stack use after free that comes from
+// std::async call
 static auto predefined_macros_cache =
-    std::unordered_map<std::string,
-                       std::pair<std::unordered_map<std::string, pp::Macro>,
-                                 std::unordered_set<std::string>>>();
+    std::unordered_map<std::string, std::pair<pp::MacroMap, pp::StringSet>>();
 auto Module::append_predefined_macros(std::string const &compiler)
-    -> std::pair<std::unordered_map<std::string, pp::Macro>,
-                 std::unordered_set<std::string>> {
+    -> std::pair<pp::MacroMap, pp::StringSet> {
   if (auto macros = predefined_macros_cache.find(compiler);
       macros != predefined_macros_cache.end()) {
     return macros->second;
@@ -1285,8 +1436,14 @@ auto Module::append_predefined_macros(std::string const &compiler)
     }
   } break;
   default: { // in parent proc
-    auto macros = std::unordered_map<std::string, pp::Macro>();
-    auto def_macros = std::unordered_set<std::string>();
+    auto macros = pp::MacroMap();
+    auto def_macros = pp::StringSet();
+    // NOTE: based on my tests, the compiler will give about 400 macros, and <10
+    // defined macros, but (at least in my experience) we end up defining a fair
+    // amount of macros, basically with every file at least, hence these numbers
+    // to over allocate
+    macros.reserve(512);
+    def_macros.reserve(32);
 
     close(write_pipe);
     auto *read_me =
@@ -1381,59 +1538,8 @@ auto Module::append_predefined_macros(std::string const &compiler)
 // more info
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     : type(type), tree(8), roots(), headers(), includes(), sys_includes(),
-      linking(), interpreter({}, {}), compiler(), name(), install_dir() {
-  switch (auto const name_t = lua_getfield(state, -1, "name")) {
-  case LUA_TSTRING:
-    name = lua_tolstring(state, -1, nullptr);
-    break;
-  case LUA_TNIL:
-    throw missing_field("name");
-  default:
-    throw unexpected_type("name", LUA_TSTRING, name_t);
-  }
-  lua_pop(state, 1);
-
-  switch (type) {
-  case EXE:
-    roots.reserve(1);
-    switch (auto const root_t = lua_getfield(state, -1, "root")) {
-    case LUA_TSTRING:
-      roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
-      break;
-    case LUA_TNIL:
-      throw missing_field("root");
-    default:
-      throw unexpected_type("root", LUA_TSTRING, root_t);
-    }
-    lua_pop(state, 1);
-    break;
-  case STATIC: {
-    switch (auto const root_t = lua_getfield(state, -1, "roots")) {
-    case LUA_TTABLE: {
-      auto const num_roots = lua_rawlen(state, -1);
-      auto roots_tbl = -1;
-      for (auto i = 1; i <= num_roots; ++i) {
-        auto const value_t = lua_geti(state, roots_tbl, i);
-        if (value_t != LUA_TSTRING) {
-          throw unexpected_type("roots[i]", LUA_TSTRING, value_t);
-        }
-        roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
-        --roots_tbl;
-      }
-      lua_pop(state, static_cast<int>(num_roots) + 1);
-    } break;
-    case LUA_TNIL:
-      throw missing_field("roots");
-    default:
-      throw unexpected_type("roots", LUA_TTABLE, root_t);
-    }
-  } break;
-  case DYNAMIC:
-    std::cerr << "Not currently implimented" NL;
-    std::terminate();
-    break;
-  }
-
+      links(), sys_links(), interpreter(nullptr), compiler(), name(),
+      install_dir() {
   switch (auto const compiler_t = lua_getfield(state, -1, "compiler")) {
   case LUA_TTABLE:
     compiler = Module::parse_compiler_table(state);
@@ -1459,6 +1565,59 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     return this->append_predefined_macros(compiler_command);
   });
 
+  switch (auto const name_t = lua_getfield(state, -1, "name")) {
+  case LUA_TSTRING:
+    name = lua_tolstring(state, -1, nullptr);
+    break;
+  case LUA_TNIL:
+    throw missing_field("name");
+  default:
+    throw unexpected_type("name", LUA_TSTRING, name_t);
+  }
+  lua_pop(state, 1);
+
+  if (type == Module::EXE) {
+    roots.reserve(1);
+    switch (auto const root_t = lua_getfield(state, -1, "root")) {
+    case LUA_TSTRING:
+      roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
+      break;
+    case LUA_TNIL:
+      throw missing_field("root");
+    default:
+      throw unexpected_type("root", LUA_TSTRING, root_t);
+    }
+    lua_pop(state, 1);
+  } else if (type == STATIC || type == DYNAMIC) {
+    // TODO: maybe we could support some kind of regex, like allowing *.c, i
+    // don't like this because i think it'll lead to people including more than
+    // they should, but it seems easier than writing a bunch of includes for
+    // older projects that just give you everything *cough cough lua*
+    switch (auto const root_t = lua_getfield(state, -1, "roots")) {
+    case LUA_TTABLE: {
+      auto const num_roots = lua_rawlen(state, -1);
+      auto roots_tbl = -1;
+      for (auto i = 1; i <= num_roots; ++i) {
+        auto const value_t = lua_geti(state, roots_tbl, i);
+        if (value_t != LUA_TSTRING) {
+          throw unexpected_type("roots[i]", LUA_TSTRING, value_t);
+        }
+        roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
+        --roots_tbl;
+      }
+      lua_pop(state, static_cast<int>(num_roots) + 1);
+    } break;
+    case LUA_TNIL:
+      throw missing_field("roots");
+    default:
+      throw unexpected_type("roots", LUA_TTABLE, root_t);
+    }
+  } else {
+    std::cerr << "Damn I fucked something up and am not handling this case... "
+                 "please report this bug :)\n";
+    std::terminate();
+  }
+
   switch (auto const install_dir_t = lua_getfield(state, -1, "install_dir")) {
   case LUA_TSTRING:
     install_dir = (root / lua_tolstring(state, -1, nullptr)).string();
@@ -1471,23 +1630,29 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   lua_pop(state, 1);
 
   // TODO: make this a relative path
-  switch (type) {
-  case Module_t::EXE: {
+  if (type == Module::EXE) {
     includes.reserve(1);
-    auto const tmp = fs::canonical(roots[0]).parent_path();
-    includes.push_back(tmp);
-  } break;
-  case Module_t::STATIC:
+    [[likely]]
+    if (roots[0].has_parent_path()) {
+      includes.push_back(fs::canonical(roots[0]).parent_path());
+    } else {
+      includes.push_back(previous_path);
+    }
+  } else if (type == STATIC || type == DYNAMIC) {
     includes.reserve(roots.size());
     for (auto const &root : roots) {
-      auto const found = std::find(includes.begin(), includes.end(),
-                                   fs::canonical(root.parent_path()));
+      auto const parent_p = [&]() -> fs::path {
+        if (root.has_parent_path()) {
+          return fs::canonical(previous_path / root.parent_path());
+        } else {
+          return previous_path;
+        }
+      }();
+      auto const found = std::find(includes.begin(), includes.end(), parent_p);
       if (found != includes.end()) {
-        includes.push_back(fs::canonical(root.parent_path()));
+        includes.push_back(parent_p);
       }
     }
-  case Module_t::DYNAMIC:
-    break;
   }
 
   switch (auto const include_t = lua_getfield(state, -1, "include")) {
@@ -1513,17 +1678,15 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
   lua_pop(state, 1);
 
-  // TODO: rework this, only use it for system/library includes that we
-  // (luamake) doesn't control
   switch (auto const linking_t = lua_getfield(state, -1, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
-    linking.reserve(len);
+    sys_links.reserve(len);
     auto linking_idx = -1;
     for (auto i = 1; i <= len; ++i) {
       switch (auto const value_t = lua_geti(state, linking_idx, i)) {
       case LUA_TSTRING:
-        linking.push_back(lua_tolstring(state, -1, nullptr));
+        sys_links.push_back(lua_tolstring(state, -1, nullptr));
         break;
       default:
         throw unexpected_type("linking[i]", LUA_TSTRING, value_t);
@@ -1543,6 +1706,8 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   case Module_t::EXE:
     break;
   // TODO: make sure this isn't nil
+  case Module_t::DYNAMIC:
+    [[fallthrough]];
   case Module_t::STATIC: {
     switch (auto const header_t = lua_getfield(state, -1, "headers")) {
     case LUA_TTABLE: {
@@ -1567,8 +1732,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     }
     lua_pop(state, 1);
   } break;
-  case Module_t::DYNAMIC:
-    break;
   }
 
   auto &&[macros, def_macros] = macros_res.get();
@@ -1597,7 +1760,8 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     throw unexpected_type("macros", LUA_TTABLE, macro_t);
   }
 
-  interpreter = pp::Interpreter(std::move(macros), std::move(def_macros));
+  interpreter = std::make_unique<pp::Interpreter>(std::move(macros),
+                                                  std::move(def_macros));
   res.get();
 }
 
@@ -1605,6 +1769,8 @@ auto Module::DepTree::gen_dep_tree(Module const &mod,
                                    pp::Interpreter &interpreter,
                                    ModIndex const idx) -> void {
   auto const parent = mods.get_module_path(idx).parent_path();
+  // NOTE: (Winter-On-Mars) because we are only pushing back the roots, if there
+  // is an issue with one of the header files, we don't see it(?)
   for (auto const &root : mod.roots) {
     append_dep(mod, interpreter, idx, parent, root, DepTree::NIL_IDX);
   }
@@ -1614,28 +1780,30 @@ auto Module::format_includes() const -> std::string {
   auto include_func = [](auto &&e, auto &&next) {
     return std::format("{} -I{}", e, next.string());
   };
-  auto dep_func = [](auto &&e, auto &&next) {
-    return std::format("{} -iquote {}", e, next.parent_path().string());
-  };
   auto sys_func = [](auto &&e, auto &&next) {
     return std::format("{} -isystem {}", e, next.string());
   };
   return std::accumulate(includes.cbegin(), includes.cend(), std::string(),
                          include_func) +
-         std::accumulate(dep_includes.cbegin(), dep_includes.cend(),
-                         std::string(), dep_func) +
          std::accumulate(sys_includes.cbegin(), sys_includes.cend(),
                          std::string(), sys_func);
 }
 
 auto Module::format_links() const -> std::string {
-  // when we add dynamic library support, we'll have to worry about the -L
-  // flag and shit
+  fn_print();
   auto res = std::string();
-  res.reserve(256); // idk random number can def be optimized :)
-  for (auto const &path : linking) {
-    res += std::format("{} ", path.string());
-  }
+  res.reserve(512);
+  res += std::accumulate(
+      links.cbegin(), links.cend(), std::string(), [](auto &&a, auto &&next) {
+        auto const parent_path = next.parent_path();
+        return std::format("{} -Wl,-rpath={} {}", a, parent_path.string(),
+                           next.string());
+      });
+
+  res += std::accumulate(sys_links.cbegin(), sys_links.cend(), std::string(),
+                         [](auto &&a, auto &&next) {
+                           return std::format("{} -l{}", a, next.string());
+                         });
   return res;
 }
 
@@ -1729,7 +1897,6 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
                     "Expected type of argument to `new_exe` to be of type "
                     "table, found [%s]",
                     lua_typename(ret_t));
-
   try {
     auto exe_mod =
         builtins::Module(builtins::Module::EXE, state, previous_path);
@@ -1756,11 +1923,35 @@ auto Builder::new_static(lua_State *state) noexcept -> int {
                     "Expected type of argument to `new_static` to be of type "
                     "table, found [%s]",
                     lua_typename(ret_t));
-
   try {
     auto static_mod =
         builtins::Module(builtins::Module::STATIC, state, previous_path);
+    auto const index =
+        mods.append_module_with_path(previous_path, std::move(static_mod));
+    lua_pushinteger(state, static_cast<lua_Integer>(index));
+    return 1;
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
 
+auto Builder::new_dynamic(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 2, new_dynamic);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `new_dynamic` to be of type "
+                    "table, found [%s]",
+                    lua_typename(ret_t));
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected type of argument to `new_dynamic` to be of type "
+                    "table, found [%s]",
+                    lua_typename(ret_t));
+  try {
+    auto static_mod =
+        builtins::Module(builtins::Module::DYNAMIC, state, previous_path);
     auto const index =
         mods.append_module_with_path(previous_path, std::move(static_mod));
     lua_pushinteger(state, static_cast<lua_Integer>(index));
@@ -1780,7 +1971,6 @@ auto Builder::install_exe(lua_State *state) noexcept -> int {
                     "Expected type of argument to `install_exe` to be of type "
                     "integer, found [%s]",
                     lua_typename(ret_t));
-
   try {
     return install_impl<builtins::Module::Module_t::EXE>(state);
   } catch (std::exception const &e) {
@@ -1798,9 +1988,98 @@ auto Builder::install_static(lua_State *state) noexcept -> int {
                     "Expected type of argument to `install_static` "
                     "to be of type integer, found [%s]",
                     lua_typename(ret_t));
-
   try {
     return install_impl<Module::Module_t::STATIC>(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
+auto Builder::install_dynamic(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_dynamic);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+                    "Expected type of argument to `install_dynamic` "
+                    "to be of type integer, found [%s]",
+                    lua_typename(ret_t));
+  try {
+    return install_impl<Module::Module_t::DYNAMIC>(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
+// TODO: figure out an actual scheme for this, currently the expecting.includes
+// value is an array, but we just grab the first element and use that as the
+// includes section, most of the time when you have vendored code there will
+// just be an `include` dir that you include, so we should probably change this
+// back to just be a string(?), will have to look at how other projects are set
+// up to see if that's a good idea
+auto Builder::install_dep(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 2, install_dep);
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected type of argument to `install_dep` "
+                    "to be of type table, found [%s]",
+                    lua_typename(ret_t));
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `install_dep` "
+                    "to be of type table, found [%s]",
+                    lua_typename(ret_t));
+  try {
+    auto const where = get_required_field<std::string>(state, -1, "where");
+    auto const threads = get_required_field<size_t>(state, -1, "threads");
+
+    // NOTE: the `&&` is included when building the string
+    auto command_str =
+        std::format("cd {} {}", where,
+                    flatten_lua_array(state, -1, std::string_view{"commands"},
+                                      [](std::string_view const str) {
+                                        return std::format(" && {}", str);
+                                      }));
+
+    LUA_PUSH_REQUIRED_FIELD(state, -1, "expecting", LUA_TTABLE);
+
+    auto const type_str =
+        get_required_field<std::string_view>(state, -1, "type");
+
+    if (type_str == std::string_view{"dynamic"}) {
+      auto shared_obj = std::format(
+          "{}/{}", where, get_required_field<std::string>(state, -2, "so"));
+      auto includes = [&]() {
+        auto tmp = concat_lua_array(state, -2, "includes");
+        auto res = std::vector<fs::path>();
+        res.reserve(tmp.size());
+        for (auto i = size_t{}; i < tmp.size(); ++i)
+          res.push_back(std::format("{}/{}", where, tmp[i]));
+        return res;
+      }();
+      auto dyn_mod = builtins::Module::from_external(
+          Module::DYNAMIC, std::move(shared_obj), std::move(includes));
+      auto const index =
+          mods.append_module_with_path(previous_path, std::move(dyn_mod));
+      lua_pushinteger(state, static_cast<lua_Integer>(index));
+      // TODO: signal to other modules that the deps are not yet built
+      luamake::threads.add_task(
+          [threads, command_str = std::move(command_str)]() {
+            ::luamake::threads.reserve_threads(threads);
+            os::call(command_str);
+            ::luamake::threads.give_back_threads(threads);
+          });
+      return 1;
+    } else if (type_str == std::string_view{"static"}) {
+      TODO_ERROR();
+    } else if (type_str == std::string_view{"executable"}) {
+      TODO_ERROR();
+    } else {
+      TODO_ERROR();
+    }
   } catch (std::exception const &e) {
     lua_pushstring(state, e.what());
     return lua_error(state);
@@ -1826,7 +2105,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << (lua_toboolean(state, -1) ? "true" : "false");
     break;
   case LUA_TTABLE: {
-    std::cout << "{" NL;
+    std::cout << "{" LM_NL;
     auto const tbl_idx = lua_absindex(state, -1);
     for (lua_pushnil(state); lua_next(state, tbl_idx) != 0;) {
       std::cout << indents(depth);
@@ -1853,7 +2132,7 @@ auto dump_impl(lua_State *state, unsigned int const depth) noexcept -> void {
     std::cout << lua_typename(type);
     break;
   }
-  std::cout << NL;
+  std::cout << LM_NL;
 }
 
 auto Builder::clang(lua_State *state) noexcept -> int {
@@ -1903,6 +2182,46 @@ auto Builder::clang_bare(lua_State *state) noexcept -> int {
   } catch (...) {
     lua_pushstring(state,
                    "An unknown exception was throw in the clang_bare function");
+    return lua_error(state);
+  }
+}
+
+auto Builder::cmake(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, cmake);
+  LUA_ASSERT_FORMAT(state, arg_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected table to cmake function, found [%s]",
+                    lua_typename(arg_t));
+  try {
+    // TODO: rewrite this function, so that we just take the input, and modify
+    // the strings, instead of making a new table and adding to it
+    auto const len = luaL_len(state, -1);
+    lua_createtable(state, static_cast<int>(len), 0);
+
+    for (auto i = lua_Integer{1}; i <= len; i++) {
+      auto const val_t = lua_geti(state, -2, i);
+      switch (val_t) {
+      case LUA_TSTRING: {
+        auto str_size = size_t{};
+        auto const str = lua_tolstring(state, -1, &str_size);
+        lua_pushfstring(state, "cmake %s", str);
+        lua_seti(state, -3, i);
+        lua_pop(state, 1); // pop ret[i]
+      } break;
+      default:
+        throw std::runtime_error(
+            std::format("while traversing cmake argument array at [{}], "
+                        "expected string, found {}",
+                        i, lua_typename(val_t)));
+      }
+    }
+
+    return 1;
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state,
+                   "An unknown exception was throw in the cmake function");
     return lua_error(state);
   }
 }
@@ -2022,30 +2341,47 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
     // libs) link a static to a dynamic lib, but we have to make sure that the
     // static lib is compiled with pic (or something like that look into it),
     // etc
-    auto const lib_to_be_linked = ModIndex(lua_tointeger(state, -2));
-    // TODO: rename this
-    auto const lib_getting_diddled = ModIndex(lua_tointeger(state, -1));
+    auto const lib_l = ModIndex(lua_tointeger(state, -2));
+    auto const lib_d = ModIndex(lua_tointeger(state, -1));
 
-    if (!mods.has_module_at(lib_to_be_linked)) {
+    if (!mods.has_module_at(lib_l)) {
       throw std::runtime_error("link_lib: Attempting to link an "
                                "unknown module to another module");
-    } else if (!mods.has_module_at(lib_getting_diddled)) {
+    } else if (!mods.has_module_at(lib_d)) {
       throw std::runtime_error(
           "link_lib: Attempting to link a known module to an unknown module");
     }
 
-    auto const &mod_linked = mods.module_at(lib_to_be_linked);
-    auto &mod_d = mods.module_at(lib_getting_diddled);
+    auto const &mod_l = mods.module_at(lib_l);
+    if (!(mod_l.type == Module::STATIC || mod_l.type == Module::DYNAMIC)) {
+      TODO_ERROR();
+    }
+    auto &mod_d = mods.module_at(lib_d);
 
-    // this should be correct, basically stolen from the install_static
-    // function, there shouldn't be any issues, because the install_static
-    // function just dumps all the headers in the same out directory
-    mod_d.dep_includes.push_back(
-        mods.get_module_path(lib_to_be_linked) /
-        fs::path(
-            std::format("{}/{}", mod_linked.install_dir, mod_linked.name)));
-    mod_d.linking.push_back(fs::path(mod_linked.install_dir) /
-                            ("lib" + mod_linked.name + ".a"));
+    if (!mod_l.tree.is_empty()) {
+      mod_d.includes.push_back(mods.get_module_path(lib_l) / mod_l.install_dir);
+      add_unique(mod_d.sys_links, mod_l.sys_links);
+    } else {
+      // we shouldn't need to add_unique, because they should always be unique,
+      // but this is fine
+      add_unique(mod_d.sys_includes, mod_l.sys_includes);
+    }
+    // TODO: we should probably just have an output name that we can use instead
+    // of this
+    if (mod_l.type == Module::STATIC) {
+      mod_d.links.push_back(fs::path(mod_l.install_dir) /
+                            ("lib" + mod_l.name + ".a"));
+    } else {
+      if (!mod_l.tree.is_empty()) {
+        // TODO: see todo around 640 about platform dependent file names
+        mod_d.links.push_back(fs::path(mod_l.install_dir) /
+                              ("lib" + mod_l.name + ".so"));
+      }
+    }
+    // link all the stuff that the other mod also needs
+    // TODO: idk how we should check that the path is correct, because i'm
+    // currently using this for system includes (-lm, -llua, -lstdc++, etc)?
+    add_unique(mod_d.links, mod_l.links);
 
     return 0;
   } catch (std::exception const &e) {
@@ -2079,11 +2415,36 @@ auto Builder::get_os(lua_State *state) noexcept -> int {
                          "bsd"
 #endif
     );
-    (void)lua_pushstring(state, "");
     return 1;
   } catch (...) {
     (void)lua_pushstring(
         state, "An unknown exception was encountered in the get_os function");
+    return lua_error(state);
+  }
+}
+
+auto Builder::build_type(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 0, build_type);
+  try {
+    switch (cl_options.built_t) {
+    case luamake::builtins::CLOptions::BuildType::dbg:
+      (void)lua_pushstring(state, "debug");
+      break;
+    case luamake::builtins::CLOptions::BuildType::rel:
+      (void)lua_pushstring(state, "release");
+      break;
+    case luamake::builtins::CLOptions::BuildType::dbg_w_rel:
+      (void)lua_pushstring(state, "debug_and_release");
+      break;
+    case luamake::builtins::CLOptions::BuildType::min_rel:
+      (void)lua_pushstring(state, "release_min");
+      break;
+    }
+    return 1;
+  } catch (...) {
+    (void)lua_pushstring(
+        state,
+        "An unknown exception was encountered in the build_type function");
     return lua_error(state);
   }
 }
@@ -2123,6 +2484,80 @@ auto Builder::install_static_dummy(lua_State *state) noexcept -> int {
   }
 }
 
+auto Builder::install_dynamic_dummy(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 1, install_dynamic)
+  LUA_ASSERT_FORMAT(
+      state, ret_t, lua_type(state, -1), LUA_TNUMBER,
+      "Expected type of argument to `install_dynamic` to be of type "
+      "integer, found [%s]",
+      lua_typename(ret_t));
+  try {
+    return install_dummy_impl<builtins::Module::Module_t::DYNAMIC>(state);
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
+auto Builder::install_dep_dummy(lua_State *state) noexcept -> int {
+  LUA_EXPECTED_ARGUMENTS(state, 2, install_dep)
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -2), LUA_TTABLE,
+                    "Expected type of argument to `install_dep` "
+                    "to be of type table, found [%s]",
+                    lua_typename(ret_t));
+  LUA_ASSERT_FORMAT(state, ret_t, lua_type(state, -1), LUA_TTABLE,
+                    "Expected type of argument to `install_dep` "
+                    "to be of type table, found [%s]",
+                    lua_typename(ret_t));
+  try {
+    auto const where = get_required_field<std::string>(state, -1, "where");
+
+    LUA_PUSH_REQUIRED_FIELD(state, -1, "expecting", LUA_TTABLE);
+
+    auto const type_str =
+        get_required_field<std::string_view>(state, -1, "type");
+
+    if (type_str == std::string_view{"dynamic"}) {
+      auto shared_obj = std::format(
+          "{}/{}", where, get_required_field<std::string>(state, -2, "so"));
+      // TODO: have this be a vec<fs::path>
+      auto includes = [&]() {
+        auto tmp = concat_lua_array(state, -2, "includes");
+        auto res = std::vector<fs::path>();
+        res.reserve(tmp.size());
+        for (auto i = size_t{}; i < tmp.size(); ++i)
+          res.push_back(std::format("{}/{}", where, tmp[i]));
+        return res;
+      }();
+      auto dyn_mod = builtins::Module::from_external(
+          Module::DYNAMIC, std::move(shared_obj), std::move(includes));
+      // this seems to break things, because it should be 'where', but we
+      // haven't introduced that to the LakeModules system, so it doesn't know
+      // where it is
+      // TODO: fix that, seems like it should work
+      auto const index =
+          mods.append_module_with_path(previous_path, std::move(dyn_mod));
+      lua_pushinteger(state, static_cast<lua_Integer>(index));
+      return 1;
+    } else if (type_str == std::string_view{"static"}) {
+      TODO_ERROR();
+    } else if (type_str == std::string_view{"executable"}) {
+      TODO_ERROR();
+    } else {
+      TODO_ERROR();
+    }
+  } catch (std::exception const &e) {
+    lua_pushstring(state, e.what());
+    return lua_error(state);
+  } catch (...) {
+    lua_pushstring(state, "Unfortunately an error occured");
+    return lua_error(state);
+  }
+}
+
 auto Runner::run(lua_State *state) noexcept -> int {
   LUA_EXPECTED_ARGUMENTS(state, 1, run);
   LUA_ASSERT_FORMAT(
@@ -2136,8 +2571,7 @@ auto Runner::run(lua_State *state) noexcept -> int {
                "Expected type of exe.path to be string [in function Run]");
     auto exe_path = std::string(lua_tolstring(state, -1, nullptr));
 
-    lua_getfield(state, -2, "args");
-    switch (auto t = lua_type(state, -1)) {
+    switch (auto const t = lua_getfield(state, -2, "args")) {
     case LUA_TNIL:
       // nothing to do either type is explicitly nil, or field is undefined so
       // which is fine bc it's an optional field
@@ -2166,10 +2600,10 @@ auto Runner::run(lua_State *state) noexcept -> int {
       return lua_error(state);
     }
 
-    std::cout << "[" << exe_path << "]" NL;
+    std::cout << "[" << exe_path << "]" LM_NL;
     std::cout.flush();
 
-    os_call(exe_path);
+    os::call(exe_path);
 
     return 0;
   } catch (std::exception const &e) {
@@ -2204,44 +2638,31 @@ auto dump(lua_State *state) noexcept -> int {
 }
 
 auto make_builder_obj(lua_State *state) noexcept -> void {
-  lua_createtable(state, 0, 11);
-
-  lua_pushcfunction(state, &Builder::clang);
-  lua_setfield(state, -2, "clang");
-
-  lua_pushcfunction(state, &Builder::gcc);
-  lua_setfield(state, -2, "gcc");
-
-  lua_pushcfunction(state, &Builder::gcc_bare);
-  lua_setfield(state, -2, "gcc_bare");
-
-  lua_pushcfunction(state, &Builder::clang_bare);
-  lua_setfield(state, -2, "clang_bare");
-
-  lua_pushcfunction(state, &Builder::new_exe);
-  lua_setfield(state, -2, "new_exe");
-
-  lua_pushcfunction(state, &Builder::new_static);
-  lua_setfield(state, -2, "new_static");
-
-  lua_pushcfunction(state, &Builder::install_exe);
-  lua_setfield(state, -2, "install_exe");
-
-  lua_pushcfunction(state, &Builder::install_static);
-  lua_setfield(state, -2, "install_static");
-
-  lua_pushcfunction(state, &Builder::require);
-  lua_setfield(state, -2, "requires");
-
-  lua_pushcfunction(state, &Builder::link_lib);
-  lua_setfield(state, -2, "link_lib");
-
-  lua_pushcfunction(state, &Builder::get_os);
-  lua_setfield(state, -2, "get_os");
+  auto constexpr methods = std::array<luaL_Reg, 16>{{
+      {"clang", &Builder::clang},
+      {"clang_bare", &Builder::clang_bare},
+      {"gcc", &Builder::gcc},
+      {"gcc_bare", &Builder::gcc_bare},
+      {"cmake", &Builder::cmake},
+      {"new_exe", &Builder::new_exe},
+      {"new_static", &Builder::new_static},
+      {"new_dynamic", &Builder::new_dynamic},
+      {"install_exe", &Builder::install_exe},
+      {"install_static", &Builder::install_static},
+      {"install_dynamic", &Builder::install_dynamic},
+      {"install_dep", &Builder::install_dep},
+      {"requires", &Builder::require},
+      {"link_lib", &Builder::link_lib},
+      {"get_os", &Builder::get_os},
+      {"build_type", &Builder::build_type},
+  }};
+  lua_createtable(state, 0, methods.size());
+  for (auto &&[name, func] : methods) {
+    lua_pushcfunction(state, func);
+    lua_setfield(state, -2, name);
+  }
 
   previous_path = fs::current_path();
-
-  // TODO: add the functions install_dynamic
 }
 
 auto make_runner_obj(lua_State *state) noexcept -> void {
@@ -2252,46 +2673,33 @@ auto make_runner_obj(lua_State *state) noexcept -> void {
 }
 
 auto make_builder_dummy(lua_State *state) noexcept -> void {
-  lua_createtable(state, 0, 11);
-
-  lua_pushcfunction(state, &Builder::clang);
-  lua_setfield(state, -2, "clang");
-
-  lua_pushcfunction(state, &Builder::gcc);
-  lua_setfield(state, -2, "gcc");
-
-  lua_pushcfunction(state, &Builder::gcc_bare);
-  lua_setfield(state, -2, "gcc_bare");
-
-  lua_pushcfunction(state, &Builder::clang_bare);
-  lua_setfield(state, -2, "clang_bare");
-
-  lua_pushcfunction(state, &Builder::new_exe);
-  lua_setfield(state, -2, "new_exe");
-
-  lua_pushcfunction(state, &Builder::new_static);
-  lua_setfield(state, -2, "new_static");
-
-  lua_pushcfunction(state, &Builder::install_exe_dummy);
-  lua_setfield(state, -2, "install_exe");
-
-  lua_pushcfunction(state, &Builder::install_static_dummy);
-  lua_setfield(state, -2, "install_static");
-
-  lua_pushcfunction(state, &Builder::require);
-  lua_setfield(state, -2, "requires");
-
-  lua_pushcfunction(state, &Builder::link_lib);
-  lua_setfield(state, -2, "link_lib");
-
-  lua_pushcfunction(state, &Builder::get_os);
-  lua_setfield(state, -2, "get_os");
+  auto constexpr methods = std::array<luaL_Reg, 16>{{
+      {"clang", &Builder::clang},
+      {"clang_bare", &Builder::clang_bare},
+      {"gcc", &Builder::gcc},
+      {"gcc_bare", &Builder::gcc_bare},
+      {"cmake", &Builder::cmake},
+      {"new_exe", &Builder::new_exe},
+      {"new_static", &Builder::new_static},
+      {"new_dynamic", &Builder::new_dynamic},
+      {"install_exe", &Builder::install_exe_dummy},
+      {"install_static", &Builder::install_static_dummy},
+      {"install_dynamic", &Builder::install_dynamic_dummy},
+      {"install_dep", &Builder::install_dep_dummy},
+      {"requires", &Builder::require},
+      {"link_lib", &Builder::link_lib},
+      {"get_os", &Builder::get_os},
+      {"build_type", &Builder::build_type},
+  }};
+  lua_createtable(state, 0, methods.size());
+  for (auto &&[name, func] : methods) {
+    lua_pushcfunction(state, func);
+    lua_setfield(state, -2, name);
+  }
 
   // idk, we're expecting you to be calling luamake in the same path the
   // luamake.lua file is in
   previous_path = fs::current_path();
-
-  // TODO: add the functions install_dynamic
 }
 
 auto operator<<(std::ostream &out, ModIndex const idx) noexcept
@@ -2301,8 +2709,9 @@ auto operator<<(std::ostream &out, ModIndex const idx) noexcept
 }
 
 LakeModules::LakeModules() noexcept
-    : mods_cap(0), paths_cap(0), num_mods(0), num_paths(0), states(nullptr),
-      compiled_files(nullptr), mods(nullptr), luamake_paths(nullptr) {}
+    : mods_cap(0), num_mods(0), states(nullptr), compiled_files(nullptr),
+      mods(nullptr), paths_cap(0), num_paths(0), luamake_paths(nullptr),
+      arena(LM_EXPR_ALLOC_SIZE) {}
 
 auto LakeModules::init(size_t const cap) -> void {
   mods_cap = static_cast<uint>(cap);
@@ -2375,7 +2784,7 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
   auto &lof = compiled_files[idx.mods];
   auto const &mod = mods[idx.mods];
 #ifdef DEBUG_MOD
-  std::cout << DBG "[pushing back]" NORMAL
+  std::cout << LM_HELP "[pushing back]" LM_NORMAL
             << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
             << " to " << idx << std::endl;
 #endif // DEBUG_MOD
@@ -2448,7 +2857,7 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
       }
     }();
 #ifdef DEBUG_MOD
-    std::cout << DBG "[pushing back]" NORMAL
+    std::cout << LM_HELP "[pushing back]" LM_NORMAL
               << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, fname)
               << " to " << mod_idx << std::endl;
 #endif // DEBUG_MOD
@@ -2456,6 +2865,12 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
         std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname));
   }
   return files_to_compile;
+}
+
+auto LakeModules::init_allocator() noexcept -> void { arena.init(); }
+
+auto LakeModules::get_allocator() noexcept -> allocator::Page & {
+  return arena;
 }
 
 auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
@@ -2549,26 +2964,27 @@ auto LakeModules::resize_paths() -> void {
 
 #ifdef DEBUG_MOD
 auto LakeModules::dump_paths(std::ostream &out) const noexcept -> void {
-  out << "modules.paths = {" NL;
+  out << "modules.paths = {" LM_NL;
   for (auto i = uint{0}; i < num_paths; ++i) {
-    out << "\t[" << i << "][" << luamake_paths[i].string() << "]" NL;
+    out << "\t[" << i << "][" << luamake_paths[i].string() << "]" LM_NL;
   }
-  out << "}" NL;
+  out << "}" LM_NL;
   out.flush();
 }
 
 auto LakeModules::dump_modules(std::ostream &out) const noexcept -> void {
-  out << "modules.mods = {" NL;
+  out << "modules.mods = {" LM_NL;
   for (auto i = uint{}; i < num_mods; ++i) {
     out << '[' << i << "] {";
     mods[i].display(out);
     out << '}';
   }
-  out << "}" NL;
+  out << "}" LM_NL;
   out.flush();
 }
 #endif // DEBUG_MOD
-
 } // namespace builtins
 } // namespace luamake
 #undef LUA_ASSERT
+#undef LUA_ASSERT_FORMAT
+#undef LUA_EXPECTED_ARGUMENTS

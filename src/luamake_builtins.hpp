@@ -2,21 +2,22 @@
 #define __LUAMAKE_BUILTINS_HPP
 
 #include "common.hpp"
+#include "luamake_allocator.hpp"
 #include "luamake_pre_ir.hpp"
 #include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
 
-#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 extern "C" {
-#include "lua.h"
+#include "lua/lua.h"
 }
 
 static_assert(LUA_VERSION_NUM == 504);
@@ -41,21 +42,35 @@ auto make_builder_dummy(lua_State *const) noexcept -> void;
 class Builder final {
   static auto new_exe(lua_State *) noexcept -> int;
   static auto new_static(lua_State *) noexcept -> int;
+  static auto new_dynamic(lua_State *) noexcept -> int;
+
   static auto install_exe(lua_State *) noexcept -> int;
   static auto install_static(lua_State *) noexcept -> int;
+  static auto install_dynamic(lua_State *) noexcept -> int;
+  // used when building programs that use other build systems, brings their
+  // system into ours
+  static auto install_dep(lua_State *) noexcept -> int;
 
   static auto clang(lua_State *) noexcept -> int;
   static auto gcc(lua_State *) noexcept -> int;
   static auto gcc_bare(lua_State *) noexcept -> int;
   static auto clang_bare(lua_State *) noexcept -> int;
 
+  static auto cmake(lua_State *) noexcept -> int;
+
   static auto require(lua_State *) noexcept -> int;
   static auto link_lib(lua_State *) noexcept -> int;
 
+  // TODO: we could probably move get_os to be a member on the build_ctx, rather
+  // than a function, idk about the build_type, but it's worth looking at if
+  // that's possible
   static auto get_os(lua_State *) noexcept -> int;
+  static auto build_type(lua_State *) noexcept -> int;
 
   static auto install_exe_dummy(lua_State *) noexcept -> int;
   static auto install_static_dummy(lua_State *) noexcept -> int;
+  static auto install_dynamic_dummy(lua_State *) noexcept -> int;
+  static auto install_dep_dummy(lua_State *) noexcept -> int; // ?
 
   friend auto make_builder_obj(lua_State *) noexcept -> void;
   friend auto make_builder_dummy(lua_State *) noexcept -> void;
@@ -124,6 +139,12 @@ static_assert([]() -> bool {
   return true;
 }());
 
+struct MacroStorage {
+  std::filesystem::path fpath;
+  pp::MacroMap macros;
+  pp::StringSet defs;
+};
+
 // TODO: add exported header field, and probably refactor this to be a tagged
 // union to discriminate between exe and library type modules
 // TODO: rewrite how the include files are processed to have a system header
@@ -137,9 +158,7 @@ struct Module final {
   };
   using enum Module_t;
 
-  /**
-   * @throws ModuleErr
-   */
+  // @throws std::runtime_error
   Module(Module_t &&type, lua_State *state,
          std::filesystem::path const &) noexcept(false);
 
@@ -169,9 +188,7 @@ struct Module final {
       MISC,
     };
 
-    /**
-     * @throws DepTreeErr | std::bad_alloc
-     */
+    // @throws std::runtime_error | std::bad_alloc
     [[nodiscard]]
     DepTree(size_t const num_files) noexcept(false);
     ~DepTree() noexcept = default;
@@ -183,18 +200,16 @@ struct Module final {
     DepTree(DepTree &&) = default;
     DepTree &operator=(DepTree &&) = default;
 
-    /**
-     * @throws
-     */
+    // @throws std::runtime_error
     auto gen_dep_tree(Module const &mod, pp::Interpreter &,
                       ModIndex const) noexcept(false) -> void;
 
 #ifdef DEBUG_MOD
     // displays the function in a pseudo json format
     auto display(std::ostream &out, unsigned int const depth = 0) const noexcept
-        -> void;
+        -> std::ostream &;
 
-    auto dump(std::ostream &out) const noexcept -> void;
+    auto dump(std::ostream &out) const noexcept -> std::ostream &;
 #endif // DEBUG_MOD
 
     [[nodiscard]]
@@ -222,6 +237,7 @@ struct Module final {
     }
 
     auto vectorize() const -> std::vector<std::string_view>;
+    auto is_empty() const noexcept -> bool;
 
   private:
     // a parallel array for all of the source files
@@ -241,20 +257,14 @@ struct Module final {
     std::unique_ptr<std::vector<uint>[]> deps;
     std::unique_ptr<size_t[]> hashes;
 
-    /**
-     * @throws std::bad_alloc
-     */
+    // @throws std::bad_alloc
     auto resize() noexcept(false) -> void;
-    /**
-     * @throws std::bad_alloc
-     */
+    // @throws std::bad_alloc
     auto reserve(size_t) noexcept(false) -> void;
 
     // basically making the assumption that a project isn't gonna have
     // size_t.max files in it, idk if that's even physically possible
     // so this *seems like* a valid assumption
-    // TODO: rename this to like invalid_idx or something, then we can use 0 as
-    // the root index, because that's where the root index *should* be
     static constexpr auto NIL_IDX = static_cast<size_t>(-1);
 
 #ifdef DEBUG_MOD
@@ -262,9 +272,7 @@ struct Module final {
                       unsigned int const idx) const noexcept -> void;
 #endif // DEBUG_MOD
 
-    /**
-     * @throws DepTreeErr
-     */
+    // @throws std::runtime_error
     auto append_dep(Module const &, pp::Interpreter &, ModIndex const,
                     std::filesystem::path const &,
                     std::filesystem::path const &, size_t const) -> void;
@@ -290,36 +298,47 @@ struct Module final {
   std::vector<std::filesystem::path> roots;
   std::vector<std::filesystem::path> headers;
   std::vector<std::filesystem::path> includes;
-  std::vector<std::filesystem::path> dep_includes;
   std::vector<std::filesystem::path> sys_includes;
-  std::vector<std::filesystem::path> linking;
-  // TODO: remove this from the module, it should just be on the stack or
-  // something
-  luamake::pp::Interpreter interpreter;
+  std::vector<std::filesystem::path> links;
+  std::vector<std::filesystem::path> sys_links;
+  // NOTE: we need to seperate this into the macros that are predefined, and
+  // those that are then defined in files, as an example we could have something
+  // like this
+  //   A
+  //  / \
+  // B   C
+  // if B defines `FOO`, and then C checks for `FOO`, then we should use a
+  // globally defined `FOO` and/or a `FOO` that was passed through the macros
+  // variable in the config rather than B's `FOO`
+  // TODO: move all macros to just be a part of a single hash map, treating
+  // `#define FOO` to just be `#define FOO ` with it's value being the empty
+  // string, because that's what happens when we need to do textual substitution
+  // then we can have a per file diff, in case the file #undef's a macro and/or
+  // redefines a macro
+  std::unique_ptr<pp::Interpreter> interpreter;
+  pp::StringMap<MacroStorage> macro_cache;
   // TODO: optimize this :)
   std::string compiler;
   std::string name;
   std::string install_dir;
 
+  static auto from_external(Module_t &&, std::string &&,
+                            std::vector<std::filesystem::path> &&) -> Module;
+
   Module() noexcept
-      : type(), tree(), roots(), headers(), includes(), sys_includes(),
-        linking(), interpreter({}, {}), compiler(), name(), install_dir() {}
+      : type(), tree(), roots(), headers(), includes(), sys_includes(), links(),
+        sys_links(), interpreter({}, {}), compiler(), name(), install_dir() {}
 
 #ifdef DEBUG_MOD
-  auto display(std::ostream &) const noexcept -> void;
+  auto display(std::ostream &) const noexcept -> std::ostream &;
 #endif // DEBUG_MOD
 
-  /**
-   * @throws CAPI
-   */
+  // @throws std::runtime_error
   auto append_include_paths(std::string const &) -> void;
-  /**
-   * @throws CAPI
-   */
+  // @throws std::runtime_error
   [[nodiscard]]
   auto append_predefined_macros(std::string const &)
-      -> std::pair<std::unordered_map<std::string, pp::Macro>,
-                   std::unordered_set<std::string>>;
+      -> std::pair<pp::MacroMap, pp::StringSet>;
 
   // TODO: update these to return FixedString
   auto format_includes() const -> std::string;
@@ -410,47 +429,60 @@ struct LakeModules final {
     return Iterator(ModIndex(0, num_mods), nullptr);
   }
 
+  auto init_allocator() noexcept -> void;
+  auto get_allocator() noexcept -> allocator::Page &;
+
 private:
   auto resize_mods() -> void;
   auto resize_paths() -> void;
 
-  // NOTE: we might need to switch to having a state lock for this class for
-  // when we resize, as otherwise we might invalidate some references, we might
-  // be able to have cap + 1 mtxs, and then use mtxs[cap] == state mtx,
-  // something that could help, or it might be more performant to just have the
-  // state mtx inline
+  // NOTE: we might be able to avoid having so many mutexs if we have some kind
+  // of std::atomic<T*>(?)
   uint mods_cap;
-  uint paths_cap;
-  // size_t cap;
-  // TODO: probably have 2 uints for the num_lake_paths, and for the modules
   uint num_mods;
-  uint num_paths;
-  // size_t size;
-  // TODO: test if it's better to just have all of these in an aos instead of
-  // this soa (multiarraylist) that it currently is
   std::unique_ptr<ModState[]> states;
   std::unique_ptr<std::mutex[]> mtxs;
   std::unique_ptr<std::atomic<size_t>[]> remaining_files;
   std::unique_ptr<std::vector<std::string>[]> compiled_files;
-  // NOTE: we could switch this to a list<module>, then switch the new_exe
-  // function to return a lightuserdata
   std::unique_ptr<Module[]> mods;
   // TODO: switch this to not have the luamake.lua in the path, i.e. just push
   // back the parent path
+  uint paths_cap;
+  uint num_paths;
   std::unique_ptr<std::filesystem::path[]> luamake_paths;
+
+  allocator::Page arena;
 
   friend CompilationPool;
 };
 extern LakeModules mods;
 
+// TODO: actually use these, i think only verbose is currently being used, and
+// it's not even being used that well :(
+// TODO: add cli parsing to all of these (i know there's those cli annotations
+// but they don't do anything, that would be great to set up as a part of the
+// build system? to have some command line parsing generated automatically)
 struct CLOptions final {
+  enum class BuildType : u8 { def, dbg = def, rel, dbg_w_rel, min_rel };
+  enum class ProjectType : u8 { executable, static_, dynamic };
+  enum class LoggingLevel : u8 { none, terminal, file };
+  // [[cli("--verbose", "-v")]]
   bool verbose = false;
-  // i would use size_t, but then compilers would yell at me about alignment,
-  // and i don't careeeeee
-  int8_t num_threads = -1;
+  // [[cli("--everything")]]
+  bool clean_everything = false;
+  // [[cli("--build-type=%s")]] ??
+  BuildType built_t = BuildType::def;
+  // [[cli("")]] ??
+  ProjectType proj_t = CLOptions::ProjectType::executable;
+  // [[cli("--no-cache")]]
+  bool cache = true; // when set to false it means we don't cache, used when
+                     // building a project that you're __sure__ you're only
+                     // going to build once (like if you got a binary from the
+                     // package manager), skips de/serialization
+  // [[cli("--num-threads=%zu")]] ??
+  size_t num_threads = std::thread::hardware_concurrency();
 };
 extern CLOptions cl_options;
 } // namespace builtins
 } // namespace luamake
-
 #endif

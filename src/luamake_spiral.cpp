@@ -245,9 +245,9 @@ template <> struct Serializer<builtins::Module> {
     span_serializer.serialize(mod.roots);
     span_serializer.serialize(mod.headers);
     span_serializer.serialize(mod.includes);
-    span_serializer.serialize(mod.dep_includes);
     span_serializer.serialize(mod.sys_includes);
-    span_serializer.serialize(mod.linking);
+    span_serializer.serialize(mod.links);
+    span_serializer.serialize(mod.sys_links);
 
     auto str_serializer = Serializer<std::string_view>(bytes);
     str_serializer.serialize(std::string_view{mod.compiler});
@@ -352,9 +352,9 @@ template <> struct Deserializer<builtins::Module> {
     mod.roots = vec_deserial.deserialize();
     mod.headers = vec_deserial.deserialize();
     mod.includes = vec_deserial.deserialize();
-    mod.dep_includes = vec_deserial.deserialize();
     mod.sys_includes = vec_deserial.deserialize();
-    mod.linking = vec_deserial.deserialize();
+    mod.links = vec_deserial.deserialize();
+    mod.sys_links = vec_deserial.deserialize();
 
     auto str_deserial = Deserializer<std::string>(bytes);
     mod.compiler = str_deserial.deserialize();
@@ -380,9 +380,8 @@ auto serialize(builtins::Module const &mod, std::filesystem::path const &path)
   outfile.write(cereal.bytes.buffer.get(), cereal.bytes.cur, 1);
   outfile.flush();
 #ifdef DEBUG
-  std::cout << std::format("serialized file [{}] with [{}] bytes" NL,
+  std::cout << std::format("serialized file [{}] with [{}] bytes" LM_NL,
                            path.string(), cereal.bytes.cur);
-
 #endif // DEBUG
 }
 
@@ -393,7 +392,7 @@ auto deserialize(fs::path const &path)
   if (!file)
     return std::format("unable to open serialization file [{}]", path.string());
 #ifdef DEBUG
-  std::cout << std::format("deserializing file [{}]" NL, path.string());
+  std::cout << std::format("deserializing file [{}]" LM_NL, path.string());
 #endif // DEBUG
   auto &&[size, buffer] = file.dump_content();
   auto bytes = ByteBuffer(std::move(buffer), size);

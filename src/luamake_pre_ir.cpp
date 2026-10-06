@@ -1,18 +1,23 @@
 #include "luamake_pre_ir.hpp"
 #include "common.hpp"
+#include "luamake_allocator.hpp"
 #include "luamake_string_manip.hpp"
 #include "luamake_strings.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <format>
 #include <functional>
 #include <initializer_list>
+#include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
-#include <ostream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -20,40 +25,44 @@
 #include <type_traits>
 #include <unistd.h>
 #include <unordered_map>
-#include <unordered_set>
-#include <variant>
+#include <utility>
 #include <vector>
 
 #ifdef DEBUG_CPP
-#include <iostream>
-#endif // DEBUG_CPP
+#include <ostream>
+#endif // DEBUG
 
 namespace fs = std::filesystem;
 
-using std::string, std::string_view, std::vector, std::unordered_map;
-
-template <class T> using ptr = std::unique_ptr<T>;
-
 using buffer_views = luamake::StringViews;
+
+template <class T, class... Values>
+concept any_of = (std::is_same_v<T, Values> || ...);
 
 // TODO: this system is over complicated, i think that we only really need 2
 // components instead of the 3 currently, a change to this would require a
 // complete rearchitecure of the code, and i'm too fucking exhaused to do that
 // rn, so i'll get to it in a later commit
 
-namespace luamake {
-namespace pp {
+// TODO: arena allocate this whole structure, specifically the ast stuff
+
+// TODO: test if using lazy parsing improves performance, it would allow us to
+// cut back on some memory useage, also short circuit when we come across a
+// macro, also we need to look into allowing #pragma once, and what that
+// semantically means
+
+namespace luamake::pp {
 namespace {
-auto constexpr skip_until_close_multicomment(string_view const buf, size_t i)
-    -> size_t {
-  while (i < buf.size() && i + 1 < buf.size()) {
-    if (buf[i] == '*' && buf[i + 1] == '/') {
-      return i + 2; // put buffer[i + 2 - 1] == '/'
-    } else {
-      ++i;
-    }
+auto constexpr skip_until_close_multicomment(std::string_view const str,
+                                             size_t i) -> size_t {
+  while (true) {
+    i = luamake::skip_until('/', str, i);
+    if (i >= str.size())
+      return str.npos; // error reporting happens elsewhere
+    if (str[i - 1] == '*')
+      return i;
+    ++i;
   }
-  return buf.size();
 }
 
 template <class T>
@@ -67,51 +76,33 @@ auto constexpr skip_until(size_t i, std::span<T> const buf, T delim) -> size_t {
   return i;
 }
 
-// TODO: refactor this, omg who fucking wrote this shit
-enum class delims : size_t {
-  LEXEME,
-  BINARY_FAIL,
-  ALLOWED_DECIMAL,
-  ALLOWED_HEX,
-  ALLOWED_OCTAL,
-  ALLOWED_BINARY,
-  ALPHA_SANS_HEX,
-  HEX_SANS_DIGITS,
-};
+struct Delimiters final {
+  static auto constexpr lexeme = std::string_view{" \t\n\r(){}[]+-*/<>=#"};
+  static auto constexpr allowed_dec = std::string_view{"0123456789"};
+  static auto constexpr allowed_hex =
+      std::string_view{"0123456789abcdefABCDEF"};
+  static auto constexpr allocwed_octal = std::string_view{"01234567"};
+  static auto constexpr allowed_bin = std::string_view{"01"};
+  static auto constexpr ws = std::string_view{" \t\n\r"};
+} delims;
 
-auto constexpr delims_list = std::array<string_view, 9>{{
-    string_view{" \t\n\r(){}[]+-*/<>=#"},                    // LEXEME
-    string_view{"23456789abcdefABCDEF"},                     // BINARY_FAIL
-    string_view{"0123456789"},                               // ALLOWED_DECIMAL
-    string_view{"0123456789abcdefABCDEF"},                   // ALLOWED_HEX
-    string_view{"01234567"},                                 // ALLOWED_OCTAL
-    string_view{"01"},                                       // ALLOWED_BINARY
-    string_view{"ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ"}, // ALPHA_SANS_HEX
-    string_view{"abcdefABCDEF"}                              // HEX_SANS_DIGITS
-}};
-auto constexpr delims_at(delims &&del) -> string_view {
-  return delims_list[static_cast<std::underlying_type_t<delims>>(del)];
+auto is_defined(std::string_view const str, pp::MacroMap const &macros,
+                pp::StringSet const &defs) noexcept -> bool {
+  return macros.find(str) != macros.end() ? true
+         : defs.find(str) != defs.end()   ? true
+                                          : false;
 }
 
-// TODO: extract this function out so we can use it in the ExprNode::eval
-// function
-auto is_defined(string const &str,
-                std::unordered_map<std::string, Macro> const &macros,
-                std::unordered_set<std::string> const &def_macros) noexcept
-    -> bool {
-  return macros.find(str) != macros.end()           ? true
-         : def_macros.find(str) != def_macros.end() ? true
-                                                    : false;
+template <class T>
+auto constexpr vec_append(std::vector<T> &vec, std::vector<T> &&span) noexcept
+    -> void {
+  vec.insert(vec.end(), span.begin(), span.end());
 }
-
-} // namespace
 
 struct Ast;
 struct AstNode;
 struct ElifNode;
 struct ElseNode;
-
-struct ExprNode;
 
 enum class ir_t : u8 {
   // preprocessor stuff
@@ -122,25 +113,29 @@ enum class ir_t : u8 {
   ELSE,
   ENDIF,
   DEFINE,
-  SPACE, // only used when dealing with #define directives
   INCLUDE,
   UNDEF,
   PRAGMA,
+  WARNING,
+
+  // tokens needed during parsing
+  SPACE,
   LANGLE,
-  RANGLE,
   QUOTE,
   LPAREN,
   RPAREN,
-  MACRO, // this is used when lexing, we leave the parsing to later
+  // this is used when lexing, we leave the parsing to later
+  MACRO,
   LIT_STRING,
   LEXEME,
+  VARIADIC
 };
 
 constexpr auto to_string(ir_t) -> std::string_view;
 
-// TODO: pack this even more, have something like #if node mean that there's
-// also a string in the lexemes array to be read that corresponds to that #if,
-// etc
+// TODO: there is some thread use-after-free with this struct, i assume when
+// we're building bigger projects, something is going out of scope, that we just
+// haven't caught when building smaller projects
 struct Lexer final {
   Lexer(Lexer const &) = delete;
   Lexer &operator=(Lexer const &) = delete;
@@ -151,14 +146,8 @@ struct Lexer final {
   std::vector<ir_t> types;
   std::vector<std::string> lexemes;
 
-  /**
-   * @throws Lex_Exc
-   */
   static auto lex(std::string_view const) -> Lexer;
 
-  /**
-   * @throws Lex_Exc
-   */
   auto ast() -> Ast;
 
 #ifdef DEBUG_CPP
@@ -169,7 +158,7 @@ struct Lexer final {
 
   constexpr auto matching(size_t, std::initializer_list<ir_t> &&) noexcept
       -> bool;
-  auto parse_define_args(string_view const, size_t) -> size_t;
+  auto parse_define_args(std::string_view const, size_t) -> size_t;
 #if 0
   auto expr(string_view const, size_t) -> size_t;
 #endif
@@ -182,16 +171,17 @@ struct Lexer final {
   auto handle_undef(size_t &, size_t &) -> std::unique_ptr<AstNode>;
   auto handle_include(size_t &, size_t &) -> std::unique_ptr<AstNode>;
   auto handle_pragma(size_t &, size_t &) -> std::unique_ptr<AstNode>;
+  auto handle_warning(size_t &, size_t &) -> std::unique_ptr<AstNode>;
 
-  auto handle_elif(size_t &, size_t &) -> ptr<ElifNode>;
-  auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
+  auto handle_elif(size_t &, size_t &) -> std::unique_ptr<ElifNode>;
+  auto handle_else(size_t &, size_t &) -> std::unique_ptr<ElseNode>;
 
-  auto produce_macro(string_view const, size_t) -> size_t;
-  auto produce_lexeme(string_view const, size_t) -> size_t;
+  auto produce_macro(std::string_view const, size_t) -> size_t;
+  auto produce_lexeme(std::string_view const, size_t) -> size_t;
   /**
    * @throws
    */
-  auto expect(size_t, ir_t, string_view = "") -> void;
+  auto expect(size_t, ir_t, std::string_view = "") -> void;
 
   /**
    * @throws
@@ -212,9 +202,6 @@ struct Lexer final {
   }
 };
 
-// TODO: optimize this struct, you can probably combine the Expr_t variable with
-// the binary/unary operator in some bit field being or'd, but for now i'm just
-// trying to get this working
 // TODO: look into integer overflow, it seems like if integer overflow happens,
 // everything is ignored this is based on the example
 // ```
@@ -222,27 +209,23 @@ struct Lexer final {
 // this is never run(?)
 // #endif
 // ```
-// TODO: also might be fucked with how we store integers, because we'll also
-// have to work with negative numbers, even though i feel like i don't really
-// see many negative numbers in macros
+// TODO: remove the defined and charlit variants, have those evaluated in the
+// expansion step, and add cases for the unary and binary where we can inline
+// the respective lhs, rhs, and un values if the value is an integer
 struct ExprNode final {
   struct Integer final {
     size_t i;
   };
-  struct Number final {
-    double f;
-  };
-  struct Defined final {
-    string str;
-  };
+  // NOTE: these strings are not required to be null terminated, be sure to use
+  // the right apis
   struct CharLit final {
-    string str;
+    std::string_view str;
   };
   struct Grouping final {
-    std::unique_ptr<ExprNode> expr;
+    ExprNode const *expr;
   };
   struct Binary final {
-    enum class Binary_t {
+    enum class Binary_t : u32 {
       PLUS,
       MINUS,
       TIMES,
@@ -254,55 +237,268 @@ struct ExprNode final {
       NEQ,
       EQ,
       AND,
-      OR
+      OR,
+      LSHIFT,
+      RSHIFT,
     };
-    using enum Binary_t;
-    std::unique_ptr<ExprNode> lhs;
-    std::unique_ptr<ExprNode> rhs;
-    Binary_t t;
+    ExprNode const *lhs;
+    ExprNode const *rhs;
   };
   struct Unary final {
-    enum class Unary_t { BANG, MINUS };
-    using enum Unary_t;
-    std::unique_ptr<ExprNode> un;
-    Unary_t t;
+    enum class Unary_t : u32 { BANG, MINUS };
+    ExprNode const *un;
   };
-  enum class Expr_t {
+  enum class Expr_t : u8 {
     INT,
-    NUMBER,
-    DEFINED,
     CHARLIT,
     GROUPING,
     BINARY,
     UNARY,
     NONE,
-  } t;
-  using enum Expr_t;
-  using Value = std::variant<Integer, Number, Defined, CharLit, Grouping,
-                             Binary, Unary, void *>;
-  Value val;
-  ExprNode() noexcept : t(NONE), val((void *)nullptr) {}
-  ExprNode(Expr_t &&type, Value &&val) noexcept
-      : t(type), val(std::move(val)) {}
-  ExprNode(ExprNode &&) = default;
-  ExprNode &operator=(ExprNode &&) = default;
+  };
+  ExprNode() noexcept;
+  // factory ctors
+  template <class T>
+    requires any_of<std::remove_cvref_t<T>, Integer, CharLit, Grouping>
+  static auto from(T expr) noexcept -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    using actual_t = std::remove_cvref_t<T>;
+    if constexpr (std::is_same_v<actual_t, Integer>) {
+      new (storage.data()) Expr_t(Expr_t::INT);
+      new (storage.data() + sizeof(size_t)) Integer(std::move(expr));
+    } else if constexpr (std::is_same_v<actual_t, CharLit>) {
+      new (storage.data()) Expr_t(Expr_t::CHARLIT);
+      if (expr.str.size() < SMALL_STRING_AMOUNT) {
+#ifdef DEBUG_CPP
+        std::cout << std::format("Making small string\n\tsize={}\n",
+                                 expr.str.size());
+#endif // DEBUG_CPP
+        storage[sizeof(Expr_t)] = 0xbe;
+        std::memcpy(storage.data() + sizeof(Expr_t) + 1, expr.str.data(),
+                    expr.str.size());
+      } else {
+#ifdef DEBUG_CPP
+        std::cout << std::format("Making big string\n\tsize={}\n",
+                                 expr.str.size());
+#endif // DEBUG_CPP
+        storage[sizeof(Expr_t)] = 0xff;
+        auto *size =
+            new (storage.data() + sizeof(size_t)) size_t{expr.str.size()};
+        // wtf am i doing
+        auto *buffer_ptr =
+            new (storage.data() + 2 * sizeof(size_t)) char *{new char[*size]{}};
+        std::memcpy(*buffer_ptr, expr.str.data(), *size);
+      }
+    } else if constexpr (std::is_same_v<actual_t, Grouping>) {
+      new (storage.data()) Expr_t(Expr_t::GROUPING);
+      if (expr.expr->expr_t() == Expr_t::INT) {
+        new (storage.data() + sizeof(Expr_t)) Interned(Interned::FIRST);
+        new (storage.data() + sizeof(size_t))
+            size_t{expr.expr->template to<Integer>().i};
+      } else {
+        new (storage.data() + sizeof(Expr_t)) Interned(Interned::NONE);
+        new (storage.data() + sizeof(size_t)) ExprNode const *(expr.expr);
+      }
+    } else if constexpr (std::is_same_v<actual_t, Binary> ||
+                         std::is_same_v<actual_t, Unary>) {
+      unreachable();
+    }
+    return ExprNode{storage};
+  }
 
-  static auto make_defined(string &&) noexcept -> ExprNode;
+  static auto from(Unary::Unary_t un_t, Integer i) -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::UNARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::FIRST);
+    new (storage.data() + 4) Unary::Unary_t(un_t);
+    new (storage.data() + sizeof(size_t)) size_t(i.i);
+    return ExprNode(storage);
+  }
+
+  static auto from(Unary::Unary_t un_t, ExprNode *node) -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::UNARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::NONE);
+    new (storage.data() + 4) Unary::Unary_t(un_t); // alignment
+    new (storage.data() + sizeof(size_t)) ExprNode *(node);
+    return ExprNode{storage};
+  }
+
+  static auto from(Binary::Binary_t bin_t, Integer lhs, Integer rhs)
+      -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::BINARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(static_cast<Interned>(
+        static_cast<u8>(Interned::FIRST) | static_cast<u8>(Interned::SECOND)));
+    new (storage.data() + 4) Binary::Binary_t(bin_t);
+    new (storage.data() + sizeof(size_t)) size_t{lhs.i};
+    new (storage.data() + 2 * sizeof(size_t)) size_t{rhs.i};
+    return ExprNode{storage};
+  }
+
+  static auto from(Binary::Binary_t bin_t, Integer lhs, ExprNode *rhs)
+      -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::BINARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::FIRST);
+    new (storage.data() + 4) Binary::Binary_t(bin_t);
+    new (storage.data() + sizeof(size_t)) size_t{lhs.i};
+    new (storage.data() + 2 * sizeof(size_t)) ExprNode *(rhs);
+    return ExprNode{storage};
+  }
+
+  static auto from(Binary::Binary_t bin_t, ExprNode *lhs, Integer rhs)
+      -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::BINARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::SECOND);
+    new (storage.data() + 4) Binary::Binary_t(bin_t);
+    new (storage.data() + sizeof(size_t)) ExprNode *(lhs);
+    new (storage.data() + 2 * sizeof(size_t)) size_t{rhs.i};
+    return ExprNode{storage};
+  }
+
+  static auto from(Binary::Binary_t bin_t, ExprNode *lhs, ExprNode *rhs)
+      -> ExprNode {
+    auto storage = std::array<u8, STORAGE_SIZE>({});
+    std::memset(storage.data(), 0, STORAGE_SIZE);
+    new (storage.data()) Expr_t(Expr_t::BINARY);
+    new (storage.data() + sizeof(Expr_t)) Interned(Interned::NONE);
+    // alignment
+    new (storage.data() + 4) Binary::Binary_t(bin_t);
+    new (storage.data() + sizeof(size_t)) ExprNode *(lhs);
+    new (storage.data() + 2 * sizeof(size_t)) ExprNode *(rhs);
+    if (lhs->expr_t() == Expr_t::INT) {
+      new (storage.data() + sizeof(Expr_t)) Interned(Interned::FIRST);
+      new (storage.data() + sizeof(size_t)) size_t{lhs->to<Integer>().i};
+    } else {
+      new (storage.data() + sizeof(size_t)) ExprNode *(lhs);
+    }
+    if (rhs->expr_t() == Expr_t::INT) {
+      storage[1] |= static_cast<u8>(Interned::SECOND);
+      new (storage.data() + 2 * sizeof(size_t)) size_t{rhs->to<Integer>().i};
+    } else {
+      new (storage.data() + 2 * sizeof(size_t)) ExprNode *(rhs);
+    }
+    return ExprNode{storage};
+  }
+  // this will do the memory management of deleting the tree recursively, making
+  // sure that it's raii compatable, we should probably think about switching
+  // this over to some sort of arena allocation strategy, and/or switching over
+  // to lazy parsing, which would probably help, because we could exit early in
+  // the case that the file is already checked, and it would allow us to support
+  // pragma once macros finally, and make this tool actually useful
+  // TODO: when we fully remove all of the string types, we can then get rid of
+  // this dtor, because all the actual memory management wil be handled by the
+  // page allocator
+  ~ExprNode() noexcept;
+
+  ExprNode(ExprNode &&) noexcept;
+  ExprNode &operator=(ExprNode &&) noexcept;
 
   ExprNode(ExprNode const &) = delete;
   ExprNode &operator=(ExprNode const &) = delete;
 
-  static auto constexpr readable_type(Expr_t) noexcept -> std::string_view;
-  /**
-   * @throws std::runtime_error
-   * (if a float is found)
-   */
-  static auto eval(string_view const,
-                   std::unordered_map<std::string, Macro> const &macros,
-                   std::unordered_set<std::string> const &def_macros) -> int;
+  static auto constexpr to_string(Expr_t) noexcept -> std::string_view;
+  auto eval() const -> int;
 
-  friend auto operator<<(std::ostream &, ExprNode const &) noexcept
-      -> std::ostream &;
+  auto expr_t() const noexcept -> Expr_t;
+  template <class T>
+    requires any_of<T, Binary::Binary_t, Unary::Unary_t, u32>
+  auto meta_data() const noexcept -> T {
+    // alignment
+    static_assert(sizeof(T) == 4);
+    auto res = T{};
+    std::memcpy(&res, storage.data() + 4, sizeof(T));
+    return res;
+  }
+
+  // restricted so that we're only converting the buffer into something that it
+  // should be
+  template <class T>
+    requires any_of<std::remove_cvref_t<T>, Integer, CharLit, Grouping, Binary,
+                    Unary>
+  auto constexpr to() const noexcept -> T {
+    using actual_t = std::remove_cvref_t<T>;
+    // NOTE: we use the fact that the memory layouts for these are the same, idk
+    // if that's actually a good idea but it's what we do :)
+    if constexpr (std::is_same_v<actual_t, Integer>) {
+      auto res = T{};
+      std::memcpy(&res, storage.data() + sizeof(size_t), sizeof(actual_t));
+      return res;
+    } else if constexpr (std::is_same_v<actual_t, CharLit>) {
+      if (storage[sizeof(Expr_t)] == 0xbe) {
+        // small string
+        auto size = size_t{};
+        while (storage[size + sizeof(Expr_t)] != 0) {
+          ++size;
+        }
+        return T{std::string_view{
+            reinterpret_cast<char const *>(storage.data() + sizeof(Expr_t) + 1),
+            size}};
+      } else {
+        auto size = size_t{};
+        auto *buffer = static_cast<char *>(nullptr);
+        std::memcpy(&size, storage.data() + sizeof(size_t), sizeof(size_t));
+        std::memcpy(&buffer, storage.data() + 2 * sizeof(size_t),
+                    sizeof(char *));
+        return T{std::string_view{buffer, size}};
+      }
+    } else if constexpr (std::is_same_v<actual_t, Grouping> ||
+                         std::is_same_v<actual_t, Unary>) {
+      auto const *ptr = static_cast<ExprNode const *>(nullptr);
+      std::memcpy(&ptr, storage.data() + sizeof(size_t),
+                  sizeof(ExprNode const *));
+      return T{ptr};
+    } else if constexpr (std::is_same_v<actual_t, Binary>) {
+      auto const *lhs = static_cast<ExprNode const *>(nullptr);
+      std::memcpy(&lhs, storage.data() + sizeof(size_t),
+                  sizeof(ExprNode const *));
+      auto const *rhs = static_cast<ExprNode const *>(nullptr);
+      std::memcpy(&rhs, storage.data() + 2 * sizeof(size_t),
+                  sizeof(ExprNode const *));
+      return T{lhs, rhs};
+    }
+  }
+
+#ifdef DEBUG_CPP
+  auto to_string() const noexcept -> std::string;
+  auto display(std::ostream &) const noexcept -> std::ostream &;
+#endif // DEBUG_CPP
+
+private:
+  // 24 bytes should be enough(?)
+  // this should be a fine alignment(?)
+  static auto constexpr STORAGE_SIZE = size_t{24};
+  // -1 to hold the byte for if the string is sso
+  static auto constexpr SMALL_STRING_AMOUNT = STORAGE_SIZE - sizeof(Expr_t) - 1;
+  //     interned tag
+  //  tag|      meta data
+  //  v  v      v
+  // [*][*][**][****][****************]
+  //        ^         ^
+  //   unused         union of all the types
+  //  / chars         (all have alignment == 8, so this allows all of them to
+  //                  fit here)
+  // when tag == CHARLIT, then it will either look like the above,
+  // with storage[sizeof(Expr_t)] == 0xff, the rest of the meta data being 0,
+  // and the union being a size_t and ptr, or when the string is small enough,
+  // storage[sizeof(Expr_t)] == 0xbe, and the rest of the buffer is used to hold
+  // the characters
+  alignas(size_t) std::array<u8, STORAGE_SIZE> storage;
+
+  constexpr explicit ExprNode(std::array<u8, STORAGE_SIZE> storage) noexcept
+      : storage(std::move(storage)) {}
+  enum class Interned : u8 { NONE, FIRST, SECOND };
+  template <enum Interned> auto constexpr is_interned() const noexcept -> bool;
+  template <enum Interned>
+  auto constexpr get_interned() const noexcept -> size_t;
 };
 
 // TODO: devirtualize this if this becomes a perf issue
@@ -317,73 +513,78 @@ struct ElifNode;
 struct ElseNode;
 
 struct IfNode final : AstNode {
-  IfNode(string &&condition, vector<ptr<AstNode>> &&then_branch,
-         vector<ptr<ElifNode>> &&elif_branches,
-         ptr<ElseNode> &&else_branch) noexcept
+  IfNode(std::string &&condition,
+         std::vector<std::unique_ptr<AstNode>> &&then_branch,
+         std::vector<std::unique_ptr<ElifNode>> &&elif_branches,
+         std::unique_ptr<ElseNode> &&else_branch) noexcept
       : condition(std::move(condition)), then_branch(std::move(then_branch)),
         elif_branches(std::move(elif_branches)),
         else_branch(std::move(else_branch)) {}
   ~IfNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  string condition;
-  vector<ptr<AstNode>> then_branch;
-  vector<ptr<ElifNode>> elif_branches;
-  ptr<ElseNode> else_branch;
+  std::string condition;
+  std::vector<std::unique_ptr<AstNode>> then_branch;
+  std::vector<std::unique_ptr<ElifNode>> elif_branches;
+  std::unique_ptr<ElseNode> else_branch;
 };
 
 struct IfDefNode final : AstNode {
-  IfDefNode(string &&str, vector<ptr<AstNode>> &&then_branch,
-            vector<ptr<ElifNode>> &&elif_branches,
-            ptr<ElseNode> &&else_branch) noexcept
+  IfDefNode(std::string &&str,
+            std::vector<std::unique_ptr<AstNode>> &&then_branch,
+            std::vector<std::unique_ptr<ElifNode>> &&elif_branches,
+            std::unique_ptr<ElseNode> &&else_branch) noexcept
       : macro(std::move(str)), then_branch(std::move(then_branch)),
         elif_branches(std::move(elif_branches)),
         else_branch(std::move(else_branch)) {}
   ~IfDefNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  string macro;
-  vector<ptr<AstNode>> then_branch;
-  vector<ptr<ElifNode>> elif_branches;
-  ptr<ElseNode> else_branch;
+  std::string macro;
+  std::vector<std::unique_ptr<AstNode>> then_branch;
+  std::vector<std::unique_ptr<ElifNode>> elif_branches;
+  std::unique_ptr<ElseNode> else_branch;
 };
 
 struct IfNDefNode final : AstNode {
-  IfNDefNode(string &&str, vector<ptr<AstNode>> &&then_branch,
-             vector<ptr<ElifNode>> &&elif_branches,
-             ptr<ElseNode> &&else_branch) noexcept
+  IfNDefNode(std::string &&str,
+             std::vector<std::unique_ptr<AstNode>> &&then_branch,
+             std::vector<std::unique_ptr<ElifNode>> &&elif_branches,
+             std::unique_ptr<ElseNode> &&else_branch) noexcept
       : macro(std::move(str)), then_branch(std::move(then_branch)),
         elif_branches(std::move(elif_branches)),
         else_branch(std::move(else_branch)) {}
   ~IfNDefNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  string macro;
-  vector<ptr<AstNode>> then_branch;
-  vector<ptr<ElifNode>> elif_branches;
-  ptr<ElseNode> else_branch;
+  std::string macro;
+  std::vector<std::unique_ptr<AstNode>> then_branch;
+  std::vector<std::unique_ptr<ElifNode>> elif_branches;
+  std::unique_ptr<ElseNode> else_branch;
 };
 
 struct ElifNode final : AstNode {
-  ElifNode(string &&condition, vector<ptr<AstNode>> &&then_branch) noexcept
+  ElifNode(std::string &&condition,
+           std::vector<std::unique_ptr<AstNode>> &&then_branch) noexcept
       : condition(std::move(condition)), then_branch(std::move(then_branch)) {}
   ~ElifNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  string condition;
-  vector<ptr<AstNode>> then_branch;
+  std::string condition;
+  std::vector<std::unique_ptr<AstNode>> then_branch;
 };
 
 struct ElseNode final : AstNode {
-  ElseNode(vector<ptr<AstNode>> &&stmts) noexcept : stmts(std::move(stmts)) {}
+  ElseNode(std::vector<std::unique_ptr<AstNode>> &&stmts) noexcept
+      : stmts(std::move(stmts)) {}
   ~ElseNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  vector<ptr<AstNode>> stmts;
+  std::vector<std::unique_ptr<AstNode>> stmts;
 };
 
 struct GlobalIncludeNode final : AstNode {
-  GlobalIncludeNode(string const &str) noexcept : path(str) {}
+  GlobalIncludeNode(std::string const &str) noexcept : path(str) {}
   ~GlobalIncludeNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
@@ -391,8 +592,16 @@ struct GlobalIncludeNode final : AstNode {
 };
 
 struct LocalIncludeNode final : AstNode {
-  LocalIncludeNode(string const &str) noexcept : path(str) {}
+  LocalIncludeNode(std::string const &str) noexcept : path(str) {}
   ~LocalIncludeNode() final = default;
+  auto accept(AstVisitor &) -> void final;
+
+  fs::path path;
+};
+
+struct MacroIncludeNode final : AstNode {
+  MacroIncludeNode(std::string const &str) noexcept : path(str) {}
+  ~MacroIncludeNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
   fs::path path;
@@ -402,219 +611,274 @@ struct LocalIncludeNode final : AstNode {
 // causing this #define node to be treated like it has a value, as opposed to
 // just being a #define MACRO
 struct DefineNode final : AstNode {
-  DefineNode(string const &str, string &&lexeme) noexcept
+  DefineNode(std::string const &str, std::string &&lexeme) noexcept
       : name(str), lexeme(lexeme) {}
-  DefineNode(string const &str) noexcept : name(str), lexeme(std::nullopt) {}
+  DefineNode(std::string const &str) noexcept
+      : name(str), lexeme(std::nullopt) {}
 
   ~DefineNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  string name;
-  std::optional<string> lexeme;
+  std::string name;
+  std::optional<std::string> lexeme;
 };
 
 struct DefineFuncNode final : AstNode {
-  DefineFuncNode(string &&name, vector<string> &&parameters,
-                 string &&body) noexcept
+  DefineFuncNode(std::string &&name, std::vector<std::string> &&parameters,
+                 std::string &&body) noexcept
       : name(name), parameters(parameters), body(body) {}
   ~DefineFuncNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  string name;
-  vector<string> parameters;
-  string body;
+  std::string name;
+  std::vector<std::string> parameters;
+  std::string body;
+};
+
+struct DefineVariadicFuncNode final : AstNode {
+  DefineVariadicFuncNode(std::string &&name,
+                         std::vector<std::string> &&parameters,
+                         std::string &&body) noexcept
+      : name(name), parameters(parameters), body(body) {}
+  ~DefineVariadicFuncNode() final = default;
+  auto accept(AstVisitor &) -> void final;
+
+  std::string name;
+  std::vector<std::string> parameters;
+  std::string body;
 };
 
 struct UndefNode final : AstNode {
-  UndefNode(string const &str) noexcept : name(str) {}
+  UndefNode(std::string const &str) noexcept : name(str) {}
   ~UndefNode() final = default;
   auto accept(AstVisitor &visitor) -> void final;
 
-  string name;
+  std::string name;
 };
 
 struct PragmaNode final : AstNode {
-  PragmaNode(string const &value) noexcept : value(value) {}
+  PragmaNode(std::string const &value) noexcept : value(value) {}
   ~PragmaNode() final = default;
   auto accept(AstVisitor &visitor) -> void final;
 
-  string value;
+  std::string value;
+};
+
+struct WarningNode final : AstNode {
+  WarningNode(std::string const &value) noexcept : value(value) {}
+  ~WarningNode() final = default;
+  auto accept(AstVisitor &visitor) -> void final;
+
+  std::string value;
 };
 
 struct Ast final {
-  /**
-   * @throws std::bad_alloc
-   */
+  /// @throws std::bad_alloc
   Ast();
   Ast(Ast const &) = delete;
   Ast &operator=(Ast const &) = delete;
   Ast(Ast &&) noexcept = default;
   Ast &operator=(Ast &&) noexcept = default;
   ~Ast() noexcept = default;
-  // these are all pp directives
-  vector<std::unique_ptr<AstNode>> nodes;
+
+  std::vector<std::unique_ptr<AstNode>> nodes;
 
   auto accept(AstVisitor &) const -> void;
 };
 
-struct Expressions final {
-  enum class expr_t {
-    LPAREN,
-    RPAREN,
-    // TODO: add other operators
-    AND,
-    OR,
-    BIT_AND,
-    BIT_OR,
-    DEFINED,
-    LESS,
-    LESS_EQ,
-    GREATER,
-    GREATER_EQ,
-    STRINGIZING,
-    CONCAT,
-    PLUS,
-    MINUS,
-    STAR,
-    SLASH,
-    BANG_EQ,
-    EQ,
-    EQ_EQ,
-    BANG,
-    // values
-    LIT_CHAR,
-    LIT_DEC,
-    LIT_HEX,
-    LIT_OCT,
-    LIT_BIN,
-    LIT_FLOAT,
-    MACRO,
-  };
-  using enum expr_t;
-
-  static auto constexpr to_string(expr_t t) noexcept -> string_view {
-    switch (t) {
-    case LPAREN:
-      return string_view{"LPAREN"};
-    case RPAREN:
-      return string_view{"RPAREN"};
-    case AND:
-      return string_view{"AND"};
-    case OR:
-      return string_view{"OR"};
-    case BIT_AND:
-      return string_view{"BIT_AND"};
-    case BIT_OR:
-      return string_view{"BIT_OR"};
-    case DEFINED:
-      return string_view{"DEFINED"};
-    case LESS:
-      return string_view{"LESS"};
-    case LESS_EQ:
-      return string_view{"LESS_EQ"};
-    case GREATER:
-      return string_view{"GREATER"};
-    case GREATER_EQ:
-      return string_view{"GREATER_EQ"};
-    case STRINGIZING:
-      return string_view{"STRINGIZING"};
-    case CONCAT:
-      return string_view{"CONCAT"};
-    case PLUS:
-      return string_view{"PLUS"};
-    case MINUS:
-      return string_view{"MINUS"};
-    case STAR:
-      return string_view{"STAR"};
-    case SLASH:
-      return string_view{"SLASH"};
-    case BANG_EQ:
-      return string_view{"BANG_EQ"};
-    case EQ:
-      return string_view{"EQ"};
-    case EQ_EQ:
-      return string_view{"EQ_EQ"};
-    case BANG:
-      return string_view{"BANG"};
-    case LIT_CHAR:
-      return string_view{"LIT_CHAR"};
-    case LIT_DEC:
-      return string_view{"LIT_DEC"};
-    case LIT_HEX:
-      return string_view{"LIT_HEX"};
-    case LIT_OCT:
-      return string_view{"LIT_OCT"};
-    case LIT_BIN:
-      return string_view{"LIT_BIN"};
-    case LIT_FLOAT:
-      return string_view{"LIT_FLOAT"};
-    case MACRO:
-      return string_view{"MACRO"};
-    }
-    unreachable();
-  }
-
-  struct ExprLexer final {
-    vector<expr_t> tkns;
-    vector<string> macros;
-    auto to_ast() const -> ExprNode;
-
-    auto constexpr matching(expr_t tkn, std::initializer_list<expr_t> &&matches)
-        const noexcept -> bool {
-      for (auto &&t : matches) {
-        if (tkn == t) {
-          return true;
-        }
-      }
-      return false;
-    }
-
-    auto expression(size_t &, size_t &) const -> ExprNode;
-    auto _or(size_t &, size_t &) const -> ExprNode;
-    auto _and(size_t &, size_t &) const -> ExprNode;
-    auto equality(size_t &, size_t &) const -> ExprNode;
-    auto comparison(size_t &, size_t &) const -> ExprNode;
-    auto term(size_t &, size_t &) const -> ExprNode;
-    auto factor(size_t &, size_t &) const -> ExprNode;
-    auto unary(size_t &, size_t &) const -> ExprNode;
-    auto primary(size_t &, size_t &) const -> ExprNode;
-
-    auto expect(size_t cur_t, expr_t &&tkn) const -> void {
-      if (tkns[cur_t] != tkn) {
-        throw std::runtime_error(
-            std::format("Unexpected token, expected {}, found {}",
-                        to_string(tkn), to_string(tkns[cur_t])));
-      }
-    }
-#ifdef DEBUG_CPP
-    auto display(std::ostream &) const noexcept -> std::ostream &;
-#endif // DEBUG_CPP
-  };
-
-  // TODO: maybe compress these into one function(?)
-  static auto lex(string_view const) -> ExprLexer;
-  static auto lex_integer(string_view const, size_t &, vector<expr_t> &,
-                          vector<string> &) -> void;
-  static auto expand(ExprLexer const &,
-                     std::unordered_map<std::string, Macro> const &,
-                     std::unordered_set<std::string> const &) -> ExprLexer;
-  static auto expand_macro(string const &,
-                           std::unordered_map<string, Macro> const &,
-                           std::unordered_set<string> const &) noexcept
-      -> ExprLexer;
-
-  static auto eval_impl(ExprNode const &,
-                        std::unordered_map<std::string, Macro> const &,
-                        std::unordered_set<std::string> const &) -> int;
-
-  static auto make_binary(expr_t, ExprNode &&, ExprNode &&) noexcept
-      -> ExprNode;
-  static auto make_unary(expr_t, ExprNode &&) noexcept -> ExprNode;
-  static auto make_integer(expr_t, string_view) noexcept -> ExprNode;
+// TODO: rewrite this namespace, it really doesn't need to be written like this
+namespace Expressions {
+enum class expr_t {
+  LPAREN,
+  RPAREN,
+  // TODO: add other operators
+  AND,
+  OR,
+  BIT_AND,
+  BIT_OR,
+  DEFINED,
+  LESS,
+  LESS_EQ,
+  GREATER,
+  GREATER_EQ,
+  LSHIFT,
+  RSHIFT,
+  STRINGIZING,
+  CONCAT,
+  PLUS,
+  MINUS,
+  STAR,
+  SLASH,
+  BANG_EQ,
+  EQ,
+  EQ_EQ,
+  BANG,
+  // values
+  LIT_CHAR,
+  LIT_DEC,
+  LIT_HEX,
+  LIT_OCT,
+  LIT_BIN,
+  LIT_FLOAT,
+  MACRO,
+  LIT_TRUE,  // 1
+  LIT_FALSE, // 0
 };
 
-// no need for a virtual dtor bc you shouldn't be dynamically allocating this
-// ABC
+auto constexpr to_string(expr_t t) noexcept -> std::string_view {
+  switch (t) {
+  case expr_t::LPAREN:
+    return std::string_view{"LPAREN"};
+  case expr_t::RPAREN:
+    return std::string_view{"RPAREN"};
+  case expr_t::AND:
+    return std::string_view{"AND"};
+  case expr_t::OR:
+    return std::string_view{"OR"};
+  case expr_t::BIT_AND:
+    return std::string_view{"BIT_AND"};
+  case expr_t::BIT_OR:
+    return std::string_view{"BIT_OR"};
+  case expr_t::DEFINED:
+    return std::string_view{"DEFINED"};
+  case expr_t::LESS:
+    return std::string_view{"LESS"};
+  case expr_t::LESS_EQ:
+    return std::string_view{"LESS_EQ"};
+  case expr_t::GREATER:
+    return std::string_view{"GREATER"};
+  case expr_t::GREATER_EQ:
+    return std::string_view{"GREATER_EQ"};
+  case expr_t::LSHIFT:
+    return std::string_view{"LSHIFT"};
+  case expr_t::RSHIFT:
+    return std::string_view{"RSHIFT"};
+  case expr_t::STRINGIZING:
+    return std::string_view{"STRINGIZING"};
+  case expr_t::CONCAT:
+    return std::string_view{"CONCAT"};
+  case expr_t::PLUS:
+    return std::string_view{"PLUS"};
+  case expr_t::MINUS:
+    return std::string_view{"MINUS"};
+  case expr_t::STAR:
+    return std::string_view{"STAR"};
+  case expr_t::SLASH:
+    return std::string_view{"SLASH"};
+  case expr_t::BANG_EQ:
+    return std::string_view{"BANG_EQ"};
+  case expr_t::EQ:
+    return std::string_view{"EQ"};
+  case expr_t::EQ_EQ:
+    return std::string_view{"EQ_EQ"};
+  case expr_t::BANG:
+    return std::string_view{"BANG"};
+  case expr_t::LIT_CHAR:
+    return std::string_view{"LIT_CHAR"};
+  case expr_t::LIT_DEC:
+    return std::string_view{"LIT_DEC"};
+  case expr_t::LIT_HEX:
+    return std::string_view{"LIT_HEX"};
+  case expr_t::LIT_OCT:
+    return std::string_view{"LIT_OCT"};
+  case expr_t::LIT_BIN:
+    return std::string_view{"LIT_BIN"};
+  case expr_t::LIT_FLOAT:
+    return std::string_view{"LIT_FLOAT"};
+  case expr_t::MACRO:
+    return std::string_view{"MACRO"};
+  case expr_t::LIT_TRUE:
+    return std::string_view{"LIT_TRUE"};
+  case expr_t::LIT_FALSE:
+    return std::string_view{"LIT_FALSE"};
+  }
+  unreachable();
+}
+
+struct ExprLexer final {
+  std::vector<expr_t> tkns;
+  std::vector<std::string> macros;
+  auto to_ast(allocator::Page &) const -> ExprNode;
+
+  auto constexpr matching(expr_t tkn, std::initializer_list<expr_t> &&matches)
+      const noexcept -> bool {
+    for (auto &&t : matches) {
+      if (tkn == t) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  auto expand(pp::MacroMap const &, pp::StringSet const &) -> ExprLexer &;
+  auto resolve(pp::MacroMap const &, pp::StringSet const &) -> ExprLexer &;
+  auto ast(allocator::Page &) -> ExprNode;
+
+#ifdef DEBUG_CPP
+  auto display(std::ostream &) const noexcept -> std::ostream &;
+#endif // DEBUG_CPP
+
+private:
+  auto expression(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto _or(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto _and(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto equality(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto comparison(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto shift(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto term(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto factor(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto unary(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+  auto primary(allocator::Page &, size_t &, size_t &) const -> ExprNode;
+
+  auto expect(size_t cur_t, expr_t &&tkn) const -> void {
+    [[unlikely]]
+    if (tkns[cur_t] != tkn) {
+      throw std::runtime_error(
+          std::format("Unexpected token, expected {}, found {}", to_string(tkn),
+                      to_string(tkns[cur_t])));
+    }
+  }
+};
+
+auto lex(std::string_view const) -> ExprLexer;
+auto lex_integer(std::string_view const, size_t &, std::vector<expr_t> &,
+                 std::vector<std::string> &) -> void;
+auto expand(ExprLexer const &, pp::MacroMap const &, StringSet const &)
+    -> ExprLexer;
+auto expand_macro(std::string const &, pp::MacroMap const &,
+                  StringSet const &) noexcept -> ExprLexer;
+
+/// @throws std::runtime_error
+auto eval(std::string_view const, allocator::Page &, pp::MacroMap const &,
+          pp::StringSet const &) -> int;
+auto eval_impl(ExprNode const &) -> int;
+
+auto make_binary(allocator::Page &, expr_t, ExprNode &&, ExprNode &&) noexcept
+    -> ExprNode;
+auto make_unary(allocator::Page &, expr_t, ExprNode &&) noexcept -> ExprNode;
+auto make_integer(expr_t, std::string_view) noexcept -> ExprNode;
+}; // namespace Expressions
+
+auto constexpr ExprNode::to_string(Expr_t t) noexcept -> std::string_view {
+  switch (t) {
+  case Expr_t::INT:
+    return std::string_view{"INT"};
+  case Expr_t::CHARLIT:
+    return std::string_view{"CHARLIT"};
+  case Expr_t::GROUPING:
+    return std::string_view{"GROUPING"};
+  case Expr_t::BINARY:
+    return std::string_view{"BINARY"};
+  case Expr_t::UNARY:
+    return std::string_view{"UNARY"};
+  case Expr_t::NONE:
+    return std::string_view{"NONE"};
+  }
+  unreachable();
+}
+
+// NOTE: no need for a virtual dtor bc you shouldn't be dynamically allocating
+// this ABC
 struct AstVisitor {
   virtual auto visit_if(IfNode &) -> void = 0;
   virtual auto visit_ifdef(IfDefNode &) -> void = 0;
@@ -623,10 +887,13 @@ struct AstVisitor {
   virtual auto visit_else(ElseNode &) -> void = 0;
   virtual auto visit_global_include(GlobalIncludeNode &) -> void = 0;
   virtual auto visit_local_include(LocalIncludeNode &) -> void = 0;
+  virtual auto visit_macro_include(MacroIncludeNode &) -> void = 0;
   virtual auto visit_define(DefineNode &) -> void = 0;
   virtual auto visit_define_func(DefineFuncNode &) -> void = 0;
+  virtual auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void = 0;
   virtual auto visit_undef(UndefNode &) -> void = 0;
   virtual auto visit_pragma(PragmaNode &) -> void = 0;
+  virtual auto visit_warning(WarningNode &) -> void = 0;
 };
 
 auto IfNode::accept(AstVisitor &visitor) -> void {
@@ -650,17 +917,26 @@ auto GlobalIncludeNode::accept(AstVisitor &visitor) -> void {
 auto LocalIncludeNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_local_include(*this);
 }
+auto MacroIncludeNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_macro_include(*this);
+}
 auto DefineNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_define(*this);
 }
 auto DefineFuncNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_define_func(*this);
 }
+auto DefineVariadicFuncNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_define_variadic_func(*this);
+}
 auto UndefNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_undef(*this);
 }
 auto PragmaNode::accept(AstVisitor &visitor) -> void {
   return visitor.visit_pragma(*this);
+}
+auto WarningNode::accept(AstVisitor &visitor) -> void {
+  return visitor.visit_warning(*this);
 }
 
 #ifdef DEBUG_CPP
@@ -671,15 +947,17 @@ struct AstPrinter final : AstVisitor {
   AstPrinter(std::ostream &out) noexcept : out(out), depth(0) {}
 
   auto print(Ast &ast) -> void {
-    out << "AstPrinter:" NL;
+    out << "AstPrinter:" LM_NL;
     for (auto &&node : ast.nodes) {
       node->accept(*this);
     }
-    out << "---" NL;
+    out << "---" LM_NL;
     out.flush();
   }
 
-  constexpr auto get_indents() -> string { return string(depth, ' '); }
+  constexpr auto get_indents() -> std::string {
+    return std::string(depth, ' ');
+  }
 
   auto visit_if(IfNode &) -> void final;
   auto visit_ifdef(IfDefNode &) -> void final;
@@ -688,23 +966,31 @@ struct AstPrinter final : AstVisitor {
   auto visit_else(ElseNode &) -> void final;
   auto visit_global_include(GlobalIncludeNode &) -> void final;
   auto visit_local_include(LocalIncludeNode &) -> void final;
+  auto visit_macro_include(MacroIncludeNode &) -> void final;
   auto visit_define(DefineNode &) -> void final;
   auto visit_define_func(DefineFuncNode &) -> void final;
+  auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void final;
   auto visit_undef(UndefNode &) -> void final;
   auto visit_pragma(PragmaNode &) -> void final;
+  auto visit_warning(WarningNode &) -> void final;
 };
 #endif // DEBUG_CPP
 
 // TODO: rewrite this implimentation so that the vector of paths is just
 // returned instead of being a part of this struct
+// TODO: expose this so that it can be initialized outside of this file, and we
+// can then just hold onto it, allowing us to avoid reinitializing the arena for
+// every file
 struct AstIncluder final : AstVisitor {
-  vector<fs::path> &paths;
-  std::unordered_map<std::string, Macro> &macros;
-  std::unordered_set<std::string> &def_macros;
-  AstIncluder(vector<fs::path> &paths,
-              std::unordered_map<std::string, Macro> &macros,
-              std::unordered_set<std::string> &def_macros) noexcept
-      : paths(paths), macros(macros), def_macros(def_macros) {}
+  std::vector<fs::path> &paths;
+  pp::MacroMap &macros;
+  pp::StringSet &defs;
+
+  allocator::Page &alloc;
+
+  AstIncluder(std::vector<fs::path> &paths, allocator::Page &alloc,
+              pp::MacroMap &macros, pp::StringSet &defs) noexcept
+      : paths(paths), macros(macros), defs(defs), alloc(alloc) {}
 
   auto get_includes(Ast &ast) -> void {
     for (auto &&node : ast.nodes) {
@@ -719,10 +1005,13 @@ struct AstIncluder final : AstVisitor {
   auto visit_else(ElseNode &) -> void final;
   auto visit_global_include(GlobalIncludeNode &) -> void final;
   auto visit_local_include(LocalIncludeNode &) -> void final;
+  auto visit_macro_include(MacroIncludeNode &) -> void final;
   auto visit_define(DefineNode &) -> void final;
   auto visit_define_func(DefineFuncNode &) -> void final;
+  auto visit_define_variadic_func(DefineVariadicFuncNode &) -> void final;
   auto visit_undef(UndefNode &) -> void final;
   auto visit_pragma(PragmaNode &) -> void final;
+  auto visit_warning(WarningNode &) -> void final;
 };
 
 auto constexpr to_string(ir_t t) -> std::string_view {
@@ -747,12 +1036,12 @@ auto constexpr to_string(ir_t t) -> std::string_view {
     return std::string_view("UNDEF");
   case ir_t::PRAGMA:
     return std::string_view("PRAGMA");
+  case ir_t::WARNING:
+    return std::string_view("WARNING");
   case ir_t::INCLUDE:
     return std::string_view("INCLUDE");
   case ir_t::LANGLE:
     return std::string_view("LANGLE");
-  case ir_t::RANGLE:
-    return std::string_view("RANGLE");
   case ir_t::QUOTE:
     return std::string_view("QUOTE");
   case ir_t::LPAREN:
@@ -765,55 +1054,28 @@ auto constexpr to_string(ir_t t) -> std::string_view {
     return std::string_view("LEXEME");
   case ir_t::LIT_STRING:
     return std::string_view("LIT_STRING");
+  case ir_t::VARIADIC:
+    return std::string_view("VARIADIC");
   }
   unreachable();
 }
 
-auto constexpr ExprNode::readable_type(Expr_t t) noexcept -> std::string_view {
-  switch (t) {
-  case INT:
-    return std::string_view{"INT"};
-  case NUMBER:
-    return std::string_view{"NUMBER"};
-  case DEFINED:
-    return std::string_view{"DEFINED"};
-  case CHARLIT:
-    return std::string_view{"CHARLIT"};
-  case GROUPING:
-    return std::string_view{"GROUPING"};
-  case BINARY:
-    return std::string_view{"BINARY"};
-  case UNARY:
-    return std::string_view{"UNARY"};
-  case NONE:
-    return std::string_view{"NONE"};
-  }
-}
-
-// i would like to add lexical short cutting, where if we see a macro that's
-// already been defined in something like a header guard, then we completely
-// skip the file
-// TODO: add proper lexing to the preprocessor, i think that for #if expressions
-// we just need to lex until we hit a '\n' character, then when we're parsing we
-// can form an expression tree, thankfully everything must eventually be
-// interpreted as an int (0 == false, x == true), so we can just have our
-// interpreter worry about int's and their expressions, how they get converted
-// to int's etc
-auto Lexer::lex(std::string_view const file) -> Lexer {
+auto Lexer::lex(std::string_view const buffer) -> Lexer {
   // clang-format off
-  static auto const keywords = unordered_map<string_view, ir_t>{{
-    {string_view{"#if"}, ir_t::IF},
-    {string_view{"#ifdef"}, ir_t::IFDEF},
-    {string_view{"#ifndef"}, ir_t::IFNDEF},
-    {string_view{"#elif"}, ir_t::ELIF},
-    {string_view{"#else"}, ir_t::ELSE},
-    {string_view{"#endif"}, ir_t::ENDIF},
-    {string_view{"#define"}, ir_t::DEFINE},
-    {string_view{"#include"}, ir_t::INCLUDE},
-    {string_view{"#undef"}, ir_t::UNDEF},
-    {string_view{"#pragma"}, ir_t::PRAGMA}
+  static auto const keywords = std::unordered_map<std::string_view, ir_t>{{
+    {std::string_view{"#if"}, ir_t::IF},
+    {std::string_view{"#ifdef"}, ir_t::IFDEF},
+    {std::string_view{"#ifndef"}, ir_t::IFNDEF},
+    {std::string_view{"#elif"}, ir_t::ELIF},
+    {std::string_view{"#else"}, ir_t::ELSE},
+    {std::string_view{"#endif"}, ir_t::ENDIF},
+    {std::string_view{"#define"}, ir_t::DEFINE},
+    {std::string_view{"#include"}, ir_t::INCLUDE},
+    {std::string_view{"#undef"}, ir_t::UNDEF},
+    {std::string_view{"#pragma"}, ir_t::PRAGMA},
+    {std::string_view{"#warning"}, ir_t::WARNING}
   }};
-  auto constexpr chars_of_interest = string_view{"#/\"'"};
+  auto constexpr chars_of_interest = std::string_view{"#/\"'"};
   // clang-format on
   auto lex = Lexer();
   lex.types.reserve(64);
@@ -821,14 +1083,14 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
 
   // this can be removed idk i'm just leaving it here rn because i don't want to
   // do a big refactor of this system rn
-  auto const fcontent = file;
+  auto const fcontent = buffer;
   auto const start = fcontent.begin();
-  for (auto i = size_t{}; i < file.size();) {
+  for (auto i = size_t{}; i < buffer.size();) {
     switch (fcontent[i]) {
     case '#': {
       auto end = luamake::skip_until(std::string_view(" \t\r\n"), fcontent, i);
 
-      auto const hash_keyword = string_view{start + i, start + end};
+      auto const hash_keyword = std::string_view{start + i, start + end};
       i = end;
       auto const keyword = keywords.find(hash_keyword);
       if (keyword == keywords.end()) {
@@ -840,47 +1102,46 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
 
       switch (keyword->second) {
       case ir_t::INCLUDE: {
-        if (i >= file.size())
-          throw std::runtime_error(string("Unable to parse include parameter"));
-
+        if (i >= buffer.size())
+          throw std::runtime_error("Unable to parse include parameter");
         i = skip_ws(fcontent, i);
-
-        if (i >= file.size())
-          throw std::runtime_error(string("Unable to parse include parameter"));
-
+        if (i >= buffer.size())
+          throw std::runtime_error("Unable to parse include parameter");
         lex.types.push_back(ir_t::INCLUDE);
         switch (fcontent[i]) {
         case '<': {
           lex.types.push_back(ir_t::LANGLE);
-
           end = luamake::skip_until('>', fcontent, i + 1);
-
-          if (!(end < file.size())) {
-            throw std::runtime_error(string("Non terminated global include"));
-          }
-
+          if (end >= buffer.size())
+            throw std::runtime_error("Non terminated global include");
           lex.types.push_back(ir_t::LIT_STRING);
-          lex.lexemes.push_back(string(start + i + 1, start + end));
+          lex.lexemes.push_back(std::string(start + i + 1, start + end));
           i = end + 1;
-          lex.types.push_back(ir_t::RANGLE);
         } break;
         case '"': {
           lex.types.push_back(ir_t::QUOTE);
-
           end = luamake::skip_until('"', fcontent, i + 1);
-
-          if (!(end < file.size())) {
-            throw std::runtime_error(string("Non terminated local include"));
-          }
-
+          if (end >= buffer.size())
+            throw std::runtime_error("Non terminated local include");
           lex.types.push_back(ir_t::LIT_STRING);
-          lex.lexemes.push_back(string(start + i + 1, start + end));
+          lex.lexemes.push_back(std::string(start + i + 1, start + end));
           i = end + 1;
-          lex.types.push_back(ir_t::QUOTE);
         } break;
-        default:
-          throw std::runtime_error(
-              std::format("character found = {}", fcontent[i]));
+        default: {
+          // NOTE: according to
+          // `https://stackoverflow.com/questions/39038867/string-concatenation-for-include-path`,
+          // you can just have anything at the end of this we'll have to deal
+          // with this later idk why this is something you can do, it seems like
+          // a really annoying patch included because people don't want build
+          // systems but fucking fine we'll just have to deal with it
+          end = luamake::skip_until(delims.ws, fcontent, i + 1);
+          if (end >= buffer.size()) {
+            // TODO: idk get line numbers for better error reporting or whatever
+            throw std::runtime_error("Non terminated #include statement");
+          }
+          lex.types.push_back(ir_t::MACRO);
+          lex.lexemes.push_back(std::string(start + i, start + end));
+        }
         }
       } break;
       case ir_t::IFDEF: {
@@ -900,7 +1161,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         i = skip_ws(fcontent, i);
         end =
             luamake::skip_until(std::string_view(" (\t\n\r"), fcontent, i + 1);
-        lex.push_lexeme(string(start + i, start + end));
+        lex.push_lexeme(std::string(start + i, start + end));
         i = end;
         switch (fcontent[i]) {
         case '(': {
@@ -909,9 +1170,8 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
           // be a function like macro
           i = lex.parse_define_args(fcontent, skip_ws(fcontent, i + 1));
           if (fcontent[i] != ')') {
-            throw std::runtime_error(
-                std::format("Expected closing ')' when parsing "
-                            "function macro arguments"));
+            throw std::runtime_error("Expected closing ')' when parsing "
+                                     "function macro arguments");
           }
           lex.types.push_back(ir_t::RPAREN);
           // this isn't technically needed, but every example (including those
@@ -948,6 +1208,10 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         lex.types.push_back(ir_t::PRAGMA);
         i = lex.produce_lexeme(fcontent, skip_ws(fcontent, i));
         break;
+      case ir_t::WARNING:
+        lex.types.push_back(ir_t::WARNING);
+        i = lex.produce_lexeme(fcontent, skip_ws(fcontent, i));
+        break;
       case ir_t::ENDIF:
         lex.types.push_back(ir_t::ENDIF);
         break;
@@ -962,16 +1226,18 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         break;
       default:
 #ifdef DEBUG_CPP
-        std::cerr << WARNING "Unknown ir_t preprocessor directive ["
-                  << to_string(keyword->second) << "]" NORMAL NL;
+        std::cerr << std::format(
+            LM_WARNING
+            "Unknown ir_t preprocessor directive [{}]" LM_NORMAL LM_NL,
+            to_string(keyword->second));
 #endif // DEBUG_CPP
         lex.types.push_back(keyword->second);
         break;
       }
     } break;
     case '/': {
-      if (!(i + 1 < file.size())) {
-        throw std::runtime_error(string("'/' found at end of file"));
+      if (!(i + 1 < buffer.size())) {
+        throw std::runtime_error("'/' found at end of file");
       }
       ++i;
       switch (fcontent[i]) {
@@ -979,36 +1245,25 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
         i = luamake::skip_until('\n', fcontent, i + 1);
       } break;
       case '*': { // skip until */
-        // TODO: check this code, there might be an issue if the file
-        // ends with a multi line comment, i.e. */ at the end of the file
-        i = skip_until_close_multicomment(fcontent, i + 1);
-        if (i == file.size())
-          throw std::runtime_error(string("Non terminated multi line comment"));
+        i = skip_until_close_multicomment(fcontent, i + 2) + 1;
+        if (i >= buffer.size())
+          throw std::runtime_error("Unterminated multi-line comment");
       } break;
       default: // probably just an op /
         i = luamake::skip_until(chars_of_interest, fcontent, i + 1);
         break;
       }
     } break;
-    case '"': {
-      do {
-        // +1 b/c fcontent[i] (should) == '"', and if not then we'll be out of
-        // bounds so it doesn't matter
-        i = luamake::skip_until('"', fcontent, i + 1);
-        // can always check this without needing to bounds check (probably)
-        if (!(i < file.size())) {
-          throw std::runtime_error(string("Non terminated string"));
-        }
-        // to fix when we're in a string that contains \" escape character
-      } while (fcontent[i - 1] == '\\' && fcontent[i - 2] != '\\');
-      ++i;
-    } break;
-      // TODO: test that this loop works
+    case '"':
+      [[fallthrough]]; // both cases are handled the same
     case '\'': {
+      auto const ch = fcontent[i];
       do {
-        i = luamake::skip_until('\'', fcontent, i + 1);
-        if (!(i < file.size())) {
-          throw std::runtime_error(string("Non terminated char"));
+        // +1 b/c fcontent[i] == '"' | '\'', and if not then we'll be out of
+        // bounds so it doesn't matter
+        i = luamake::skip_until(ch, fcontent, i + 1);
+        if (!(i < buffer.size())) {
+          throw std::runtime_error("Non terminated char");
         }
         // the case when you have '\\'
       } while (fcontent[i - 1] == '\\' && fcontent[i - 2] != '\\');
@@ -1020,7 +1275,7 @@ auto Lexer::lex(std::string_view const file) -> Lexer {
     }
   }
 #ifdef DEBUG_CPP
-  std::cout << "Lexer:" NL;
+  std::cout << "Lexer:" LM_NL;
   lex.display(std::cout).flush();
 #endif // DEBUG_CPP
   return lex;
@@ -1049,52 +1304,70 @@ static_assert(std::ranges::any_of(std::array<ir_t, 2>({ir_t::ELSE, ir_t::ELIF}),
                                                   ir_t::ELSE)),
               "");
 
-auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
-  auto constexpr ws = string_view{" \t\r\n"};
+auto Lexer::produce_macro(std::string_view const str, size_t i) -> size_t {
+  auto constexpr ws = std::string_view{" \t\r\n"};
   auto constexpr switch_chars = std::string_view{"\\\n/"};
   auto macro = std::string();
   auto start = i;
   auto looping = true;
-  while (i < buf.size() && looping) {
-    auto const ch = buf[i];
-    switch (ch) {
+  while (i < str.size() && looping) {
+    switch (str[i]) {
     case '\\': {
-      if (i - 1 > start) {
-        auto const mac =
-            std::string_view{buf.begin() + start, buf.begin() + i - 1};
+      if (i + 1 < str.size() && str[i + 1] == '\n') {
+        auto const mac = std::string_view{str.begin() + start, str.begin() + i};
         macro.append(mac);
-      }
-      ++i;
-      if (i < buf.size() && buf[i] == '\n')
-        ++i;
-      start = i = luamake::skip_while(ws, buf, i);
-    } break;
-    case '/': {
-      if (i + 1 < buf.size() && buf[i + 1] == '/') {
-        auto end = i - 1;
-        while (is_any_of(ws, buf[end])) {
-          --end;
-        }
-        if (end + 1 > start) {
-          auto const mac =
-              std::string_view{buf.begin() + start, buf.begin() + end + 1};
-          macro.append(mac);
-        }
-        looping = false;
+        // str[i + 1] == '\n', so we need i + 2
+        start = i = luamake::skip_until(switch_chars, str, i + 2);
       } else {
-        i = luamake::skip_until(switch_chars, buf, i + 1);
+        i = luamake::skip_until(switch_chars, str, i + 1);
       }
+
     } break;
     case '\n': {
-      auto const mac = std::string_view{buf.begin() + start, buf.begin() + i};
+      auto const mac = std::string_view{str.begin() + start, str.begin() + i};
       macro.append(mac);
       looping = false;
     } break;
+    case '/': {
+      if (i + 1 < str.size() && str[i + 1] == '/') {
+        auto end = luamake::skip_until('\n', str, i);
+        if (end >= str.size())
+          throw std::runtime_error("Unterminated comment found near macro");
+        end = luamake::back_while(ws, str, end);
+        if (end != 0 && str[end] == '\\')
+          throw std::runtime_error("Fuck you");
+        if (end + 1 > start) {
+          auto const mac =
+              std::string_view{str.begin() + start, str.begin() + end + 1};
+          macro.append(mac);
+        }
+        looping = false;
+      } else if (i + 1 < str.size() && str[i + 1] == '*') {
+        if (i - 1 > start) {
+          auto const mac =
+              std::string_view{str.begin() + start, str.begin() + i - 1};
+          macro.append(mac);
+        }
+        start = i + 1;
+        for (;;) {
+          i = luamake::skip_until('/', str, i + 1);
+          if (i >= str.size())
+            throw std::runtime_error(
+                "Unterminated multi-line comment found near macro");
+          if (str[i - 1] == '*' && i - 1 != start)
+            break;
+          ++i;
+        }
+        start = i = luamake::skip_until(switch_chars, str, i + 1);
+      } else {
+        i = luamake::skip_until(switch_chars, str, i + 1);
+      }
+    } break;
     default:
-      i = luamake::skip_until(switch_chars, buf, i);
-      break;
+      i = luamake::skip_until(switch_chars, str, i);
     }
   }
+
   push_macro(macro);
   // the only way to break out of the loop is to hit a '\n' char, but we don't
   // want to include that in the string, we do want to skip over it though so we
@@ -1102,8 +1375,8 @@ auto Lexer::produce_macro(string_view const buf, size_t i) -> size_t {
   return i + 1;
 }
 
-auto Lexer::produce_lexeme(string_view const buf, size_t i) -> size_t {
-  auto constexpr ws = string_view{" \t\r\n"};
+auto Lexer::produce_lexeme(std::string_view const buf, size_t i) -> size_t {
+  auto constexpr ws = std::string_view{" \t\r\n"};
   auto constexpr switch_chars = std::string_view{"\\\n/"};
   auto lexeme = std::string();
   auto start = i;
@@ -1153,15 +1426,23 @@ auto Lexer::produce_lexeme(string_view const buf, size_t i) -> size_t {
   return i + 1;
 }
 
-// TODO: add bounds checking
-auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
+auto Lexer::parse_define_args(std::string_view const fcontent, size_t i)
+    -> size_t {
   auto constexpr switch_chars = std::string_view{"),. \t\r\n"};
-  while (true) {
+  while (i < fcontent.size()) {
     switch (fcontent[i]) {
     case ')':
       return i;
-    case '.':
-      throw std::runtime_error("Variatic macros are not currently supported");
+    case '.': {
+      if (i + 3 < fcontent.size() &&
+          (fcontent[i + 1] == '.' && fcontent[i + 2] == '.')) {
+        types.push_back(ir_t::VARIADIC);
+        i += 3;
+      } else {
+        throw std::runtime_error(
+            "Error around `.` in function macro parameters");
+      }
+    } break;
     case ',':
       i = skip_ws(fcontent, i + 1);
       break;
@@ -1183,7 +1464,7 @@ auto Lexer::parse_define_args(string_view const fcontent, size_t i) -> size_t {
     }
     }
   }
-  unreachable();
+  throw std::runtime_error("Unterminated function macro arguments");
 }
 
 auto Lexer::declaration(size_t &cur_t, size_t &cur_lex)
@@ -1203,6 +1484,8 @@ auto Lexer::declaration(size_t &cur_t, size_t &cur_lex)
     return handle_include(cur_t, cur_lex);
   case ir_t::PRAGMA:
     return handle_pragma(cur_t, cur_lex);
+  case ir_t::WARNING:
+    return handle_warning(cur_t, cur_lex);
   case ir_t::ELIF: // TODO: throw for these with their own special error
                    // messages
     [[fallthrough]];
@@ -1224,29 +1507,15 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
   expect(cur_t, ir_t::MACRO);
   ++cur_t;
   auto expr = lexemes[cur_lex++];
-  auto then_branch = vector<ptr<AstNode>>();
-  auto elif_branches = vector<ptr<ElifNode>>();
-  auto else_branch = ptr<ElseNode>(nullptr);
+  auto then_branch = std::vector<std::unique_ptr<AstNode>>();
+  auto elif_branches = std::vector<std::unique_ptr<ElifNode>>();
+  auto else_branch = std::unique_ptr<ElseNode>(nullptr);
   enum class FoundEnd {
     none,
     elif,
     _else,
     endif,
   } cur = FoundEnd::none;
-  auto const determine_state = [this](auto const cur_t) {
-    switch (types[cur_t]) {
-    case ir_t::ELSE:
-      return FoundEnd::_else;
-    case ir_t::ENDIF:
-      return FoundEnd::endif;
-    case ir_t::ELIF:
-      return FoundEnd::elif;
-    default:
-      throw std::runtime_error(std::format(
-          "Unexpected token [{}], found after parsing #else directive",
-          to_string(types[cur_t])));
-    }
-  };
   while (cur == FoundEnd::none && cur_t < types.size()) {
     switch (types[cur_t]) {
     case ir_t::IF:
@@ -1293,6 +1562,20 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
         std::format("Unterminated #ifdef directive found"));
   }
 
+  auto const determine_state = [this](auto const cur_t) {
+    switch (types[cur_t]) {
+    case ir_t::ELSE:
+      return FoundEnd::_else;
+    case ir_t::ENDIF:
+      return FoundEnd::endif;
+    case ir_t::ELIF:
+      return FoundEnd::elif;
+    default:
+      throw std::runtime_error(std::format(
+          "Unexpected token [{}], found after parsing #else directive",
+          to_string(types[cur_t])));
+    }
+  };
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
@@ -1338,29 +1621,15 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
   }
   ++cur_t;
   auto lex = lexemes[cur_lex++];
-  auto then_branch = vector<ptr<AstNode>>();
-  auto elif_branches = vector<ptr<ElifNode>>();
-  auto else_branch = ptr<ElseNode>(nullptr);
+  auto then_branch = std::vector<std::unique_ptr<AstNode>>();
+  auto elif_branches = std::vector<std::unique_ptr<ElifNode>>();
+  auto else_branch = std::unique_ptr<ElseNode>(nullptr);
   enum class FoundEnd {
     none,
     elif,
     _else,
     endif,
   } cur = FoundEnd::none;
-  auto const determine_state = [this](auto const cur_t) {
-    switch (types[cur_t]) {
-    case ir_t::ELSE:
-      return FoundEnd::_else;
-    case ir_t::ENDIF:
-      return FoundEnd::endif;
-    case ir_t::ELIF:
-      return FoundEnd::elif;
-    default:
-      throw std::runtime_error(std::format(
-          "Unexpected token [{}], found after parsing #else directive",
-          to_string(types[cur_t])));
-    }
-  };
   while (cur == FoundEnd::none && cur_t < types.size()) {
     switch (types[cur_t]) {
     case ir_t::IF:
@@ -1407,6 +1676,20 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
         std::format("Unterminated #ifdef directive found"));
   }
 
+  auto const determine_state = [this](auto const cur_t) {
+    switch (types[cur_t]) {
+    case ir_t::ELSE:
+      return FoundEnd::_else;
+    case ir_t::ENDIF:
+      return FoundEnd::endif;
+    case ir_t::ELIF:
+      return FoundEnd::elif;
+    default:
+      throw std::runtime_error(std::format(
+          "Unexpected token [{}], found after parsing #else directive",
+          to_string(types[cur_t])));
+    }
+  };
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
@@ -1452,9 +1735,9 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
   }
   ++cur_t;
   auto lex = lexemes[cur_lex++];
-  auto then_branch = vector<ptr<AstNode>>();
-  auto elif_branches = vector<ptr<ElifNode>>();
-  auto else_branch = ptr<ElseNode>(nullptr);
+  auto then_branch = std::vector<std::unique_ptr<AstNode>>();
+  auto elif_branches = std::vector<std::unique_ptr<ElifNode>>();
+  auto else_branch = std::unique_ptr<ElseNode>(nullptr);
   enum class FoundEnd {
     none,
     elif,
@@ -1507,6 +1790,20 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
         std::format("Unterminated #ifndef directive found"));
   }
 
+  auto const determine_state = [this](auto const cur_t) {
+    switch (types[cur_t]) {
+    case ir_t::ELSE:
+      return FoundEnd::_else;
+    case ir_t::ENDIF:
+      return FoundEnd::endif;
+    case ir_t::ELIF:
+      return FoundEnd::elif;
+    default:
+      throw std::runtime_error(std::format(
+          "Unexpected token [{}], found after parsing #else directive",
+          to_string(types[cur_t])));
+    }
+  };
   while (cur != FoundEnd::none) {
     switch (cur) {
     case FoundEnd::elif:
@@ -1519,6 +1816,7 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
              (types[cur_t] != ir_t::ELSE || types[cur_t] != ir_t::ENDIF)) {
         elif_branches.push_back(handle_elif(cur_t, cur_lex));
       }
+      cur = determine_state(cur_t);
       break;
     case FoundEnd::_else:
       if (else_branch != nullptr) {
@@ -1527,6 +1825,7 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
             "#ifndef directive");
       }
       else_branch = handle_else(cur_t, cur_lex);
+      cur = determine_state(cur_t);
       break;
     case FoundEnd::endif:
       ++cur_t;
@@ -1534,7 +1833,6 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
       break;
     case FoundEnd::none:
       unreachable();
-      break;
     }
   }
 
@@ -1552,11 +1850,20 @@ auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
 
   switch (types[cur_t]) {
   case ir_t::LPAREN: {
-    auto parameters = vector<string>();
+    auto is_variadic = false;
+    auto parameters = std::vector<std::string>();
     ++cur_t;
     while (types[cur_t] == ir_t::LEXEME) {
       parameters.push_back(lexemes[cur_lex++]);
       ++cur_t;
+    }
+    // idk this is just something to make things work, so far we don't support
+    // actually evaluating these functions (or any functions actually), but this
+    // makes it so that we can parse these
+    if (types[cur_t] == ir_t::VARIADIC) {
+      parameters.push_back("__VA_ARGS__");
+      ++cur_t;
+      is_variadic = true;
     }
     expect(cur_t, ir_t::RPAREN);
     ++cur_t;
@@ -1565,8 +1872,13 @@ auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
     }
     ++cur_t;
     auto body = lexemes[cur_lex++];
-    return std::make_unique<DefineFuncNode>(
-        std::move(lex), std::move(parameters), std::move(body));
+    if (is_variadic) {
+      return std::make_unique<DefineVariadicFuncNode>(
+          std::move(lex), std::move(parameters), std::move(body));
+    } else {
+      return std::make_unique<DefineFuncNode>(
+          std::move(lex), std::move(parameters), std::move(body));
+    }
   } break;
   case ir_t::MACRO: {
     auto macro = lexemes[cur_lex++];
@@ -1594,17 +1906,25 @@ auto Lexer::handle_include(size_t &cur_t, size_t &cur_lex)
   ++cur_t;
   switch (types[cur_t]) {
   case ir_t::LANGLE: {
-    cur_t += 3;
+    cur_t += 2;
     return std::make_unique<GlobalIncludeNode>(lexemes[cur_lex++]);
   } break;
   case ir_t::QUOTE: {
-    cur_t += 3;
+    cur_t += 2;
     return std::make_unique<LocalIncludeNode>(lexemes[cur_lex++]);
   } break;
+  case ir_t::MACRO: {
+#ifdef DEBUG_CPP
+    // display(std::cout);
+#endif // DEBUG_CPP
+    ++cur_t;
+    return std::make_unique<MacroIncludeNode>(lexemes[cur_lex++]);
+  } break;
   default: {
-    throw std::runtime_error(std::format("Malformed #include statement, "
-                                         "expected '<' or '\"', found [{}]",
-                                         to_string(types[cur_t])));
+    throw std::runtime_error(
+        std::format("Malformed #include statement, "
+                    "expected '<', '\"', or MACRO, found [{}]",
+                    to_string(types[cur_t])));
   }
   }
 }
@@ -1620,13 +1940,25 @@ auto Lexer::handle_pragma(size_t &cur_t, size_t &cur_lex)
   return std::make_unique<PragmaNode>(value);
 }
 
-auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
+auto Lexer::handle_warning(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<AstNode> {
+  ++cur_t;
+  if (types[cur_t] != ir_t::LEXEME)
+    throw std::runtime_error(
+        std::format("Expected lexeme in #warning preprocessor directive"));
+  ++cur_t;
+  auto value = lexemes[cur_lex++];
+  return std::make_unique<WarningNode>(value);
+}
+
+auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<ElifNode> {
   ++cur_t;
   expect(cur_t, ir_t::MACRO);
   auto condition = lexemes[cur_lex++];
   ++cur_t;
 
-  auto then_branch = vector<ptr<AstNode>>();
+  auto then_branch = std::vector<std::unique_ptr<AstNode>>();
   while (cur_t < types.size()) {
     if (types[cur_t] == ir_t::ELSE || types[cur_t] == ir_t::ELIF ||
         types[cur_t] == ir_t::ENDIF)
@@ -1650,11 +1982,12 @@ auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
     case ir_t::INCLUDE:
       then_branch.push_back(handle_include(cur_t, cur_lex));
       break;
-    case ir_t::PRAGMA: {
-      auto res = handle_pragma(cur_t, cur_lex);
-      if (res)
-        then_branch.push_back(std::move(res));
-    } break;
+    case ir_t::PRAGMA:
+      then_branch.push_back(handle_pragma(cur_t, cur_lex));
+      break;
+    case ir_t::WARNING:
+      then_branch.push_back(handle_warning(cur_t, cur_lex));
+      break;
     case ir_t::ELIF:
       [[fallthrough]];
     case ir_t::ENDIF:
@@ -1663,9 +1996,9 @@ auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
       unreachable();
       break;
     default:
-      throw std::runtime_error(
-          std::format("Unexpected token [{}] found in top level scope.",
-                      to_string(types[cur_t])));
+      throw std::runtime_error(std::format("Unexpected token [{}] found in top "
+                                           "level scope, near #elif directive.",
+                                           to_string(types[cur_t])));
     }
   }
 
@@ -1674,9 +2007,10 @@ auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
 }
 
 // it could be a good idea to have this #else consume the #endif(?)
-auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
+auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<ElseNode> {
   ++cur_t;
-  auto res = vector<ptr<AstNode>>();
+  auto res = std::vector<std::unique_ptr<AstNode>>();
   auto looping = true;
   while (looping && cur_t < types.size()) {
     switch (types[cur_t]) {
@@ -1698,11 +2032,12 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
     case ir_t::INCLUDE:
       res.push_back(handle_include(cur_t, cur_lex));
       break;
-    case ir_t::PRAGMA: {
-      auto prag = handle_pragma(cur_t, cur_lex);
-      if (prag)
-        res.push_back(std::move(prag));
-    } break;
+    case ir_t::PRAGMA:
+      res.push_back(handle_pragma(cur_t, cur_lex));
+      break;
+    case ir_t::WARNING:
+      res.push_back(handle_warning(cur_t, cur_lex));
+      break;
     case ir_t::ELSE: // this error *should* be handled elsewhere
       [[fallthrough]];
     case ir_t::ELIF:
@@ -1712,14 +2047,16 @@ auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
       break;
     default:
       throw std::runtime_error(
-          std::format("Unexpected token [{}] found in top level scope.",
+          std::format("Unexpected token [{}] found in top "
+                      "level scope, near a #else directive.",
                       to_string(types[cur_t])));
     }
   }
   return std::make_unique<ElseNode>(std::move(res));
 }
 
-auto Lexer::expect(size_t cur_t, ir_t tkn, string_view calling_func) -> void {
+auto Lexer::expect(size_t cur_t, ir_t tkn, std::string_view calling_func)
+    -> void {
   enum class FailReason {
     OOB,
     Unexpected,
@@ -1761,274 +2098,585 @@ auto Lexer::expect(size_t cur_t, ir_t tkn, string_view calling_func) -> void {
 
 #ifdef DEBUG_CPP
 auto Lexer::display(std::ostream &out) const noexcept -> std::ostream & {
-  out << "Types:" NL "\t";
+  out << "Types:" LM_NL "\t";
   for (auto const &type : types) {
     out << '[' << to_string(type) << ']';
   }
-  out << NL;
-  out << "Lexemes:" NL "\t";
+  out << LM_NL;
+  out << "Lexemes:" LM_NL "\t";
   for (auto const &lexeme : lexemes) {
     out << '[' << lexeme << ']';
   }
-  out << NL;
+  out << LM_NL;
   return out;
 }
 #endif // DEBUG_CPP
 
-auto ExprNode::make_defined(string &&str) noexcept -> ExprNode {
-  return ExprNode(ExprNode::DEFINED, Defined{std::move(str)});
+ExprNode::ExprNode() noexcept {
+  std::memset(storage.data(), 0, STORAGE_SIZE);
+  new (storage.data()) Expr_t(Expr_t::NONE);
+  new (storage.data() + sizeof(Expr_t)) Interned(Interned::NONE);
 }
 
-auto ExprNode::eval(string_view const expr,
-                    std::unordered_map<std::string, Macro> const &macros,
-                    std::unordered_set<std::string> const &def_macros) -> int {
-  auto const expr_lex = Expressions::lex(expr);
-  auto const expansion = Expressions::expand(expr_lex, macros, def_macros);
-  // TODO: report if the expansion is empty, i.e. if you have a case like
-  // ```
-  // #define MACRO
-  // #if MACRO
-  // #endif
-  // ```
-  // in that case, this becomes a malformed program
-  return Expressions::eval_impl(expansion.to_ast(), macros, def_macros);
-}
-
-auto operator<<(std::ostream &out, ExprNode const &en) noexcept
-    -> std::ostream & {
-  switch (en.t) {
-  case ExprNode::INT:
-    out << std::get<ExprNode::Integer>(en.val).i;
-    break;
-  case ExprNode::NUMBER:
-    out << std::get<ExprNode::Number>(en.val).f;
-    break;
-  case ExprNode::DEFINED:
-    out << "defined (" << std::get<ExprNode::Defined>(en.val).str << ")";
-    break;
-  case ExprNode::CHARLIT:
-    out << std::get<ExprNode::CharLit>(en.val).str;
-    break;
-  case ExprNode::GROUPING: {
-    auto const &group = std::get<ExprNode::Grouping>(en.val);
-    out << "(" << group.expr << ")";
-  } break;
-  case ExprNode::BINARY: {
-    auto &bin = std::get<ExprNode::Binary>(en.val);
-    switch (bin.t) {
-    case ExprNode::Binary::PLUS:
-      out << '+';
-      break;
-    case ExprNode::Binary::MINUS:
-      out << '-';
-      break;
-    case ExprNode::Binary::TIMES:
-      out << '*';
-      break;
-    case ExprNode::Binary::DIVIDE:
-      out << '/';
-      break;
-    case ExprNode::Binary::GREATER:
-      out << '>';
-      break;
-    case ExprNode::Binary::GREATER_EQ:
-      out << '>' << '=';
-      break;
-    case ExprNode::Binary::LESS:
-      out << '<';
-      break;
-    case ExprNode::Binary::LESS_EQ:
-      out << '<' << '=';
-      break;
-    case ExprNode::Binary::NEQ:
-      out << '!' << '=';
-      break;
-    case ExprNode::Binary::EQ:
-      out << '=' << '=';
-      break;
-    case ExprNode::Binary::AND:
-      out << '&' << '&';
-      break;
-    case ExprNode::Binary::OR:
-      out << '|' << '|';
-      break;
+ExprNode::~ExprNode() noexcept {
+  // have to manually call the dtor because we placement new them
+  switch (expr_t()) {
+  case Expr_t::CHARLIT: {
+    if (storage[sizeof(Expr_t)] == 0xbe) {
+      // small string, all on the stack, nothing to do
+    } else if (storage[sizeof(Expr_t)] == 0xff) {
+      auto *buffer = static_cast<char *>(nullptr);
+      std::memcpy(&buffer, storage.data() + 2 * sizeof(size_t), sizeof(char *));
+      // we call this with new[] in the ctor, it's just nested in the placement
+      // new call
+      delete[] buffer;
+    } else {
+      std::cerr << "Memory corruption with the storage buffer";
+      std::terminate();
     }
-    out << *bin.lhs << ' ' << *bin.rhs;
   } break;
-  case ExprNode::UNARY: {
-    auto &un = std::get<ExprNode::Unary>(en.val);
-    switch (un.t) {
-    case ExprNode::Unary::BANG:
-      out << '!';
-      break;
-    case ExprNode::Unary::MINUS:
-      out << '-';
-      break;
+  case Expr_t::GROUPING: {
+    auto *grp = reinterpret_cast<ExprNode *>(storage.data() + sizeof(size_t));
+    grp->~ExprNode();
+  } break;
+  case Expr_t::BINARY: {
+    if (!is_interned<Interned::FIRST>()) {
+      auto *lhs = reinterpret_cast<ExprNode *>(storage.data() + sizeof(size_t));
+      lhs->~ExprNode();
     }
-    out << *un.un;
+    if (!is_interned<Interned::SECOND>()) {
+      auto *rhs =
+          reinterpret_cast<ExprNode *>(storage.data() + 2 * sizeof(size_t));
+      rhs->~ExprNode();
+    }
   } break;
-  case ExprNode::NONE:
-    break;
+  case Expr_t::UNARY: {
+    if (!is_interned<Interned::FIRST>()) {
+      auto *un = reinterpret_cast<ExprNode *>(storage.data() + sizeof(size_t));
+      un->~ExprNode();
+    }
+  } break;
+  case Expr_t::INT:
+    [[fallthrough]];
+  case Expr_t::NONE:
+    break; // nothing to do, all on the stack
   }
-  return out;
+}
+
+ExprNode::ExprNode(ExprNode &&that) noexcept
+// std::memcpy(storage.data(), that.storage.data(), STORAGE_SIZE); ?
+// : storage(std::move(that.storage))
+{
+  storage = std::move(that.storage);
+  // tag that so that when it's dtor is called nothing happens
+  new (that.storage.data()) Expr_t(Expr_t::NONE);
+}
+auto ExprNode::operator=(ExprNode &&that) noexcept -> ExprNode & {
+  // both *this and that should be correctly constructed objects so this
+  // *should* work, assuming that they're actually swapping the array's and not
+  // the pointers
+  std::swap(storage, that.storage);
+  return *this;
+}
+
+auto ExprNode::eval() const -> int {
+  switch (expr_t()) {
+  case Expr_t::INT: {
+    auto const val = to<Integer>().i;
+    if (val > std::numeric_limits<int>::max()) {
+      throw std::runtime_error("Undefined behaviour, integer overflow");
+    }
+    return static_cast<int>(val);
+  } break;
+  case Expr_t::BINARY: {
+    // this feels like big ub :(
+    auto bin = to<Binary>();
+    auto lhs = int{};
+    if (is_interned<Interned::FIRST>()) {
+      auto const tmp_lhs = get_interned<Interned::FIRST>();
+      if (tmp_lhs > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(
+            "Undefined behaviour, integer overflow in binary expression");
+      }
+      lhs = static_cast<int>(tmp_lhs);
+    } else {
+      lhs = bin.lhs->eval();
+    }
+    auto rhs = int{};
+    if (is_interned<Interned::SECOND>()) {
+      auto const tmp_rhs = get_interned<Interned::SECOND>();
+      if (tmp_rhs > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(
+            "Undefined behaviour, integer overflow in binary expression");
+      }
+      rhs = static_cast<int>(tmp_rhs);
+    } else {
+      rhs = bin.rhs->eval();
+    }
+    switch (meta_data<ExprNode::Binary::Binary_t>()) {
+    case ExprNode::Binary::Binary_t::PLUS:
+      return lhs + rhs;
+    case ExprNode::Binary::Binary_t::MINUS:
+      return lhs - rhs;
+    case ExprNode::Binary::Binary_t::TIMES:
+      return lhs * rhs;
+    case ExprNode::Binary::Binary_t::DIVIDE:
+      return lhs / rhs;
+    case ExprNode::Binary::Binary_t::GREATER:
+      return lhs > rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::GREATER_EQ:
+      return lhs >= rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::LESS:
+      return lhs < rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::LESS_EQ:
+      return lhs <= rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::NEQ:
+      return lhs != rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::EQ:
+      return lhs == rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::AND:
+      return lhs && rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::OR:
+      return lhs || rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::LSHIFT:
+      return lhs << rhs;
+    case ExprNode::Binary::Binary_t::RSHIFT:
+      return lhs >> rhs;
+    }
+  } break;
+  case Expr_t::UNARY: {
+    auto sub_expr = int{};
+    if (is_interned<Interned::FIRST>()) {
+      auto const tmp = get_interned<Interned::FIRST>();
+      if (tmp > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(
+            "Undefined behaviour, integer overflow in unary expression");
+      }
+      sub_expr = static_cast<int>(tmp);
+    } else {
+      auto const un = to<Unary>();
+      sub_expr = un.un->eval();
+    }
+    auto const un_t = meta_data<Unary::Unary_t>();
+    switch (un_t) {
+    case Unary::Unary_t::BANG:
+      return !sub_expr;
+    case Unary::Unary_t::MINUS:
+      return -sub_expr;
+    }
+    unreachable();
+  } break;
+  case Expr_t::GROUPING: {
+    if (is_interned<Interned::FIRST>()) {
+      auto const tmp = get_interned<Interned::FIRST>();
+      if (tmp > std::numeric_limits<int>::max())
+        throw std::runtime_error("Undefined behaviour, integer overflow");
+    } else {
+      auto const sub = to<Grouping>();
+      return sub.expr->eval();
+    }
+  } break;
+  case Expr_t::NONE: {
+    throw std::runtime_error(
+        "Attempting to eval nothing, probably an internal error :)");
+  } break;
+  case Expr_t::CHARLIT: {
+    throw std::runtime_error("Eval char lit not allowed, need to stop this");
+  } break;
+  }
+  unreachable();
+  return 0;
+}
+
+auto ExprNode::expr_t() const noexcept -> ExprNode::Expr_t {
+  auto expr_t = Expr_t{};
+  std::memcpy(&expr_t, storage.data(), sizeof(Expr_t));
+  return expr_t;
+}
+
+#ifdef DEBUG_CPP
+auto ExprNode::to_string() const noexcept -> std::string {
+  auto str = std::string();
+  str += '[';
+  str += to_string(expr_t());
+  str += ']';
+  switch (expr_t()) {
+  case Expr_t::INT: {
+    str += "{.i=";
+    auto val = size_t{};
+    std::memcpy(&val, storage.data() + sizeof(size_t), sizeof(size_t));
+    str += std::to_string(val);
+    str += "}";
+  } break;
+  case Expr_t::CHARLIT: {
+    str += "{.char_lit=";
+    str += to<ExprNode::CharLit>().str;
+    str += "}";
+  } break;
+  case Expr_t::GROUPING: {
+    str += "{.grp=";
+    if (is_interned<Interned::FIRST>()) {
+      str += std::to_string(get_interned<Interned::FIRST>());
+    } else {
+      str += to<ExprNode::Grouping>().expr->to_string();
+    }
+    str += "}";
+  } break;
+  case Expr_t::BINARY: {
+    str += "{.bin_t=";
+    auto const bin_t = meta_data<ExprNode::Binary::Binary_t>();
+    switch (bin_t) {
+    case ExprNode::Binary::Binary_t::PLUS:
+      str += '+';
+      break;
+    case ExprNode::Binary::Binary_t::MINUS:
+      str += '-';
+      break;
+    case ExprNode::Binary::Binary_t::TIMES:
+      str += '*';
+      break;
+    case ExprNode::Binary::Binary_t::DIVIDE:
+      str += '/';
+      break;
+    case ExprNode::Binary::Binary_t::GREATER:
+      str += '>';
+      break;
+    case ExprNode::Binary::Binary_t::LSHIFT:
+      str += "<<";
+      break;
+    case ExprNode::Binary::Binary_t::RSHIFT:
+      str += ">>";
+      break;
+    case ExprNode::Binary::Binary_t::GREATER_EQ:
+      str += ">=";
+      break;
+    case ExprNode::Binary::Binary_t::LESS:
+      str += '<';
+      break;
+    case ExprNode::Binary::Binary_t::LESS_EQ:
+      str += "<=";
+      break;
+    case ExprNode::Binary::Binary_t::NEQ:
+      str += "!=";
+      break;
+    case ExprNode::Binary::Binary_t::EQ:
+      str += "==";
+      break;
+    case ExprNode::Binary::Binary_t::AND:
+      str += "&&";
+      break;
+    case ExprNode::Binary::Binary_t::OR:
+      str += "||";
+      break;
+    default:
+      unreachable();
+    }
+    str += ",lhs=";
+    if (is_interned<Interned::FIRST>()) {
+      str += std::to_string(get_interned<Interned::FIRST>());
+    } else {
+      str += to<ExprNode::Binary>().lhs->to_string();
+    }
+    str += ",rhs=";
+    if (is_interned<Interned::SECOND>()) {
+      str += std::to_string(get_interned<Interned::SECOND>());
+    } else {
+      str += to<ExprNode::Binary>().rhs->to_string();
+    }
+    str += "}";
+  } break;
+  case Expr_t::UNARY: {
+    str += "{.un_t=";
+    auto const un_t = meta_data<ExprNode::Unary::Unary_t>();
+    switch (un_t) {
+    case Unary::Unary_t::BANG:
+      str += '!';
+      break;
+    case Unary::Unary_t::MINUS:
+      str += '-';
+      break;
+    }
+    str += ",un=";
+    if (is_interned<Interned::FIRST>()) {
+      str += std::to_string(get_interned<Interned::FIRST>());
+    } else {
+      str += to<ExprNode::Unary>().un->to_string();
+    }
+    str += "}";
+  } break;
+  case Expr_t::NONE: {
+    str += "{}";
+  } break;
+  }
+  return str;
+}
+
+auto ExprNode::display(std::ostream &out) const noexcept -> std::ostream & {
+  return out << to_string();
+}
+#endif // DEBUG_CPP
+
+template <ExprNode::Interned interned>
+auto constexpr ExprNode::is_interned() const noexcept -> bool {
+  if (interned == Interned::NONE)
+    return false;
+  auto const interned_byte = static_cast<Interned>(storage[sizeof(Expr_t)]);
+  // check if the specific bit is set, because the interned_byte is a bitmap
+  return static_cast<u8>(interned) ==
+         (static_cast<u8>(interned_byte) & static_cast<u8>(interned));
+}
+
+template <ExprNode::Interned interned>
+auto constexpr ExprNode::get_interned() const noexcept -> size_t {
+  if (interned == Interned::NONE)
+    throw std::runtime_error("Unable to get nothing");
+  auto res = size_t{};
+  ::memcpy(&res,
+           storage.data() +
+               (interned == Interned::FIRST ? 1 : 2) * sizeof(size_t),
+           sizeof(size_t));
+  return res;
 }
 
 Ast::Ast() { nodes.reserve(20); }
 
-auto Expressions::ExprLexer::to_ast() const -> ExprNode {
+auto Expressions::ExprLexer::to_ast(allocator::Page &page) const -> ExprNode {
   auto cur_t = size_t{};
   auto cur_lex = size_t{};
-  return expression(cur_t, cur_lex);
+  return expression(page, cur_t, cur_lex);
 }
 
-auto Expressions::ExprLexer::expression(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  return _or(cur_t, cur_lex);
+auto Expressions::ExprLexer::expand(pp::MacroMap const &macros,
+                                    pp::StringSet const &defs) -> ExprLexer & {
+  auto tkn_i = size_t{};
+  auto lex_i = size_t{};
+
+  for (auto fully_expanded = true;;) {
+    switch (tkns[tkn_i]) {
+    case expr_t::LPAREN:
+      [[fallthrough]];
+    case expr_t::RPAREN:
+      [[fallthrough]];
+    case expr_t::AND:
+      [[fallthrough]];
+    case expr_t::OR:
+      [[fallthrough]];
+    case expr_t::BIT_AND:
+      [[fallthrough]];
+    case expr_t::BIT_OR:
+      [[fallthrough]];
+    case expr_t::DEFINED:
+      [[fallthrough]];
+    case expr_t::LESS:
+      [[fallthrough]];
+    case expr_t::LESS_EQ:
+      [[fallthrough]];
+    case expr_t::GREATER:
+      [[fallthrough]];
+    case expr_t::GREATER_EQ:
+      [[fallthrough]];
+    case expr_t::LSHIFT:
+      [[fallthrough]];
+    case expr_t::RSHIFT:
+      [[fallthrough]];
+    case expr_t::STRINGIZING:
+      [[fallthrough]];
+    case expr_t::CONCAT:
+      [[fallthrough]];
+    case expr_t::PLUS:
+      [[fallthrough]];
+    case expr_t::MINUS:
+      [[fallthrough]];
+    case expr_t::STAR:
+      [[fallthrough]];
+    case expr_t::SLASH:
+      [[fallthrough]];
+    case expr_t::BANG_EQ:
+      [[fallthrough]];
+    case expr_t::EQ:
+      [[fallthrough]];
+    case expr_t::EQ_EQ:
+      [[fallthrough]];
+    case expr_t::LIT_TRUE:
+      [[fallthrough]];
+    case expr_t::LIT_FALSE:
+      [[fallthrough]];
+    case expr_t::BANG:
+      break;
+    case expr_t::LIT_CHAR:
+      break;
+    case expr_t::LIT_DEC:
+      break;
+    case expr_t::LIT_HEX:
+      break;
+    case expr_t::LIT_OCT:
+      break;
+    case expr_t::LIT_BIN:
+      break;
+    case expr_t::LIT_FLOAT:
+      break;
+    case expr_t::MACRO:
+      break;
+    }
+    if (fully_expanded)
+      return *this;
+  }
+  throw std::runtime_error("not impl");
+  unreachable();
 }
 
-auto Expressions::ExprLexer::_or(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = _and(cur_t, cur_lex);
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {OR})) {
+auto Expressions::ExprLexer::resolve(pp::MacroMap const &macros,
+                                     pp::StringSet const &defs) -> ExprLexer & {
+  throw std::runtime_error("not impl");
+  return *this;
+}
+
+auto Expressions::ExprLexer::ast(allocator::Page &alloc) -> ExprNode {
+  throw std::runtime_error("not impl");
+}
+
+auto Expressions::ExprLexer::expression(allocator::Page &page, size_t &cur_t,
+                                        size_t &cur_lex) const -> ExprNode {
+  return _or(page, cur_t, cur_lex);
+}
+
+auto Expressions::ExprLexer::_or(allocator::Page &page, size_t &cur_t,
+                                 size_t &cur_lex) const -> ExprNode {
+  auto lhs = _and(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {expr_t::OR})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = _and(cur_t, cur_lex);
-
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = _and(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
   return lhs;
 }
 
-auto Expressions::ExprLexer::_and(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = equality(cur_t, cur_lex);
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {AND})) {
+auto Expressions::ExprLexer::_and(allocator::Page &page, size_t &cur_t,
+                                  size_t &cur_lex) const -> ExprNode {
+  auto lhs = equality(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() && matching(tkns[cur_t], {expr_t::AND})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = equality(cur_t, cur_lex);
-
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = equality(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
   return lhs;
 }
 
-auto Expressions::ExprLexer::equality(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = comparison(cur_t, cur_lex);
-
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {BANG_EQ, EQ_EQ})) {
-    auto const tkn = tkns[cur_t++];
-    auto rhs = comparison(cur_t, cur_lex);
-
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
-  }
-
-  return lhs;
-}
-
-auto Expressions::ExprLexer::comparison(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = term(cur_t, cur_lex);
-
+auto Expressions::ExprLexer::equality(allocator::Page &page, size_t &cur_t,
+                                      size_t &cur_lex) const -> ExprNode {
+  auto lhs = comparison(page, cur_t, cur_lex);
   while (cur_t < tkns.size() &&
-         matching(tkns[cur_t], {LESS, LESS_EQ, GREATER, GREATER_EQ})) {
+         matching(tkns[cur_t], {expr_t::BANG_EQ, expr_t::EQ_EQ})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = term(cur_t, cur_lex);
-
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = comparison(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
-
   return lhs;
 }
 
-auto Expressions::ExprLexer::term(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = factor(cur_t, cur_lex);
-
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {PLUS, MINUS})) {
+auto Expressions::ExprLexer::comparison(allocator::Page &page, size_t &cur_t,
+                                        size_t &cur_lex) const -> ExprNode {
+  auto lhs = shift(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {expr_t::LESS, expr_t::LESS_EQ, expr_t::GREATER,
+                                expr_t::GREATER_EQ})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = factor(cur_t, cur_lex);
-
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = shift(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
-
   return lhs;
 }
 
-auto Expressions::ExprLexer::factor(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  auto lhs = unary(cur_t, cur_lex);
-
-  while (cur_t < tkns.size() && matching(tkns[cur_t], {STAR, SLASH})) {
+auto Expressions::ExprLexer::shift(allocator::Page &page, size_t &cur_t,
+                                   size_t &cur_lex) const -> ExprNode {
+  auto lhs = term(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {expr_t::LSHIFT, expr_t::RSHIFT})) {
     auto const tkn = tkns[cur_t++];
-    auto rhs = unary(cur_t, cur_lex);
-
-    lhs = make_binary(tkn, std::move(lhs), std::move(rhs));
+    auto rhs = term(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
-
   return lhs;
 }
 
-auto Expressions::ExprLexer::unary(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
-  if (cur_t < tkns.size() && matching(tkns[cur_t], {BANG, MINUS})) {
+auto Expressions::ExprLexer::term(allocator::Page &page, size_t &cur_t,
+                                  size_t &cur_lex) const -> ExprNode {
+  auto lhs = factor(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {expr_t::PLUS, expr_t::MINUS})) {
     auto const tkn = tkns[cur_t++];
-    auto un = unary(cur_t, cur_lex);
-    return make_unary(tkn, std::move(un));
+    auto rhs = factor(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
   }
-  return primary(cur_t, cur_lex);
+  return lhs;
 }
 
-auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
-    -> ExprNode {
+auto Expressions::ExprLexer::factor(allocator::Page &page, size_t &cur_t,
+                                    size_t &cur_lex) const -> ExprNode {
+  auto lhs = unary(page, cur_t, cur_lex);
+  while (cur_t < tkns.size() &&
+         matching(tkns[cur_t], {expr_t::STAR, expr_t::SLASH})) {
+    auto const tkn = tkns[cur_t++];
+    auto rhs = unary(page, cur_t, cur_lex);
+    lhs = make_binary(page, tkn, std::move(lhs), std::move(rhs));
+  }
+  return lhs;
+}
+
+auto Expressions::ExprLexer::unary(allocator::Page &page, size_t &cur_t,
+                                   size_t &cur_lex) const -> ExprNode {
+  if (cur_t < tkns.size() &&
+      matching(tkns[cur_t], {expr_t::BANG, expr_t::MINUS})) {
+    auto const tkn = tkns[cur_t++];
+    auto un = unary(page, cur_t, cur_lex);
+    return make_unary(page, tkn, std::move(un));
+  }
+  return primary(page, cur_t, cur_lex);
+}
+
+auto Expressions::ExprLexer::primary(allocator::Page &page, size_t &cur_t,
+                                     size_t &cur_lex) const -> ExprNode {
   // TODO
   switch (tkns[cur_t]) {
-  case MACRO:
+  case expr_t::LIT_CHAR:
     break;
-  case LIT_CHAR:
-    break;
-  case LIT_DEC:
+  case expr_t::LIT_DEC:
     ++cur_t;
     return make_integer(expr_t::LIT_DEC, macros[cur_lex++]);
-  case LIT_HEX:
+  case expr_t::LIT_HEX:
     ++cur_t;
     return make_integer(expr_t::LIT_HEX, macros[cur_lex++]);
     break;
-  case LIT_OCT:
+  case expr_t::LIT_OCT:
     break;
-  case LIT_BIN:
+  case expr_t::LIT_BIN:
     break;
-  case LIT_FLOAT:
+  case expr_t::LIT_FLOAT:
     break;
-  case LPAREN: {
+  case expr_t::LIT_TRUE:
+    return ExprNode::from(ExprNode::Integer{1});
+  case expr_t::LIT_FALSE:
+    return ExprNode::from(ExprNode::Integer{0});
+  case expr_t::LPAREN: {
     ++cur_t;
-    auto res = expression(cur_t, cur_lex);
-    if (tkns[cur_t] != RPAREN) {
+    auto res = expression(page, cur_t, cur_lex);
+    if (tkns[cur_t] != expr_t::RPAREN) {
       throw std::runtime_error(
           std::format("While parsing a grouping expression, "
                       "expected a ')' to wrap the expression"));
     }
     ++cur_t;
-    return ExprNode(
-        ExprNode::GROUPING,
-        ExprNode::Grouping{std::make_unique<ExprNode>(std::move(res))});
-  } break;
-  case DEFINED: {
-    ++cur_t;
-    auto lex = string();
-    if (tkns[cur_t] == LPAREN) {
-      ++cur_t;
-      expect(cur_t, MACRO);
-      ++cur_t;
-      lex = macros[cur_lex++];
-      expect(cur_t, RPAREN);
-      ++cur_t;
+    if (res.expr_t() == ExprNode::Expr_t::INT) {
+      // this can happen during macro expansion, where you just need the
+      // operator precedence to be reset when evaluating a macro
+      return res;
     } else {
-      expect(cur_t, MACRO);
-      ++cur_t;
-      lex = macros[cur_lex++];
+      page.init();
+      auto *expr_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(res));
+      return ExprNode::from(ExprNode::Grouping{expr_ptr});
     }
-    return ExprNode::make_defined(std::move(lex));
   } break;
-
   default:
     throw std::runtime_error(
         std::format("Unexpected token [{}] found while parsing an expression",
@@ -2042,102 +2690,140 @@ auto Expressions::ExprLexer::primary(size_t &cur_t, size_t &cur_lex) const
 #ifdef DEBUG_CPP
 auto Expressions::ExprLexer::display(std::ostream &out) const noexcept
     -> std::ostream & {
-  out << "Tokens:" NL "\t";
+  out << "Tokens:" LM_NL "\t";
   for (auto const &type : tkns) {
     out << '[' << to_string(type) << ']';
   }
-  out << NL;
-  out << "Macros:" NL "\t";
+  out << LM_NL;
+  out << "Macros:" LM_NL "\t";
   for (auto const &macro : macros) {
     out << '[' << macro << ']';
   }
-  out << NL;
+  out << LM_NL;
   return out;
 }
 #endif // DEBUG_CPP
 
-auto Expressions::lex(string_view const str) -> ExprLexer {
-  auto constexpr defined_str = string_view{"defined"};
-  auto tkns = vector<expr_t>();
-  auto macros = vector<string>();
+auto Expressions::lex(std::string_view const str) -> ExprLexer {
+  auto constexpr defined_str = std::string_view{"defined"};
+  auto tkns = std::vector<expr_t>();
+  auto macros = std::vector<std::string>();
   for (auto i = size_t{}; i < str.size();) {
-    // TODO: probably add a macro for these basic types so that we don't have to
-    // write out a bunch of things every time, and so that this function can be
-    // smaller
-    switch (auto ch = str[i]) {
+    switch (auto const ch = str[i]) {
     case '+':
-      tkns.push_back(PLUS);
       ++i;
+      tkns.push_back(expr_t::PLUS);
       break;
+    case '-':
+      ++i;
+      tkns.push_back(expr_t::MINUS);
+      break;
+    case '*':
+      ++i;
+      tkns.push_back(expr_t::STAR);
+      break;
+    case '/':
+      ++i;
+      if (i >= str.size())
+        throw std::runtime_error("found '/' not attached to anything, when "
+                                 "evaluating a macro near #(el)?if");
+      if (str[i] == '/') {
+        i = luamake::skip_until('\n', str, i);
+        // "single line" comment
+        // [[https://mastodon.social/@winter_on_mars/116801779149164950]]
+        // TODO: test that this actually works
+        auto const possible_slash = luamake::back_while(' ', str, i);
+        if (possible_slash != 0 && str[possible_slash] == '\\')
+          throw std::runtime_error("fuck you");
+      } else if (str[i] == '*') { // multi-line comment
+        for (;;) {
+          i = luamake::skip_until('*', str, i);
+          if (i >= str.size() || i + 1 >= str.size())
+            throw std::runtime_error(
+                "Unterminated multi-line comment found near #(el)?if");
+          if (str[i + 1] == '/')
+            break;
+          ++i; // make sure we don't get in an infinite loop
+        }
+        ++i;   // i + 1 == '/'
+      } else { // math
+        tkns.push_back(expr_t::SLASH);
+      }
     case '(':
-      tkns.push_back(LPAREN);
+      tkns.push_back(expr_t::LPAREN);
       ++i;
       break;
     case ')':
-      tkns.push_back(RPAREN);
+      tkns.push_back(expr_t::RPAREN);
       ++i;
       break;
     case '|': {
       ++i;
       if (i < str.size() && str[i] == '|') {
         ++i;
-        tkns.push_back(OR);
+        tkns.push_back(expr_t::OR);
       } else {
-        tkns.push_back(BIT_OR);
+        tkns.push_back(expr_t::BIT_OR);
       }
     } break;
     case '&': {
       ++i;
       if (i < str.size() && str[i] == '&') {
         ++i;
-        tkns.push_back(AND);
+        tkns.push_back(expr_t::AND);
       } else {
-        tkns.push_back(BIT_AND);
+        tkns.push_back(expr_t::BIT_AND);
       }
     } break;
     case '=': {
       ++i;
       if (i < str.size() && str[i] == '=') {
         ++i;
-        tkns.push_back(EQ_EQ);
+        tkns.push_back(expr_t::EQ_EQ);
       } else {
-        tkns.push_back(EQ);
+        tkns.push_back(expr_t::EQ);
       }
     } break;
     case '!': {
       ++i;
       if (i < str.size() && str[i] == '=') {
         ++i;
-        tkns.push_back(BANG_EQ);
+        tkns.push_back(expr_t::BANG_EQ);
       } else {
-        tkns.push_back(BANG);
+        tkns.push_back(expr_t::BANG);
       }
     } break;
     case '<': {
       ++i;
       if (i < str.size() && str[i] == '=') {
         ++i;
-        tkns.push_back(LESS_EQ);
+        tkns.push_back(expr_t::LESS_EQ);
+      } else if (i < str.size() && str[i] == '<') {
+        ++i;
+        tkns.push_back(expr_t::LSHIFT);
       } else {
-        tkns.push_back(LESS);
+        tkns.push_back(expr_t::LESS);
       }
     } break;
     case '>': {
       ++i;
       if (i < str.size() && str[i] == '=') {
         ++i;
-        tkns.push_back(GREATER_EQ);
+        tkns.push_back(expr_t::GREATER_EQ);
+      } else if (i < str.size() && str[i] == '>') {
+        ++i;
+        tkns.push_back(expr_t::RSHIFT);
       } else {
-        tkns.push_back(GREATER);
+        tkns.push_back(expr_t::GREATER);
       }
     } break;
     case '#': {
       ++i;
       if (i < str.size() && str[i] == '#') {
         ++i;
-        tkns.push_back(STRINGIZING);
+        tkns.push_back(expr_t::STRINGIZING);
       } else {
-        tkns.push_back(CONCAT);
+        tkns.push_back(expr_t::CONCAT);
       }
     } break;
     case '.':
@@ -2150,12 +2836,12 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
           strncmp(str.data() + i, defined_str.data(), defined_str.size()) ==
               0) {
         i += defined_str.size();
-        tkns.push_back(DEFINED);
+        tkns.push_back(expr_t::DEFINED);
       } else {
         auto const start = i;
-        i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
-        tkns.push_back(MACRO);
-        macros.push_back(string(str.data() + start, str.data() + i));
+        i = luamake::skip_until(delims.lexeme, str, i);
+        tkns.push_back(expr_t::MACRO);
+        macros.push_back(std::string(str.data() + start, str.data() + i));
       }
     } break;
     case ' ':
@@ -2167,11 +2853,17 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
     default: {
       if (is_digit(ch)) {
         lex_integer(str, i, tkns, macros);
-      } else {
+      } else if (is_alpha(ch) || ch == '_') {
+        // TODO: also something about unicode
+        // property XID_Start
+        // [[https://en.cppreference.com/cpp/language/identifiers]]
         auto const start = i;
-        i = luamake::skip_until(delims_at(delims::LEXEME), str, i);
-        tkns.push_back(MACRO);
-        macros.push_back(string(str.data() + start, str.data() + i));
+        i = luamake::skip_until(delims.lexeme, str, i);
+        tkns.push_back(expr_t::MACRO);
+        macros.push_back(std::string(str.data() + start, str.data() + i));
+      } else {
+        throw std::runtime_error(
+            std::format("Expression lexing, unknown char [{}]", ch));
       }
     }
     }
@@ -2181,15 +2873,15 @@ auto Expressions::lex(string_view const str) -> ExprLexer {
 
 // for now we just throw out any integer suffix, we'll have to actually add
 // support for that
-auto Expressions::lex_integer(string_view const str, size_t &i,
-                              vector<expr_t> &tkns, vector<string> &macros)
-    -> void {
+auto Expressions::lex_integer(std::string_view const str, size_t &i,
+                              std::vector<expr_t> &tkns,
+                              std::vector<std::string> &macros) -> void {
   auto constexpr integer_suffix = std::string_view{"ulzULZ"};
   if (str[i] != '0') {
     auto const start = i;
-    i = luamake::skip_while(delims_at(delims::ALLOWED_DECIMAL), str, i);
-    tkns.push_back(LIT_DEC);
-    macros.push_back(string(str.data() + start, str.data() + i));
+    i = luamake::skip_while(delims.allowed_dec, str, i);
+    tkns.push_back(expr_t::LIT_DEC);
+    macros.push_back(std::string(str.data() + start, str.data() + i));
     // NOTE: we technically need to worry about the order of things, for
     // instance, we allow code that looks like zlu, which isn't an allowed
     // integer suffix, but i don't care about fixing that right now
@@ -2199,8 +2891,8 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
   // str[i] == 0
   ++i;
   if (!(i < str.size())) {
-    tkns.push_back(LIT_DEC);
-    macros.push_back(string(1, '0'));
+    tkns.push_back(expr_t::LIT_DEC);
+    macros.push_back(std::string(1, '0'));
     return;
   }
 
@@ -2234,16 +2926,16 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
   ++i;
 
   // spacing to work with the format strings
-  auto constexpr to_string = [](int_type int_t) -> string_view {
+  auto constexpr to_string = [](int_type int_t) -> std::string_view {
     switch (int_t) {
     case int_type::DECIMAL:
-      return string_view{" decimal"};
+      return std::string_view{" decimal"};
     case int_type::BINARY:
-      return string_view{" binary"};
+      return std::string_view{" binary"};
     case int_type::HEX:
-      return string_view{" hexadecimal"};
+      return std::string_view{" hexadecimal"};
     case int_type::OCTAL:
-      return string_view{"n octal"};
+      return std::string_view{"n octal"};
     }
     unreachable();
   };
@@ -2251,13 +2943,13 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
   auto constexpr is_allowed_char = [](int_type int_t, char ch) -> bool {
     switch (int_t) {
     case int_type::DECIMAL:
-      return is_any_of(delims_at(delims::ALLOWED_DECIMAL), ch);
+      return is_any_of(delims.allowed_dec, ch);
     case int_type::BINARY:
-      return is_any_of(delims_at(delims::ALLOWED_BINARY), ch);
+      return is_any_of(delims.allowed_bin, ch);
     case int_type::HEX:
-      return is_any_of(delims_at(delims::ALLOWED_HEX), ch);
+      return is_any_of(delims.allowed_hex, ch);
     case int_type::OCTAL:
-      return is_any_of(delims_at(delims::ALLOWED_OCTAL), ch);
+      return is_any_of(delims.allocwed_octal, ch);
     }
     unreachable();
   };
@@ -2275,181 +2967,253 @@ auto Expressions::lex_integer(string_view const str, size_t &i,
         allow_quote = false;
         ++i;
       }
+    } else {
+      if (!is_allowed_char(int_t, str[i])) {
+        break;
+      }
+      /*
+      if (!is_allowed_char(int_t, str[i])) {
+        throw std::runtime_error(std::format("While parsing a{} integer, found "
+                                    "[{}], a not supported character",
+                                    to_string(int_t), str[i]));
+      }
+      */
+      ++i;
+      allow_quote = true;
     }
-    if (!is_allowed_char(int_t, str[i])) {
-      break;
-    }
-    /*
-    if (!is_allowed_char(int_t, str[i])) {
-      throw std::runtime_error(std::format("While parsing a{} integer, found "
-                                  "[{}], a not supported character",
-                                  to_string(int_t), str[i]));
-    }
-    */
-    ++i;
-    allow_quote = true;
   }
   tkns.push_back([](int_type int_t) {
     switch (int_t) {
     case int_type::DECIMAL:
-      return LIT_DEC;
+      return expr_t::LIT_DEC;
     case int_type::BINARY:
-      return LIT_BIN;
+      return expr_t::LIT_BIN;
     case int_type::OCTAL:
-      return LIT_OCT;
+      return expr_t::LIT_OCT;
     case int_type::HEX:
-      return LIT_HEX;
+      return expr_t::LIT_HEX;
     }
     unreachable();
   }(int_t));
-  macros.push_back(string(str.data() + start, str.data() + i));
+  macros.push_back(std::string(str.data() + start, str.data() + i));
   i = skip_while(integer_suffix, str, i);
 }
 
-auto Expressions::eval_impl(
-    ExprNode const &e, std::unordered_map<std::string, Macro> const &macros,
-    std::unordered_set<std::string> const &def_macros) -> int {
-  switch (e.t) {
-  case ExprNode::INT:
-    return static_cast<int>(std::get<ExprNode::Integer>(e.val).i);
-  case ExprNode::DEFINED:
-    return is_defined(std::get<ExprNode::Defined>(e.val).str, macros,
-                      def_macros)
-               ? 1
-               : 0;
-  // TODO: report this kind of error earlier
-  case ExprNode::NUMBER:
-    [[fallthrough]];
-  case ExprNode::CHARLIT:
+auto Expressions::eval(std::string_view const expr, allocator::Page &alloc,
+                       pp::MacroMap const &macros, pp::StringSet const &defs)
+    -> int {
+  try {
+    /*
+    auto const _ast = Expressions::lex(expr)
+                          .expand(macros, defs)
+                          .resolve(macros, defs)
+                          .ast(page);
+                          */
+    auto const expr_lex = Expressions::lex(expr);
+#ifdef DEBUG_CPP
+    expr_dbg("expr_lex");
+    expr_lex.display(std::cout).flush();
+#endif
+    auto const expansion = Expressions::expand(expr_lex, macros, defs);
+#ifdef DEBUG_CPP
+    expr_dbg("expansion");
+    expansion.display(std::cout).flush();
+#endif
+    if (expansion.tkns.size() == 0) {
+      // TODO: remove the catch ..., so that this can get through
+      throw std::runtime_error(
+          "Macro expansion resulted in a blank string, unable to evaluate");
+    }
+    auto const ast = expansion.to_ast(alloc);
+    return ast.eval();
+  } catch (...) {
+    // this is just a hack, if something goes wrong, then we just return false,
+    // it's probably ok, because if the expression is too complicated, then it's
+    // probably not used to guard includes (hopefully)
+#ifdef DEBUG_CPP
+    std::cout << std::format(
+        LM_HELP "Trouble" LM_NORMAL ": evaluating expression [{}]" LM_NL, expr);
+#endif // DEBUG_CPP
+    return 0;
+  }
+  return 0;
+}
+
+auto Expressions::eval_impl(ExprNode const &e) -> int {
+  switch (e.expr_t()) {
+  case ExprNode::Expr_t::INT:
+    return static_cast<int>(e.to<ExprNode::Integer>().i);
+  case ExprNode::Expr_t::CHARLIT:
+    // TODO: report this kind of error earlier
     throw std::runtime_error(
         std::format("While evaluating if expression found a not integer."));
-  case ExprNode::GROUPING: {
-    auto const &group = std::get<ExprNode::Grouping>(e.val);
-    return eval_impl(*group.expr, macros, def_macros);
+  case ExprNode::Expr_t::GROUPING: {
+    auto const group = e.to<ExprNode::Grouping>();
+    return eval_impl(*group.expr);
   }
-  case ExprNode::BINARY: {
-    auto &bin = std::get<ExprNode::Binary>(e.val);
-    auto const lhs = eval_impl(*bin.lhs, macros, def_macros);
-    auto const rhs = eval_impl(*bin.rhs, macros, def_macros);
-    switch (bin.t) {
-    case ExprNode::Binary::PLUS:
+  case ExprNode::Expr_t::BINARY: {
+    auto const bin = e.to<ExprNode::Binary>();
+    auto const lhs = eval_impl(*bin.lhs);
+    auto const rhs = eval_impl(*bin.rhs);
+    switch (e.meta_data<ExprNode::Binary::Binary_t>()) {
+    case ExprNode::Binary::Binary_t::PLUS:
       return lhs + rhs;
-    case ExprNode::Binary::MINUS:
+    case ExprNode::Binary::Binary_t::MINUS:
       return lhs - rhs;
-    case ExprNode::Binary::TIMES:
+    case ExprNode::Binary::Binary_t::TIMES:
       return lhs * rhs;
-    case ExprNode::Binary::DIVIDE:
+    case ExprNode::Binary::Binary_t::DIVIDE:
       return lhs / rhs;
-    case ExprNode::Binary::GREATER:
+    case ExprNode::Binary::Binary_t::GREATER:
       return lhs > rhs ? 1 : 0;
-    case ExprNode::Binary::GREATER_EQ:
+    case ExprNode::Binary::Binary_t::GREATER_EQ:
       return lhs >= rhs ? 1 : 0;
-    case ExprNode::Binary::LESS:
+    case ExprNode::Binary::Binary_t::LESS:
       return lhs < rhs ? 1 : 0;
-    case ExprNode::Binary::LESS_EQ:
+    case ExprNode::Binary::Binary_t::LESS_EQ:
       return lhs <= rhs ? 1 : 0;
-    case ExprNode::Binary::NEQ:
+    case ExprNode::Binary::Binary_t::NEQ:
       return lhs != rhs ? 1 : 0;
-    case ExprNode::Binary::EQ:
+    case ExprNode::Binary::Binary_t::EQ:
       return lhs == rhs ? 1 : 0;
-    case ExprNode::Binary::AND:
+    case ExprNode::Binary::Binary_t::AND:
       return lhs && rhs ? 1 : 0;
-    case ExprNode::Binary::OR:
+    case ExprNode::Binary::Binary_t::OR:
       return lhs || rhs ? 1 : 0;
+    case ExprNode::Binary::Binary_t::LSHIFT:
+      return lhs << rhs;
+    case ExprNode::Binary::Binary_t::RSHIFT:
+      return lhs >> rhs;
     }
   }
-  case ExprNode::UNARY: {
-    auto &un = std::get<ExprNode::Unary>(e.val);
-    auto const res = eval_impl(*un.un, macros, def_macros);
-    switch (un.t) {
-    case ExprNode::Unary::MINUS:
+  case ExprNode::Expr_t::UNARY: {
+    auto const un = e.to<ExprNode::Unary>();
+    auto const res = eval_impl(*un.un);
+    switch (e.meta_data<ExprNode::Unary::Unary_t>()) {
+    case ExprNode::Unary::Unary_t::MINUS:
       return -res;
-    case ExprNode::Unary::BANG:
+    case ExprNode::Unary::Unary_t::BANG:
       return !res;
     }
     unreachable();
   }
-  case ExprNode::NONE:
+  case ExprNode::Expr_t::NONE:
     throw std::runtime_error(
         std::format("Attempting to evaluate an uninitialized expression."));
   }
   unreachable();
 }
 
-auto Expressions::make_binary(Expressions::expr_t tkn, ExprNode &&lhs,
-                              ExprNode &&rhs) noexcept -> ExprNode {
+auto Expressions::make_binary(allocator::Page &page, Expressions::expr_t tkn,
+                              ExprNode &&lhs, ExprNode &&rhs) noexcept
+    -> ExprNode {
   auto bin_t = [](expr_t tkn) {
     switch (tkn) {
-    case PLUS:
-      return ExprNode::Binary::PLUS;
-    case MINUS:
-      return ExprNode::Binary::MINUS;
-    case SLASH:
-      return ExprNode::Binary::DIVIDE;
-    case STAR:
-      return ExprNode::Binary::TIMES;
-    case GREATER:
-      return ExprNode::Binary::GREATER;
-    case GREATER_EQ:
-      return ExprNode::Binary::GREATER_EQ;
-    case LESS:
-      return ExprNode::Binary::LESS;
-    case LESS_EQ:
-      return ExprNode::Binary::LESS_EQ;
-    case BANG_EQ:
-      return ExprNode::Binary::NEQ;
-    case EQ_EQ:
-      return ExprNode::Binary::EQ;
-    case AND:
-      return ExprNode::Binary::AND;
-    case OR:
-      return ExprNode::Binary::OR;
+    case expr_t::PLUS:
+      return ExprNode::Binary::Binary_t::PLUS;
+    case expr_t::MINUS:
+      return ExprNode::Binary::Binary_t::MINUS;
+    case expr_t::SLASH:
+      return ExprNode::Binary::Binary_t::DIVIDE;
+    case expr_t::STAR:
+      return ExprNode::Binary::Binary_t::TIMES;
+    case expr_t::GREATER:
+      return ExprNode::Binary::Binary_t::GREATER;
+    case expr_t::GREATER_EQ:
+      return ExprNode::Binary::Binary_t::GREATER_EQ;
+    case expr_t::LESS:
+      return ExprNode::Binary::Binary_t::LESS;
+    case expr_t::LESS_EQ:
+      return ExprNode::Binary::Binary_t::LESS_EQ;
+    case expr_t::BANG_EQ:
+      return ExprNode::Binary::Binary_t::NEQ;
+    case expr_t::EQ_EQ:
+      return ExprNode::Binary::Binary_t::EQ;
+    case expr_t::AND:
+      return ExprNode::Binary::Binary_t::AND;
+    case expr_t::OR:
+      return ExprNode::Binary::Binary_t::OR;
+    case expr_t::LSHIFT:
+      return ExprNode::Binary::Binary_t::LSHIFT;
+    case expr_t::RSHIFT:
+      return ExprNode::Binary::Binary_t::RSHIFT;
     default:
       unreachable();
     }
   }(tkn);
-  auto bin =
-      ExprNode::Binary{std::make_unique<ExprNode>(std::move(lhs)),
-                       std::make_unique<ExprNode>(std::move(rhs)), bin_t};
-  return ExprNode(ExprNode::BINARY, std::move(bin));
+  if (lhs.expr_t() == ExprNode::Expr_t::INT) {
+    if (rhs.expr_t() == ExprNode::Expr_t::INT) {
+      // intern both
+      return ExprNode::from(bin_t, lhs.to<ExprNode::Integer>(),
+                            rhs.to<ExprNode::Integer>());
+    } else {
+      // intern lhs not rhs
+      page.init();
+      auto *rhs_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(rhs));
+      return ExprNode::from(bin_t, lhs.to<ExprNode::Integer>(), rhs_ptr);
+    }
+  } else {
+    if (rhs.expr_t() == ExprNode::Expr_t::INT) {
+      // intern rhs
+      page.init();
+      auto *lhs_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(lhs));
+      return ExprNode::from(bin_t, lhs_ptr, rhs.to<ExprNode::Integer>());
+    } else {
+      // intern neither lhs nor rhs
+      page.init();
+      auto *lhs_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(lhs));
+      auto *rhs_ptr =
+          new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(rhs));
+      return ExprNode::from(bin_t, lhs_ptr, rhs_ptr);
+    }
+  }
+  unreachable();
 }
 
-auto Expressions::make_unary(Expressions::expr_t tkn, ExprNode &&un) noexcept
-    -> ExprNode {
+auto Expressions::make_unary(allocator::Page &page, Expressions::expr_t tkn,
+                             ExprNode &&un) noexcept -> ExprNode {
   auto un_t = [](expr_t tkn) {
     switch (tkn) {
-    case MINUS:
-      return ExprNode::Unary::MINUS;
-    case BANG:
-      return ExprNode::Unary::BANG;
+    case expr_t::MINUS:
+      return ExprNode::Unary::Unary_t::MINUS;
+    case expr_t::BANG:
+      return ExprNode::Unary::Unary_t::BANG;
     default:
       unreachable();
     }
   }(tkn);
-  auto _un = ExprNode::Unary{std::make_unique<ExprNode>(std::move(un)), un_t};
-  return ExprNode(ExprNode::UNARY, std::move(_un));
+  if (un.expr_t() == ExprNode::Expr_t::INT) {
+    return ExprNode::from(un_t, un.to<ExprNode::Integer>());
+  } else {
+    page.init();
+    auto *un_ptr = new (page.alloc(sizeof(ExprNode))) ExprNode(std::move(un));
+    return ExprNode::from(un_t, un_ptr);
+  }
 }
 
 auto Expressions::make_integer(Expressions::expr_t tkn,
-                               string_view str) noexcept -> ExprNode {
+                               std::string_view str) noexcept -> ExprNode {
   // TODO: idk i feel like i could do better but this is fine
   auto i = [str](expr_t tkn) -> size_t {
     switch (tkn) {
-    case LIT_DEC: {
+    case expr_t::LIT_DEC: {
       auto res = size_t{};
       sscanf(str.data(), "%zu", &res);
       return res;
     } break;
-    case LIT_HEX: {
+    case expr_t::LIT_HEX: {
       auto res = size_t{};
       sscanf(str.data(), "%zx", &res);
       return res;
     } break;
-    case LIT_CHAR:
+    case expr_t::LIT_CHAR:
       [[fallthrough]];
-    case LIT_OCT:
+    case expr_t::LIT_OCT:
       [[fallthrough]];
-    case LIT_BIN:
+    case expr_t::LIT_BIN:
       throw std::runtime_error(std::format(
           "Parsing Expr_t [{}], is not currently implimented", to_string(tkn)));
       break;
@@ -2457,15 +3221,14 @@ auto Expressions::make_integer(Expressions::expr_t tkn,
       unreachable();
     }
   }(tkn);
-  return ExprNode(ExprNode::INT, ExprNode::Integer{i});
+  return ExprNode::from(ExprNode::Integer{i});
 }
 
 auto Expressions::expand(Expressions::ExprLexer const &lexer,
-                         std::unordered_map<std::string, Macro> const &macros,
-                         std::unordered_set<std::string> const &def_macros)
+                         pp::MacroMap const &macros, StringSet const &defs)
     -> ExprLexer {
-  auto tkns = vector<expr_t>();
-  auto lexes = vector<string>();
+  auto tkns = std::vector<expr_t>();
+  auto lexes = std::vector<std::string>();
   tkns.reserve(lexer.tkns.size());
   lexes.reserve(lexer.macros.size());
 
@@ -2478,32 +3241,24 @@ auto Expressions::expand(Expressions::ExprLexer const &lexer,
     case expr_t::MACRO: {
       ++tkn_i;
       auto const macro_to_expand = lexer.macros[macro_i++];
-      auto const [expansion_tkns, expansion_lexes] =
-          expand_macro(macro_to_expand, macros, def_macros);
-
-      tkns.reserve(tkns.size() + expansion_tkns.size());
-      lexes.reserve(lexes.size() + expansion_lexes.size());
-      for (auto i = size_t{}; i < expansion_tkns.size(); ++i) {
-        tkns.push_back(expansion_tkns[i]);
-      }
-      for (auto i = size_t{}; i < expansion_lexes.size(); ++i) {
-        lexes.push_back(expansion_lexes[i]);
-      }
+      auto &&[expansion_tkns, expansion_lexes] =
+          expand_macro(macro_to_expand, macros, defs);
+      vec_append(tkns, std::move(expansion_tkns));
+      vec_append(lexes, std::move(expansion_lexes));
     } break;
-    // TODO: we could just optimize this here and replace all instances of
-    // defined calls, but for now i'm just trying to get something to work
     case expr_t::DEFINED: {
-      tkns.push_back(expr_t::DEFINED);
       ++tkn_i;
-      // NOTE: we consume any parens, so that there are no parens, this is fine
-      // to do by the standard, and a small optimization(?)
-      if (lexer.tkns[tkn_i] == LPAREN) {
+      if (lexer.tkns[tkn_i] == expr_t::LPAREN) {
         ++tkn_i; // LPAREN
-        tkns.push_back(MACRO);
         ++tkn_i; // MACRO
         ++tkn_i; // RPAREN
+      } else {
+        ++tkn_i; // MACRO
       }
-      lexes.push_back(lexer.macros[macro_i++]);
+      auto const mac = lexer.macros[macro_i];
+      ++macro_i;
+      auto const is_def = is_defined(mac, macros, defs);
+      tkns.push_back(is_def ? expr_t::LIT_TRUE : expr_t::LIT_FALSE);
     } break;
     case expr_t::LIT_CHAR:
       [[fallthrough]];
@@ -2527,12 +3282,12 @@ auto Expressions::expand(Expressions::ExprLexer const &lexer,
   return ExprLexer{tkns, lexes};
 }
 
-auto Expressions::expand_macro(
-    string const &macro_to_expand,
-    std::unordered_map<std::string, Macro> const &macros,
-    std::unordered_set<std::string> const &def_macros) noexcept -> ExprLexer {
-  auto tkns = vector<expr_t>();
-  auto lexes = vector<string>();
+auto Expressions::expand_macro(std::string const &macro_to_expand,
+                               pp::MacroMap const &macros,
+                               pp::StringSet const &def_macros) noexcept
+    -> ExprLexer {
+  auto tkns = std::vector<expr_t>();
+  auto lexes = std::vector<std::string>();
 
   // NOTE: check if we need to recursively call this function until there's no
   // more macros, it might be done just in the expand function idk?
@@ -2544,7 +3299,7 @@ auto Expressions::expand_macro(
              val != def_macros.end()) {
     // nothing to do in this case
   } else {
-    tkns.push_back(LIT_DEC);
+    tkns.push_back(expr_t::LIT_DEC);
     lexes.push_back("0");
   }
   return ExprLexer{tkns, lexes};
@@ -2552,7 +3307,7 @@ auto Expressions::expand_macro(
 
 #ifdef DEBUG_CPP
 auto AstPrinter::visit_if(IfNode &i) -> void {
-  out << get_indents() << "(if (" << i.condition << ")" NL;
+  out << get_indents() << "(if (" << i.condition << ")" LM_NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2564,11 +3319,11 @@ auto AstPrinter::visit_if(IfNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_ifdef(IfDefNode &i) -> void {
-  out << get_indents() << "(ifdef (" << i.macro << ")" NL;
+  out << get_indents() << "(ifdef (" << i.macro << ")" LM_NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2580,11 +3335,11 @@ auto AstPrinter::visit_ifdef(IfDefNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_ifndef(IfNDefNode &i) -> void {
-  out << get_indents() << "(ifndef (" << i.macro << ")" NL;
+  out << get_indents() << "(ifndef (" << i.macro << ")" LM_NL;
   ++depth;
   for (auto &&thens : i.then_branch) {
     thens->accept(*this);
@@ -2596,35 +3351,41 @@ auto AstPrinter::visit_ifndef(IfNDefNode &i) -> void {
     i.else_branch->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_elif(ElifNode &e) -> void {
-  out << get_indents() << "(elif (" << e.condition << ")" NL;
+  out << get_indents() << "(elif (" << e.condition << ")" LM_NL;
   ++depth;
   for (auto &&thens : e.then_branch) {
     thens->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_else(ElseNode &e) -> void {
-  out << get_indents() << "(else (" NL;
+  out << get_indents() << "(else (" LM_NL;
   ++depth;
   for (auto &&elses : e.stmts) {
     elses->accept(*this);
   }
   --depth;
-  out << get_indents() << ")" NL;
+  out << get_indents() << ")" LM_NL;
 }
 
 auto AstPrinter::visit_global_include(GlobalIncludeNode &global) -> void {
-  out << get_indents() << "(include global (" << global.path << "))" NL;
+  out << get_indents() << "(include global (" << global.path << "))" LM_NL;
 }
 
 auto AstPrinter::visit_local_include(LocalIncludeNode &local) -> void {
-  out << get_indents() << "(include local (" << local.path << "))" NL;
+  out << get_indents() << "(include local (" << local.path << "))" LM_NL;
+}
+
+auto AstPrinter::visit_macro_include(MacroIncludeNode &bitch_ass_stupid_case)
+    -> void {
+  out << get_indents() << "(include MACRO (" << bitch_ass_stupid_case.path
+      << "))" LM_NL;
 }
 
 auto AstPrinter::visit_define(DefineNode &d) -> void {
@@ -2634,7 +3395,7 @@ auto AstPrinter::visit_define(DefineNode &d) -> void {
     out << d.lexeme.value();
     out << '}';
   }
-  out << "))" NL;
+  out << "))" LM_NL;
 }
 
 auto AstPrinter::visit_define_func(DefineFuncNode &f) -> void {
@@ -2643,28 +3404,42 @@ auto AstPrinter::visit_define_func(DefineFuncNode &f) -> void {
     out << param << ",";
   }
   out << ")";
-  out << "{" << f.body << "}))" NL;
+  out << "{" << f.body << "}))" LM_NL;
+}
+
+auto AstPrinter::visit_define_variadic_func(DefineVariadicFuncNode &func)
+    -> void {
+  out << get_indents() << "(define (" << func.name << "(";
+  for (auto &&param : func.parameters) {
+    out << param << ",";
+  }
+  out << ")";
+  out << "{" << func.body << "}))" LM_NL;
 }
 
 auto AstPrinter::visit_undef(UndefNode &u) -> void {
   out << get_indents() << "(undef (" << u.name;
-  out << "))" NL;
+  out << "))" LM_NL;
 }
 
 auto AstPrinter::visit_pragma(PragmaNode &p) -> void {
-  out << get_indents() << "(pragma {" << p.value << "})" NL;
+  out << get_indents() << "(pragma {" << p.value << "})" LM_NL;
+}
+
+auto AstPrinter::visit_warning(WarningNode &w) -> void {
+  out << get_indents() << "(warning {" << w.value << "})" LM_NL;
 }
 #endif // DEBUG_CPP
 
 auto AstIncluder::visit_if(IfNode &i) -> void {
-  if (ExprNode::eval(i.condition, macros, def_macros) != 0) {
+  if (Expressions::eval(i.condition, alloc, macros, defs) != 0) {
     for (auto &&thens : i.then_branch) {
       thens->accept(*this);
     }
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
+    if (Expressions::eval(elif->condition, alloc, macros, defs) != 0) {
       elif->accept(*this);
       return;
     }
@@ -2675,14 +3450,14 @@ auto AstIncluder::visit_if(IfNode &i) -> void {
 }
 
 auto AstIncluder::visit_ifdef(IfDefNode &i) -> void {
-  if (is_defined(i.macro, macros, def_macros)) {
+  if (is_defined(i.macro, macros, defs)) {
     for (auto &&thens : i.then_branch) {
       thens->accept(*this);
     }
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
+    if (Expressions::eval(elif->condition, alloc, macros, defs) != 0) {
       elif->accept(*this);
       return;
     }
@@ -2693,14 +3468,14 @@ auto AstIncluder::visit_ifdef(IfDefNode &i) -> void {
 }
 
 auto AstIncluder::visit_ifndef(IfNDefNode &i) -> void {
-  if (!is_defined(i.macro, macros, def_macros)) {
+  if (!is_defined(i.macro, macros, defs)) {
     for (auto &&thens : i.then_branch) {
       thens->accept(*this);
     }
     return;
   }
   for (auto &&elif : i.elif_branches) {
-    if (ExprNode::eval(elif->condition, macros, def_macros) != 0) {
+    if (Expressions::eval(elif->condition, alloc, macros, defs) != 0) {
       elif->accept(*this);
       return;
     }
@@ -2730,17 +3505,21 @@ auto AstIncluder::visit_local_include(LocalIncludeNode &local) -> void {
   paths.push_back(local.path);
 }
 
+auto AstIncluder::visit_macro_include(MacroIncludeNode &local) -> void {
+  throw std::runtime_error("Fuck you not doing that");
+}
+
 auto AstIncluder::visit_define(DefineNode &d) -> void {
   if (d.lexeme) {
     macros[d.name] = d.lexeme.value();
   } else {
-    def_macros.insert(d.name);
+    defs.insert(d.name);
   }
 }
 
 auto AstIncluder::visit_define_func(DefineFuncNode &f) -> void {
   // when we fix how function macros are stored, we'll need to update this
-  auto cur_format = [&f]() -> string {
+  auto cur_format = [&f]() -> std::string {
     auto res = f.name;
     res.append("(");
     for (auto i = size_t{}; i < f.parameters.size(); ++i) {
@@ -2754,11 +3533,30 @@ auto AstIncluder::visit_define_func(DefineFuncNode &f) -> void {
   macros[cur_format] = f.body;
 }
 
+// TODO: we have to properly handle __VA_ARGS__, how they're stored/bound when
+// called
+auto AstIncluder::visit_define_variadic_func(DefineVariadicFuncNode &func)
+    -> void {
+  // when we fix how function macros are stored, we'll need to update this
+  auto cur_format = [&func]() -> std::string {
+    auto res = func.name;
+    res.append("(");
+    for (auto i = size_t{}; i < func.parameters.size(); ++i) {
+      res.append(func.parameters[i]);
+      if (i != func.parameters.size() - 1)
+        res.append(",");
+    }
+    res.append(")");
+    return res;
+  }();
+  macros[cur_format] = func.body;
+}
+
 auto AstIncluder::visit_undef(UndefNode &u) -> void {
   if (macros.contains(u.name)) {
     macros.erase(u.name);
-  } else if (def_macros.contains(u.name)) {
-    def_macros.erase(u.name);
+  } else if (defs.contains(u.name)) {
+    defs.erase(u.name);
   } else {
     //  apparently it's perfectly fine to #undef a non-existant macro, at
     //  least according to clang i should check what the docs have to say
@@ -2770,33 +3568,880 @@ auto AstIncluder::visit_pragma(PragmaNode &) -> void {
   return; // ? idk if there's actually anything for us to do here
 }
 
-auto Interpreter::interpret(std::string_view const file) -> vector<fs::path> {
-  auto ast = Lexer::lex(file).ast();
-  auto vec = vector<fs::path>();
+auto AstIncluder::visit_warning(WarningNode &warn) -> void {
+  std::cerr << std::format("Warning: [{}]" LM_NL, warn.value);
+}
+
+namespace B {
+// basically just a namespace with, but by doing it this way we can write
+// something like `delims.`, which i like for the syntax
+struct Delimiters final {
+  static auto constexpr ws = std::string_view{" \t\n\r"};
+  static auto constexpr define = std::string_view{" \t\n\r("};
+  static auto constexpr lex_switch = std::string_view{"#/\"'"};
+};
+auto constexpr chars = Delimiters{};
+
+// there are more, but for us (as far as i can tell), these are the only ones we
+// care about
+enum class pp_t : u8 {
+  IF,
+  IFDEF,
+  IFNDEF,
+  ELIF,
+  ELSE,
+  ENDIF,
+  DEFINE,
+  DEFINE_FUNC,
+  INCLUDE,
+  UNDEF,
+  PRAGMA,
+  _EOF,
+};
+
+auto constexpr to_string(pp_t tkn) noexcept -> std::string_view {
+  switch (tkn) {
+  case pp_t::IF:
+    return std::string_view("IF");
+  case pp_t::IFDEF:
+    return std::string_view("IFDEF");
+  case pp_t::IFNDEF:
+    return std::string_view("IFNDEF");
+  case pp_t::ELIF:
+    return std::string_view("ELIF");
+  case pp_t::ELSE:
+    return std::string_view("ELSE");
+  case pp_t::ENDIF:
+    return std::string_view("ENDIF");
+  case pp_t::DEFINE:
+    return std::string_view("DEFINE");
+  case pp_t::DEFINE_FUNC:
+    return std::string_view("DEFINE_FUNC");
+  case pp_t::INCLUDE:
+    return std::string_view("INCLUDE");
+  case pp_t::UNDEF:
+    return std::string_view("UNDEF");
+  case pp_t::PRAGMA:
+    return std::string_view("PRAGMA");
+  case pp_t::_EOF:
+    return std::string_view("_EOF");
+  }
+}
+
+template <class T>
+auto constexpr nin(T obj, std::initializer_list<T> &&set) noexcept -> bool {
+  return std::find(set.begin(), set.end(), obj) == set.end();
+}
+
+static auto const keywords = std::unordered_map<std::string_view, pp_t>{
+    {{std::string_view{"#if"}, pp_t::IF},
+     {std::string_view{"#ifdef"}, pp_t::IFDEF},
+     {std::string_view{"#ifndef"}, pp_t::IFNDEF},
+     {std::string_view{"#elif"}, pp_t::ELIF},
+     {std::string_view{"#else"}, pp_t::ELSE},
+     {std::string_view{"#endif"}, pp_t::ENDIF},
+     {std::string_view{"#define"}, pp_t::DEFINE},
+     {std::string_view{"#include"}, pp_t::INCLUDE},
+     {std::string_view{"#undef"}, pp_t::UNDEF},
+     {std::string_view{"#pragma"}, pp_t::PRAGMA}}};
+
+struct LazyParser final {
+  LazyParser(std::string_view const file) noexcept
+      : buffer(file), i(0), cur_lex() {}
+  LazyParser(LazyParser &&) noexcept = default;
+  LazyParser &operator=(LazyParser &&) noexcept = default;
+
+  auto get_includes(allocator::Page &, pp::MacroMap &, pp::StringSet &)
+      -> std::vector<fs::path>;
+
+  LazyParser() = delete;
+  LazyParser(LazyParser const &) = delete;
+  LazyParser &operator=(LazyParser const &) = delete;
+
+private:
+  std::string_view buffer;
+  size_t i;
+  std::string_view cur_lex;
+  pp_t cur_tkn;
+
+  // NOTE: sets the current lexeme, if the returned token corresponds with one
+  // of the lex types
+  auto next() -> pp_t;
+
+  auto goto_next_branch() -> void;
+  auto goto_matching_endif() -> void;
+  // evaluates the current_lex
+  auto eval(allocator::Page &, pp::MacroMap &, pp::StringSet &) -> int;
+
+  auto parse_decl(std::vector<fs::path> &, allocator::Page &, pp::MacroMap &,
+                  pp::StringSet &) -> void;
+
+  auto handle_if(std::vector<fs::path> &, allocator::Page &, pp::MacroMap &,
+                 pp::StringSet &) -> void;
+
+  auto handle_ifdef(std::vector<fs::path> &, allocator::Page &, pp::MacroMap &,
+                    pp::StringSet &) -> void;
+
+  auto handle_ifndef(std::vector<fs::path> &, allocator::Page &, pp::MacroMap &,
+                     pp::StringSet &) -> void;
+  auto handle_define(allocator::Page &, pp::MacroMap &, pp::StringSet &)
+      -> void;
+
+  auto produce_if_arg() -> std::string_view;
+};
+
+auto LazyParser::get_includes(allocator::Page &alloc, pp::MacroMap &macros,
+                              pp::StringSet &defs) -> std::vector<fs::path> {
+  auto res = std::vector<fs::path>();
+  for (; i < buffer.size();) {
+    parse_decl(res, alloc, macros, defs);
+  }
+  return res;
+}
+
+// TODO
+auto LazyParser::next() -> pp_t {
+  for (;;) {
+    if (i >= buffer.size())
+      return pp_t::_EOF;
+    switch (buffer[i]) {
+    case '#': {
+      auto end = luamake::skip_until(chars.ws, buffer, i);
+      auto const hash_keyword =
+          std::string_view{buffer.begin() + i, buffer.begin() + end};
+      i = end;
+      auto const keyword = keywords.find(hash_keyword);
+      if (keyword == keywords.end())
+        throw std::runtime_error(
+            std::format("preprocessor directive [{}], is not a known directive",
+                        hash_keyword));
+      switch (keyword->second) {
+      case pp_t::IF: {
+        cur_lex = produce_if_arg();
+        return pp_t::IF;
+      } break;
+      case pp_t::INCLUDE: {
+        i = luamake::skip_until(chars.ws, buffer, i) + 1;
+        end = luamake::skip_until('\n', buffer, i);
+        cur_lex = std::string_view(buffer.begin() + i, buffer.begin() + end);
+        i = luamake::skip_until(chars.lex_switch, buffer, end);
+        cur_tkn = pp_t::INCLUDE;
+        return pp_t::INCLUDE;
+      } break;
+      case pp_t::IFDEF: {
+        i = luamake::skip_until(chars.ws, buffer, i) + 1;
+        end = luamake::skip_until(chars.ws, buffer, i + 1);
+        cur_lex = std::string_view{buffer.begin() + i, buffer.begin() + end};
+        i = luamake::skip_until(chars.lex_switch, buffer, end);
+        cur_tkn = pp_t::IFDEF;
+        return pp_t::IFDEF;
+      } break;
+      case pp_t::IFNDEF: {
+        i = luamake::skip_until(chars.ws, buffer, i) + 1;
+        end = luamake::skip_until(chars.ws, buffer, i + 1);
+        cur_lex = std::string_view{buffer.begin() + i, buffer.begin() + end};
+        i = luamake::skip_until(chars.lex_switch, buffer, end);
+        cur_tkn = pp_t::IFNDEF;
+        return pp_t::IFNDEF;
+      } break;
+      case pp_t::ELSE: {
+        i = luamake::skip_until(chars.lex_switch, buffer, end);
+        cur_tkn = pp_t::ELSE;
+        return pp_t::ELSE;
+      } break;
+      case pp_t::ENDIF: {
+        i = luamake::skip_until(chars.lex_switch, buffer, end);
+        cur_tkn = pp_t::ENDIF;
+        return pp_t::ENDIF;
+      } break;
+      case pp_t::DEFINE: {
+        // includes both define and define func, which we'll have to do at the
+        // same time
+        i = luamake::skip_until(chars.ws, buffer, i) + 1;
+        end = luamake::skip_until(chars.define, buffer, i);
+        cur_lex = std::string_view{buffer.begin() + i, buffer.begin() + end};
+        if (end >= buffer.size())
+          throw std::runtime_error("Unterminated #define macro");
+        switch (buffer[end]) {
+        case '(':
+          return pp_t::DEFINE_FUNC;
+        case ' ':
+          [[fallthrough]];
+        case '\t':
+          [[fallthrough]];
+        case '\r':
+          [[fallthrough]];
+        case '\n':
+          return pp_t::DEFINE;
+        default:
+          unreachable();
+        }
+      } break;
+      default:
+        throw std::runtime_error(
+            "idk i'm bored and want to see something happen");
+      }
+    }
+    case '/': {
+      if (i + 1 < buffer.size()) {
+        ++i;
+        switch (buffer[i]) {
+        case '/': // single line comment
+          i = luamake::skip_until('\n', buffer, i) + 1;
+          break;
+        case '*': // multi line comment
+          for (;;) {
+            i = luamake::skip_until('*', buffer, i) + 1;
+            if (i < buffer.size()) {
+              if (buffer[i] == '/') {
+                break;
+              } else {
+                ++i;
+              }
+            } else {
+              throw std::runtime_error("Unterminated multi line comment");
+            }
+          }
+          break;
+        default: // idk probably in some math expression
+          i = luamake::skip_until(chars.lex_switch, buffer, i);
+          break;
+        }
+      } else {
+        // technically don't need to throw(?), but this is a formatting error,
+        // but it's not something that we *need* to worry about
+        throw std::runtime_error("random '/' found not connected to anything");
+      }
+    } break;
+    case '"':
+      [[fallthrough]]; // both of these cases are handled the same
+    case '\'': {
+      auto const ch = buffer[i];
+      do {
+        i = luamake::skip_until(ch, buffer, i + 1);
+        if (!(i < buffer.size())) {
+          throw std::runtime_error("Non terminated character literal");
+        }
+        // when you have a case like '\\', which does happen :)
+      } while (buffer[i - 1] == '\\' && buffer[i - 2] != '\\');
+      i = luamake::skip_until(chars.lex_switch, buffer, i + 1);
+    } break;
+    default:
+      throw std::runtime_error(
+          std::format("Unknown char [{}] found while lexing", buffer[i]));
+    }
+  }
+}
+
+// NOTE: this function makes the next call to next() do some repeated work when
+// discovering the keyword and indexing into it, we should probably make it not
+// do that, but for now this works
+auto LazyParser::goto_next_branch() -> void {
+  for (;;) {
+    if (i >= buffer.size())
+      throw std::runtime_error("Unable to find next branch");
+    switch (buffer[i]) {
+    case '#': {
+      auto end = luamake::skip_until(chars.ws, buffer, i);
+      auto const hash_keyword =
+          std::string_view{buffer.begin() + i, buffer.begin() + end};
+      auto const keyword = keywords.find(hash_keyword);
+      if (keyword == keywords.end()) {
+        i = luamake::skip_until(chars.lex_switch, buffer, i);
+        continue;
+      }
+      switch (keyword->second) {
+      case pp_t::ELIF:
+        cur_lex = produce_if_arg();
+        [[fallthrough]];
+      case pp_t::ENDIF:
+        [[fallthrough]];
+      case pp_t::ELSE:
+        // buffer[i] *should* == '#'
+        cur_tkn = keyword->second;
+        return;
+      default:
+        i = luamake::skip_until(chars.lex_switch, buffer, i);
+        break;
+      }
+    }
+    case '/': {
+      if (i + 1 < buffer.size()) {
+        ++i;
+        switch (buffer[i]) {
+        case '/': // single line comment
+          i = luamake::skip_until('\n', buffer, i) + 1;
+          break;
+        case '*': // multi line comment
+          for (;;) {
+            i = luamake::skip_until('*', buffer, i) + 1;
+            if (i < buffer.size()) {
+              if (buffer[i] == '/') {
+                break;
+              } else {
+                ++i;
+              }
+            } else {
+              throw std::runtime_error("Unterminated multi line comment");
+            }
+          }
+          break;
+        default: // idk probably in some math expression
+          i = luamake::skip_until(chars.lex_switch, buffer, i);
+          break;
+        }
+      } else {
+        // technically don't need to throw(?), but this is a formatting error,
+        // but it's not something that we *need* to worry about
+        throw std::runtime_error("random '/' found not connected to anything");
+      }
+    } break;
+    case '"':
+      [[fallthrough]]; // both of these cases are handled the same
+    case '\'': {
+      auto const ch = buffer[i];
+      do {
+        i = luamake::skip_until(ch, buffer, i + 1);
+        if (!(i < buffer.size())) {
+          throw std::runtime_error("Non terminated character literal");
+        }
+        // when you have a case like '\\', which does happen :)
+      } while (buffer[i - 1] == '\\' && buffer[i - 2] != '\\');
+      i = luamake::skip_until(chars.lex_switch, buffer, i + 1);
+    } break;
+    default:
+      throw std::runtime_error(
+          std::format("Unknown char [{}] found while lexing", buffer[i]));
+    }
+  }
+  // ?
+  unreachable();
+}
+
+// NOTE: this function makes the next call to next() do some repeated work when
+// discovering the keyword and indexing into it, we should probably make it not
+// do that, but for now this works
+auto LazyParser::goto_matching_endif() -> void {
+  auto depth = size_t{0};
+  for (;;) {
+    if (i >= buffer.size())
+      return;
+    switch (buffer[i]) {
+    case '#': {
+      auto end = luamake::skip_until(chars.ws, buffer, i);
+      auto const hash_keyword =
+          std::string_view{buffer.begin() + i, buffer.begin() + end};
+      auto const keyword = keywords.find(hash_keyword);
+      if (keyword == keywords.end()) {
+        i = luamake::skip_until(chars.lex_switch, buffer, i);
+        continue;
+      }
+      switch (keyword->second) {
+      case pp_t::IF:
+        [[fallthrough]];
+      case pp_t::IFDEF:
+        [[fallthrough]];
+      case pp_t::IFNDEF:
+        ++depth;
+        break;
+      case pp_t::ENDIF:
+        if (depth == 0) {
+          cur_tkn = pp_t::ENDIF;
+          return;
+        }
+        --depth;
+        break;
+      default:
+        i = luamake::skip_until(chars.lex_switch, buffer, i);
+        break;
+      }
+    }
+    case '/': {
+      if (i + 1 < buffer.size()) {
+        ++i;
+        switch (buffer[i]) {
+        case '/': // single line comment
+          i = luamake::skip_until('\n', buffer, i) + 1;
+          break;
+        case '*': // multi line comment
+          for (;;) {
+            i = luamake::skip_until('*', buffer, i) + 1;
+            if (i < buffer.size()) {
+              if (buffer[i] == '/') {
+                break;
+              } else {
+                ++i;
+              }
+            } else {
+              throw std::runtime_error("Unterminated multi line comment");
+            }
+          }
+          break;
+        default: // idk probably in some math expression
+          i = luamake::skip_until(chars.lex_switch, buffer, i);
+          break;
+        }
+      } else {
+        // technically don't need to throw(?), but this is a formatting error,
+        // but it's not something that we *need* to worry about
+        throw std::runtime_error("random '/' found not connected to anything");
+      }
+    } break;
+    case '"':
+      [[fallthrough]]; // both of these cases are handled the same
+    case '\'': {
+      auto const ch = buffer[i];
+      do {
+        i = luamake::skip_until(ch, buffer, i + 1);
+        if (!(i < buffer.size())) {
+          throw std::runtime_error("Non terminated character literal");
+        }
+        // when you have a case like '\\', which does happen :)
+      } while (buffer[i - 1] == '\\' && buffer[i - 2] != '\\');
+      i = luamake::skip_until(chars.lex_switch, buffer, i + 1);
+    } break;
+    default:
+      throw std::runtime_error(
+          std::format("Unknown char [{}] found while lexing", buffer[i]));
+    }
+  }
+  throw std::runtime_error("idk how you got here");
+  // ?
+  unreachable();
+}
+
+// TODO: see if it's worth also making this lazy in some sense?
+auto LazyParser::eval(allocator::Page &alloc, pp::MacroMap &macros,
+                      pp::StringSet &defs) -> int {
+  auto const expr_tkn = Expressions::lex(cur_lex);
+  auto const expanded = Expressions::expand(expr_tkn, macros, defs);
+  // see note in ExprNode::eval about malformed programs
+  // TODO: handle the \n chars that are now in the string
+  auto const expr_ast = expanded.to_ast(alloc);
+#ifdef DEBUG_CPP
+  expr_ast.display(std::cout) << std::endl;
+#endif // DEBUG_CPP
+  return Expressions::eval_impl(expr_ast);
+}
+
+// NOTE: we could possibly get away with some kind of state machine + stack,
+// instead of doing this kind of parsing recursion
+auto LazyParser::parse_decl(std::vector<fs::path> &res, allocator::Page &alloc,
+                            pp::MacroMap &macros, pp::StringSet &defs) -> void {
+  auto const cur_t = next();
+  switch (cur_t) {
+  case pp_t::IF:
+    handle_if(res, alloc, macros, defs);
+    break;
+  case pp_t::IFDEF:
+    handle_ifdef(res, alloc, macros, defs);
+    break;
+  case pp_t::IFNDEF:
+    handle_ifndef(res, alloc, macros, defs);
+    break;
+  case pp_t::ELIF:
+    [[fallthrough]];
+  case pp_t::ELSE:
+    [[fallthrough]];
+  case pp_t::ENDIF:
+    throw std::runtime_error(std::format(
+        "Found {} not connected to a #if((n)?def)? preprocessor directive",
+        to_string(cur_t)));
+    break;
+  case pp_t::DEFINE:
+    handle_define(alloc, macros, defs);
+    break;
+  case pp_t::DEFINE_FUNC:
+    throw std::runtime_error("evaluating #define not impl");
+    break;
+  case pp_t::INCLUDE:
+    if (cur_lex[0] == '<') {
+      // non-local include (global/from another module), ignoring (should
+      // check that it actually exists)
+    } else if (cur_lex[0] == '"') {
+      // strip the wrapping '"' chars
+      res.push_back(cur_lex.substr(1, cur_lex.size() - 2));
+    } else {
+      throw std::runtime_error(std::format(
+          "Attempting to include an unknown thing(?) [{}]", cur_lex));
+    }
+    break;
+  case pp_t::UNDEF:
+    if (auto const is_macro = macros.find(cur_lex); is_macro != macros.end()) {
+    } else if (auto const is_def = defs.find(cur_lex); is_def != defs.end()) {
+    } else {
+      // nothing to do, at least according to gcc :)
+    }
+    break;
+  case pp_t::PRAGMA:
+    // TODO: pass a map of evaluated files, because #pragma once means that
+    // (as far as i can tell) even if the defined macros change we only need
+    // to evaluate the file once, for now we just say whatever and eval the
+    // file again :)
+    break;
+  case pp_t::_EOF:
+    // idk maybe remove?
+    break;
+  default:
+    unreachable();
+  }
+}
+
+auto LazyParser::handle_if(std::vector<fs::path> &res, allocator::Page &alloc,
+                           pp::MacroMap &macros, pp::StringSet &defs) -> void {
+  if (eval(alloc, macros, defs) == 0) {
+    // have to find the right branch to evaluate
+    for (auto found_branch = false; found_branch != true;) {
+      goto_next_branch();
+      switch (cur_tkn) {
+      case pp_t::ELIF:
+        if (eval(alloc, macros, defs) != 0) {
+          next();
+          found_branch = true;
+        }
+        break;
+      case pp_t::ELSE:
+        next();
+        found_branch = true;
+        break;
+      case pp_t::ENDIF: // should probably advance the token?
+        next();
+        return; // found #endif, with nothing in between that we could use
+        break;
+      case pp_t::_EOF:
+        throw std::runtime_error("Unterminated #if preprocessor directive");
+      default:
+        unreachable();
+      }
+    }
+  }
+
+  for (auto got_all = false; got_all != true;) {
+    auto const cur = next();
+    switch (cur) {
+    case pp_t::IF:
+      handle_if(res, alloc, macros, defs);
+      break;
+    case pp_t::IFDEF:
+      handle_ifdef(res, alloc, macros, defs);
+      break;
+    case pp_t::IFNDEF:
+      handle_ifndef(res, alloc, macros, defs);
+      break;
+    case pp_t::ELIF:
+      [[fallthrough]];
+    case pp_t::ELSE:
+      [[fallthrough]];
+    case pp_t::ENDIF:
+      got_all = true;
+      break;
+    case pp_t::DEFINE:
+      handle_define(alloc, macros, defs);
+      break;
+    case pp_t::DEFINE_FUNC: {
+      throw std::runtime_error("evaluating #define not impl");
+    } break;
+    case pp_t::INCLUDE: {
+      if (cur_lex[0] == '<') {
+        // non-local include (global/from another module), ignoring (should
+        // check that it actually exists)
+      } else if (cur_lex[0] == '"') {
+        // strip the wrapping '"' chars
+        res.push_back(cur_lex.substr(1, cur_lex.size() - 2));
+      } else {
+        throw std::runtime_error(std::format(
+            "Attempting to include an unknown thing(?) [{}]", cur_lex));
+      }
+    } break;
+    case pp_t::UNDEF: {
+      if (auto const is_macro = macros.find(cur_lex);
+          is_macro != macros.end()) {
+        macros.erase(is_macro);
+      } else if (auto const is_def = defs.find(cur_lex); is_def != defs.end()) {
+        defs.erase(is_def);
+      } else {
+        // nothing to do, at least according to gcc :)
+      }
+    } break;
+    case pp_t::PRAGMA: {
+      // TODO: pass a map of evaluated files, because #pragma once means that
+      // (as far as i can tell) even if the defined macros change we only need
+      // to evaluate the file once, for now we just say whatever and eval the
+      // file again :)
+    } break;
+    case pp_t::_EOF: {
+      // idk maybe remove?
+    } break;
+    default:
+      unreachable();
+    }
+  }
+  goto_matching_endif();
+  if (cur_tkn != pp_t::ENDIF)
+    throw std::runtime_error(
+        "Expected #endif to wrap #if preprocessor directive");
+}
+
+auto LazyParser::handle_ifdef(std::vector<fs::path> &res,
+                              allocator::Page &alloc, pp::MacroMap &macros,
+                              pp::StringSet &defs) -> void {
+  // have to find the right branch to get the values from
+  if (!is_defined(cur_lex, macros, defs)) {
+    for (auto found_branch = false; !found_branch;) {
+      goto_next_branch();
+      switch (cur_tkn) {
+      case pp_t::ELIF:
+        if (eval(alloc, macros, defs) != 0)
+          found_branch = true;
+        break;
+      case pp_t::ELSE:
+        found_branch = true;
+        break;
+      case pp_t::ENDIF:
+        // early return, nothing to do
+        return;
+      case pp_t::_EOF:
+        throw std::runtime_error("Unterminated #ifndef macro");
+      default:
+        unreachable();
+      }
+    }
+  }
+
+  while (nin(cur_tkn, {pp_t::ELIF, pp_t::ELSE, pp_t::ENDIF})) {
+    auto const cur = next();
+    switch (cur) {
+    case pp_t::IF:
+      handle_if(res, alloc, macros, defs);
+      break;
+    case pp_t::IFDEF:
+      handle_ifdef(res, alloc, macros, defs);
+      break;
+    case pp_t::IFNDEF:
+      handle_ifndef(res, alloc, macros, defs);
+      break;
+    case pp_t::ELIF:
+      [[fallthrough]];
+    case pp_t::ELSE:
+      [[fallthrough]];
+    case pp_t::ENDIF:
+      break;
+    case pp_t::DEFINE:
+      handle_define(alloc, macros, defs);
+      break;
+    case pp_t::DEFINE_FUNC:
+      throw std::runtime_error("Not impl, don't want to worry about this yet");
+      break;
+    case pp_t::INCLUDE:
+      if (cur_lex[0] == '<') {
+        // non-local include (global/from another module), ignoring (should
+        // check that it actually exists)
+      } else if (cur_lex[0] == '"') {
+        // strip the wrapping '"' chars
+        res.push_back(cur_lex.substr(1, cur_lex.size() - 2));
+      } else {
+        throw std::runtime_error(std::format(
+            "Attempting to include an unknown thing(?) [{}]", cur_lex));
+      }
+      break;
+    case pp_t::UNDEF:
+      [[fallthrough]];
+    case pp_t::PRAGMA:
+      throw std::runtime_error("not impl");
+      break;
+    case pp_t::_EOF:
+      throw std::runtime_error(
+          "Unterminated branch of #ifndef preprocessor directive");
+    default:
+      unreachable();
+    }
+  }
+  goto_matching_endif();
+}
+
+// we're just handling the most basic case to get this working and see the kinks
+auto LazyParser::handle_ifndef(std::vector<fs::path> &res,
+                               allocator::Page &alloc, pp::MacroMap &macros,
+                               pp::StringSet &defs) -> void {
+  // have to find the right branch to get the values from
+  if (is_defined(cur_lex, macros, defs)) {
+    for (auto found_branch = false; !found_branch;) {
+      goto_next_branch();
+      switch (cur_tkn) {
+      case pp_t::ELIF:
+        if (eval(alloc, macros, defs) != 0)
+          found_branch = true;
+        break;
+      case pp_t::ELSE:
+        found_branch = true;
+        break;
+      case pp_t::ENDIF:
+        // early return, nothing to do
+        return;
+      case pp_t::_EOF:
+        throw std::runtime_error("Unterminated #ifndef macro");
+      default:
+        unreachable();
+      }
+    }
+  }
+
+  while (nin(cur_tkn, {pp_t::ELIF, pp_t::ELSE, pp_t::ENDIF})) {
+    auto const cur = next();
+    switch (cur) {
+    case pp_t::IF:
+      handle_if(res, alloc, macros, defs);
+      break;
+    case pp_t::IFDEF:
+      handle_ifdef(res, alloc, macros, defs);
+      break;
+    case pp_t::IFNDEF:
+      handle_ifndef(res, alloc, macros, defs);
+      break;
+    case pp_t::ELIF:
+      [[fallthrough]];
+    case pp_t::ELSE:
+      [[fallthrough]];
+    case pp_t::ENDIF:
+      break;
+    case pp_t::DEFINE:
+      handle_define(alloc, macros, defs);
+      break;
+    case pp_t::DEFINE_FUNC:
+      throw std::runtime_error("Not impl, don't want to worry about this yet");
+      break;
+    case pp_t::INCLUDE:
+      if (cur_lex[0] == '<') {
+        // non-local include (global/from another module), ignoring (should
+        // check that it actually exists)
+      } else if (cur_lex[0] == '"') {
+        // strip the wrapping '"' chars
+        res.push_back(cur_lex.substr(1, cur_lex.size() - 2));
+      } else {
+        throw std::runtime_error(std::format(
+            "Attempting to include an unknown thing(?) [{}]", cur_lex));
+      }
+      break;
+    case pp_t::UNDEF:
+      [[fallthrough]];
+    case pp_t::PRAGMA:
+      throw std::runtime_error("not impl");
+      break;
+    case pp_t::_EOF:
+      throw std::runtime_error(
+          "Unterminated branch of #ifndef preprocessor directive");
+    default:
+      unreachable();
+    }
+  }
+  goto_matching_endif();
+}
+
+auto LazyParser::handle_define(allocator::Page &alloc, pp::MacroMap &macros,
+                               pp::StringSet &defs) -> void {
+  auto const macro_name = cur_lex;
+
+  // need to do some lexing ourselves because we don't currently support this
+  auto const end = luamake::skip_until(chars.define, buffer, i);
+  if (end >= buffer.size())
+    throw std::runtime_error("Unterminated #define macro");
+  switch (buffer[end]) {
+  case ' ':
+    [[fallthrough]];
+  case '\t': // #define FOO <expr>
+    throw std::runtime_error(
+        "Currently do not support defining macros with values");
+    break;
+  case '\r':
+    [[fallthrough]];
+  case '\n': // #define FOO
+    defs.insert(std::string(macro_name));
+    break;
+  case '(': // #define FOO()
+    throw std::runtime_error(
+        "Currently do not support parsing function macros");
+    break;
+  default:
+    unreachable();
+  }
+  i = luamake::skip_until(chars.lex_switch, buffer, end);
+}
+
+auto LazyParser::produce_if_arg() -> std::string_view {
+  i = luamake::skip_until(chars.ws, buffer, i) + 1;
+  if (i >= buffer.size())
+    throw std::runtime_error("Unterminated #if preprocessor directive");
+  if (buffer[i - 1] == '\n')
+    throw std::runtime_error("Empty #if directive");
+  auto end = i;
+  do {
+    end = luamake::skip_until('\n', buffer, end + 1);
+    if (end >= buffer.size())
+      throw std::runtime_error(
+          "Unterminated #if preprocessor directive expression");
+  } while (buffer[end - 1] == '\\');
+  auto const res = std::string_view{buffer.begin() + i, buffer.begin() + end};
+  i = luamake::skip_until(chars.lex_switch, buffer, end);
+  return res;
+}
+
+auto get_includes(std::string_view const file, allocator::Page &alloc,
+                  pp::MacroMap &macros, pp::StringSet &defs)
+    -> std::vector<fs::path> {
+  auto par = LazyParser(file);
+  return par.get_includes(alloc, macros, defs);
+}
+} // namespace B
+} // namespace
+
+auto Interpreter::interpret(std::string_view const buffer,
+                            allocator::Page &alloc) -> std::vector<fs::path> {
+  auto ast = Lexer::lex(buffer).ast();
+  auto vec = std::vector<fs::path>();
 #ifdef DEBUG_CPP
   auto ast_p = AstPrinter(std::cout);
   ast_p.print(ast);
 #endif // DEBUG_CPP
-  auto includer = AstIncluder(vec, macros, def_macros);
+  auto includer = AstIncluder(vec, alloc, macros, defs);
   includer.get_includes(ast);
+  alloc.reset();
+#ifdef DEBUG_CPP
+  /*
+  // technically not A, but this is just for some idea of ab testing
+  std::cout << "files from the A\n";
+  for (auto &&f : vec) {
+    std::cout << f << '\n';
+  }
+  std::cout << "---\n";
+
+  auto macros_b = pp::MacroMap();
+  auto defs_b = pp::StringSet();
+  auto const test = B::get_includes(buffer, alloc, macros_b, defs_b);
+  std::cout << "files from the B\n";
+  for (auto &&f : test) {
+    std::cout << f << '\n';
+  }
+  std::cout << "---\n";
+  return test;
+  */
+#endif // DEBUG
   return vec;
 }
 
 #ifdef DEBUG_CPP
 auto Interpreter::dump_macros(std::ostream &out) noexcept -> void {
-  out << "macros = {" NL;
+  out << "macros = {" LM_NL;
   for (auto &&[name, value] : macros) {
-    out << name << "=" << value << "," NL;
+    out << name << "=" << value << "," LM_NL;
   }
-  out << "}" NL;
+  out << "}" LM_NL;
 
   out << "defined_macros = ";
-  out << "[" << def_macros.size() << "]{" NL;
-  for (auto const &name : def_macros) {
-    out << name << "," NL;
+  out << "[" << defs.size() << "]{" LM_NL;
+  for (auto const &name : defs) {
+    out << name << "," LM_NL;
   }
-  out << "}" NL;
+  out << "}" LM_NL;
 }
 #endif // DEBUG_CPP
-} // namespace pp
-} // namespace luamake
+} // namespace luamake::pp

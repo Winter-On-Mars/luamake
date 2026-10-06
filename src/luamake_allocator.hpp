@@ -3,9 +3,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 extern "C" {
-#include "lua.h"
+#include "lua/lua.h"
 }
 
 #ifdef DEBUG_ALLOCATOR
@@ -16,14 +17,20 @@ extern "C" {
 
 namespace luamake::allocator {
 struct Page final {
-  // TODO: expose this as a compilation parameter, this number seems to work the
-  // best for my machine in terms of a boost in performance
-  static auto constexpr SIZE = size_t{2 << 16};
-  Page() noexcept;
+  // Page() noexcept;
+  Page(size_t) noexcept;
   ~Page() noexcept;
   // not technically required, but ensures that the allocator is initialized
   // before use
   auto to_lua_alloc() -> lua_Alloc;
+
+  auto init() -> void;
+  auto alloc(size_t) -> void *;
+  auto reset() -> void;
+
+#ifdef DEBUG_ALLOCATOR
+  auto display(std::ostream &) -> std::ostream &;
+#endif // !DEBUG_ALLOCATOR
 
 private:
   static auto lua_alloc(void *, void *, size_t, size_t) -> void *;
@@ -32,7 +39,6 @@ private:
     return (size + sizeof(intptr_t) - 1) & ~(sizeof(intptr_t) - 1);
   }
 
-  auto alloc(size_t) -> void *;
   auto get_new_page() -> void;
 
   struct Header final {
@@ -41,16 +47,17 @@ private:
     Header *next;
   };
 
+  size_t page_size;
   Header start;
   Header *cur_page;
 
 #ifdef DEBUG_ALLOCATOR
   size_t amount_alloc = 0;
   size_t wasted_space = 0;
+  size_t unused_space = 0;
 
   auto dump_stats(std::ostream &) -> std::ostream &;
 #endif // DEBUG_ALLOCATOR
 };
 } // namespace luamake::allocator
-
 #endif // !__LUAMAKE_ALLOCATOR_HPP
