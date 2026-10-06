@@ -34,8 +34,6 @@
 
 namespace fs = std::filesystem;
 
-template <class T> using ptr = std::unique_ptr<T>;
-
 using buffer_views = luamake::StringViews;
 
 template <class T, class... Values>
@@ -175,8 +173,8 @@ struct Lexer final {
   auto handle_pragma(size_t &, size_t &) -> std::unique_ptr<AstNode>;
   auto handle_warning(size_t &, size_t &) -> std::unique_ptr<AstNode>;
 
-  auto handle_elif(size_t &, size_t &) -> ptr<ElifNode>;
-  auto handle_else(size_t &, size_t &) -> ptr<ElseNode>;
+  auto handle_elif(size_t &, size_t &) -> std::unique_ptr<ElifNode>;
+  auto handle_else(size_t &, size_t &) -> std::unique_ptr<ElseNode>;
 
   auto produce_macro(std::string_view const, size_t) -> size_t;
   auto produce_lexeme(std::string_view const, size_t) -> size_t;
@@ -515,9 +513,10 @@ struct ElifNode;
 struct ElseNode;
 
 struct IfNode final : AstNode {
-  IfNode(std::string &&condition, std::vector<ptr<AstNode>> &&then_branch,
-         std::vector<ptr<ElifNode>> &&elif_branches,
-         ptr<ElseNode> &&else_branch) noexcept
+  IfNode(std::string &&condition,
+         std::vector<std::unique_ptr<AstNode>> &&then_branch,
+         std::vector<std::unique_ptr<ElifNode>> &&elif_branches,
+         std::unique_ptr<ElseNode> &&else_branch) noexcept
       : condition(std::move(condition)), then_branch(std::move(then_branch)),
         elif_branches(std::move(elif_branches)),
         else_branch(std::move(else_branch)) {}
@@ -525,15 +524,16 @@ struct IfNode final : AstNode {
   auto accept(AstVisitor &) -> void final;
 
   std::string condition;
-  std::vector<ptr<AstNode>> then_branch;
-  std::vector<ptr<ElifNode>> elif_branches;
-  ptr<ElseNode> else_branch;
+  std::vector<std::unique_ptr<AstNode>> then_branch;
+  std::vector<std::unique_ptr<ElifNode>> elif_branches;
+  std::unique_ptr<ElseNode> else_branch;
 };
 
 struct IfDefNode final : AstNode {
-  IfDefNode(std::string &&str, std::vector<ptr<AstNode>> &&then_branch,
-            std::vector<ptr<ElifNode>> &&elif_branches,
-            ptr<ElseNode> &&else_branch) noexcept
+  IfDefNode(std::string &&str,
+            std::vector<std::unique_ptr<AstNode>> &&then_branch,
+            std::vector<std::unique_ptr<ElifNode>> &&elif_branches,
+            std::unique_ptr<ElseNode> &&else_branch) noexcept
       : macro(std::move(str)), then_branch(std::move(then_branch)),
         elif_branches(std::move(elif_branches)),
         else_branch(std::move(else_branch)) {}
@@ -541,15 +541,16 @@ struct IfDefNode final : AstNode {
   auto accept(AstVisitor &) -> void final;
 
   std::string macro;
-  std::vector<ptr<AstNode>> then_branch;
-  std::vector<ptr<ElifNode>> elif_branches;
-  ptr<ElseNode> else_branch;
+  std::vector<std::unique_ptr<AstNode>> then_branch;
+  std::vector<std::unique_ptr<ElifNode>> elif_branches;
+  std::unique_ptr<ElseNode> else_branch;
 };
 
 struct IfNDefNode final : AstNode {
-  IfNDefNode(std::string &&str, std::vector<ptr<AstNode>> &&then_branch,
-             std::vector<ptr<ElifNode>> &&elif_branches,
-             ptr<ElseNode> &&else_branch) noexcept
+  IfNDefNode(std::string &&str,
+             std::vector<std::unique_ptr<AstNode>> &&then_branch,
+             std::vector<std::unique_ptr<ElifNode>> &&elif_branches,
+             std::unique_ptr<ElseNode> &&else_branch) noexcept
       : macro(std::move(str)), then_branch(std::move(then_branch)),
         elif_branches(std::move(elif_branches)),
         else_branch(std::move(else_branch)) {}
@@ -557,29 +558,29 @@ struct IfNDefNode final : AstNode {
   auto accept(AstVisitor &) -> void final;
 
   std::string macro;
-  std::vector<ptr<AstNode>> then_branch;
-  std::vector<ptr<ElifNode>> elif_branches;
-  ptr<ElseNode> else_branch;
+  std::vector<std::unique_ptr<AstNode>> then_branch;
+  std::vector<std::unique_ptr<ElifNode>> elif_branches;
+  std::unique_ptr<ElseNode> else_branch;
 };
 
 struct ElifNode final : AstNode {
   ElifNode(std::string &&condition,
-           std::vector<ptr<AstNode>> &&then_branch) noexcept
+           std::vector<std::unique_ptr<AstNode>> &&then_branch) noexcept
       : condition(std::move(condition)), then_branch(std::move(then_branch)) {}
   ~ElifNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
   std::string condition;
-  std::vector<ptr<AstNode>> then_branch;
+  std::vector<std::unique_ptr<AstNode>> then_branch;
 };
 
 struct ElseNode final : AstNode {
-  ElseNode(std::vector<ptr<AstNode>> &&stmts) noexcept
+  ElseNode(std::vector<std::unique_ptr<AstNode>> &&stmts) noexcept
       : stmts(std::move(stmts)) {}
   ~ElseNode() final = default;
   auto accept(AstVisitor &) -> void final;
 
-  std::vector<ptr<AstNode>> stmts;
+  std::vector<std::unique_ptr<AstNode>> stmts;
 };
 
 struct GlobalIncludeNode final : AstNode {
@@ -1506,9 +1507,9 @@ auto Lexer::handle_if(size_t &cur_t, size_t &cur_lex)
   expect(cur_t, ir_t::MACRO);
   ++cur_t;
   auto expr = lexemes[cur_lex++];
-  auto then_branch = std::vector<ptr<AstNode>>();
-  auto elif_branches = std::vector<ptr<ElifNode>>();
-  auto else_branch = ptr<ElseNode>(nullptr);
+  auto then_branch = std::vector<std::unique_ptr<AstNode>>();
+  auto elif_branches = std::vector<std::unique_ptr<ElifNode>>();
+  auto else_branch = std::unique_ptr<ElseNode>(nullptr);
   enum class FoundEnd {
     none,
     elif,
@@ -1620,9 +1621,9 @@ auto Lexer::handle_ifdef(size_t &cur_t, size_t &cur_lex)
   }
   ++cur_t;
   auto lex = lexemes[cur_lex++];
-  auto then_branch = std::vector<ptr<AstNode>>();
-  auto elif_branches = std::vector<ptr<ElifNode>>();
-  auto else_branch = ptr<ElseNode>(nullptr);
+  auto then_branch = std::vector<std::unique_ptr<AstNode>>();
+  auto elif_branches = std::vector<std::unique_ptr<ElifNode>>();
+  auto else_branch = std::unique_ptr<ElseNode>(nullptr);
   enum class FoundEnd {
     none,
     elif,
@@ -1734,9 +1735,9 @@ auto Lexer::handle_ifndef(size_t &cur_t, size_t &cur_lex)
   }
   ++cur_t;
   auto lex = lexemes[cur_lex++];
-  auto then_branch = std::vector<ptr<AstNode>>();
-  auto elif_branches = std::vector<ptr<ElifNode>>();
-  auto else_branch = ptr<ElseNode>(nullptr);
+  auto then_branch = std::vector<std::unique_ptr<AstNode>>();
+  auto elif_branches = std::vector<std::unique_ptr<ElifNode>>();
+  auto else_branch = std::unique_ptr<ElseNode>(nullptr);
   enum class FoundEnd {
     none,
     elif,
@@ -1950,13 +1951,14 @@ auto Lexer::handle_warning(size_t &cur_t, size_t &cur_lex)
   return std::make_unique<WarningNode>(value);
 }
 
-auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
+auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<ElifNode> {
   ++cur_t;
   expect(cur_t, ir_t::MACRO);
   auto condition = lexemes[cur_lex++];
   ++cur_t;
 
-  auto then_branch = std::vector<ptr<AstNode>>();
+  auto then_branch = std::vector<std::unique_ptr<AstNode>>();
   while (cur_t < types.size()) {
     if (types[cur_t] == ir_t::ELSE || types[cur_t] == ir_t::ELIF ||
         types[cur_t] == ir_t::ENDIF)
@@ -2005,9 +2007,10 @@ auto Lexer::handle_elif(size_t &cur_t, size_t &cur_lex) -> ptr<ElifNode> {
 }
 
 // it could be a good idea to have this #else consume the #endif(?)
-auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex) -> ptr<ElseNode> {
+auto Lexer::handle_else(size_t &cur_t, size_t &cur_lex)
+    -> std::unique_ptr<ElseNode> {
   ++cur_t;
-  auto res = std::vector<ptr<AstNode>>();
+  auto res = std::vector<std::unique_ptr<AstNode>>();
   auto looping = true;
   while (looping && cur_t < types.size()) {
     switch (types[cur_t]) {
