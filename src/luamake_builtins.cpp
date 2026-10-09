@@ -574,11 +574,14 @@ auto install_impl(lua_State *state) -> int {
   switch (maybe_cached_mod.index()) {
   case 0: {
     std::cout << std::format("Checking [{}] cache" LM_NL, mod.name);
-    auto const &cached_mod = std::get<builtins::Module>(maybe_cached_mod);
+    auto &&[cached_mod, compiled_files] =
+        std::get<std::pair<builtins::Module, std::vector<std::string>>>(
+            maybe_cached_mod);
     gen_dep_tree_fut.get();
     if (mod == cached_mod) {
       files_to_compile =
           builtins::mods.get_tree_diff(mod_idx, mod.tree, cached_mod.tree);
+      append_unique(files_to_compile, compiled_files);
       if (files_to_compile.empty()) {
         std::cout << std::format("\t[{}] already built" LM_NL, mod.name);
         return 1;
@@ -619,13 +622,31 @@ auto install_impl(lua_State *state) -> int {
   // building a module, that way we don't try to build with extraneous
   // errors, but we still build all we can of the module for incrimental
   // builds
-  threads.add_task([mod_idx, cache_path]() -> void {
+  threads.add_task([mod_idx, cache_path = std::move(cache_path)]() -> void {
+    struct AutoRun final {
+      ~AutoRun() {
+        if (builtins::cl_options.cache) {
+          while (builtins::mods.has_remaining(idx)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          }
+          auto compiled_files = builtins::mods.get_all_compiled_files(idx);
+          expr_dbg(compiled_files);
+          auto const &mod = builtins::mods.module_at(idx);
+          spl::serialize(mod, std::move(compiled_files), cache_path);
+        }
+      }
+
+      builtins::ModIndex idx;
+      fs::path const &cache_path;
+    } runner{mod_idx, cache_path};
     for (auto mod_state = builtins::mods.state_at(mod_idx);
          mod_state != builtins::LakeModules::ModState::ready_for_final_compile;
          mod_state = builtins::mods.state_at(mod_idx)) {
       switch (mod_state) {
       case luamake::builtins::LakeModules::ModState::error:
-        // idk error, bad idea to try and compile the full module
+        // error occurred, but we can still do a partial serialization, just
+        // need to wait for the rest of the files to be done to continue
+        // TODO: sleep while there are files remaining to compile
         return;
       case luamake::builtins::LakeModules::ModState::ready_for_final_compile:
         break;
@@ -723,9 +744,6 @@ auto install_impl(lua_State *state) -> int {
         return;
       }
     }
-    // if everything went well then we can serialize the file
-    if (builtins::cl_options.cache)
-      spl::serialize(mod, cache_path);
   });
   return 1;
 }

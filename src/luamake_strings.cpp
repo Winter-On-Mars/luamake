@@ -40,7 +40,7 @@ LM_CXPR_DEF_IMPL(OwnedString::~OwnedString() noexcept {
 })
 
 auto OwnedString::append(std::string_view str) noexcept -> void {
-  auto const str_len = str.length();
+  auto const str_len = static_cast<len_t>(str.length());
   if (!(size + str_len + 1 < capacity)) {
     /* resize */
     auto next_cap = 3 * (capacity + str_len + 1) / 2;
@@ -84,7 +84,7 @@ auto OwnedString::find(std::string_view const str) const noexcept
 
 LM_CXPR_DEF_IMPL(
     FixedString::FixedString(char *&buffer,
-                             size_t size) noexcept : buffer(buffer),
+                             len_t size) noexcept : buffer(buffer),
     size(size) { buffer = nullptr; })
 
 LM_CXPR_DEF_IMPL(FixedString::~FixedString() noexcept {

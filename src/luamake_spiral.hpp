@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <variant>
+#include <vector>
 
 namespace luamake {
 namespace builtins {
@@ -10,10 +11,12 @@ struct Module;
 }
 
 namespace spl {
-auto serialize(builtins::Module const &, std::filesystem::path const &) -> void;
+auto serialize(builtins::Module const &, std::vector<std::string> &&,
+               std::filesystem::path const &) noexcept(false) -> void;
 
-auto deserialize(std::filesystem::path const &path)
-    -> std::variant<builtins::Module, std::string>;
+auto deserialize(std::filesystem::path const &path) noexcept(false)
+    -> std::variant<std::pair<builtins::Module, std::vector<std::string>>,
+                    std::string>;
 
 template <class T> struct Serializer {
   Serializer() = delete;

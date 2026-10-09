@@ -39,7 +39,7 @@ struct ByteBuffer final {
 };
 
 ByteBuffer::ByteBuffer() noexcept
-    : buffer(std::make_unique<u8[]>(2 << 12)), cur(0), cap(2 << 12) {}
+    : buffer(std::make_unique<u8[]>(1 << 16)), cur(0), cap(1 << 16) {}
 
 ByteBuffer::ByteBuffer(std::unique_ptr<u8[]> &&buffer,
                        size_t const size) noexcept
@@ -250,9 +250,9 @@ template <> struct Serializer<builtins::Module> {
     span_serializer.serialize(mod.sys_links);
 
     auto str_serializer = Serializer<std::string_view>(bytes);
-    str_serializer.serialize(std::string_view{mod.compiler});
-    str_serializer.serialize(std::string_view{mod.name});
-    str_serializer.serialize(std::string_view{mod.install_dir});
+    str_serializer.serialize(mod.compiler);
+    str_serializer.serialize(mod.name);
+    str_serializer.serialize(mod.install_dir);
   }
 
   ByteBuffer &bytes;
@@ -365,11 +365,14 @@ template <> struct Deserializer<builtins::Module> {
   ByteBuffer &bytes;
 };
 
-auto serialize(builtins::Module const &mod, std::filesystem::path const &path)
-    -> void {
+auto serialize(builtins::Module const &mod, std::string &&compiled_files,
+               std::filesystem::path const &path) noexcept(false) -> void {
   auto bytes = ByteBuffer();
-  auto cereal = Serializer<builtins::Module>(bytes);
-  cereal.serialize(mod);
+  auto mod_cereal = Serializer<builtins::Module>(bytes);
+  mod_cereal.serialize(mod);
+
+  auto str_cereal = Serializer<std::string>(bytes);
+  str_cereal.serialize(compiled_files);
 
   auto outfile = File(path, File::WRITE | File::CREATE);
   // we should also add some error checking for this
@@ -377,17 +380,17 @@ auto serialize(builtins::Module const &mod, std::filesystem::path const &path)
   // it's something
   if (!outfile)
     return;
-  outfile.write(cereal.bytes.buffer.get(), cereal.bytes.cur, 1);
+  outfile.write(bytes.buffer.get(), bytes.cur, 1);
   outfile.flush();
 #ifdef DEBUG
   std::cout << std::format("serialized file [{}] with [{}] bytes" LM_NL,
-                           path.string(), cereal.bytes.cur);
+                           path.string(), bytes.cur);
 #endif // DEBUG
 }
 
 // will also throw if there's some big error
 auto deserialize(fs::path const &path)
-    -> std::variant<builtins::Module, std::string> {
+    -> std::variant<std::pair<builtins::Module, std::string>, std::string> {
   auto file = File(path, File::READ | File::BINARY);
   if (!file)
     return std::format("unable to open serialization file [{}]", path.string());
@@ -396,7 +399,10 @@ auto deserialize(fs::path const &path)
 #endif // DEBUG
   auto &&[size, buffer] = file.dump_content();
   auto bytes = ByteBuffer(std::move(buffer), size);
-  auto decereal = Deserializer<builtins::Module>(bytes);
-  return decereal.deserialize();
+  auto mod_decereal = Deserializer<builtins::Module>(bytes);
+  auto str_decereal = Deserializer<std::string>(bytes);
+  auto mod = mod_decereal.deserialize();
+  auto str = str_decereal.deserialize();
+  return std::make_pair(std::move(mod), str);
 }
 } // namespace luamake::spl

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <mutex>
 #include <span>
 #include <thread>
@@ -81,18 +82,19 @@ auto CompilationPool::add_compile_tasks(
             "{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path, path.c_str(),
             install_dir, name, path.filename().c_str());
         if (builtins::cl_options.verbose) {
-          fprintf(stdout, "[%s]" LM_NL, invoked_command.c_str());
+          std::cerr << std::format("[{}]" LM_NL, invoked_command);
         } else {
-          fprintf(stdout, "Building [%s]" LM_NL, path.c_str());
+          std::cerr << std::format("Building [{}]" LM_NL, path.string());
         }
         if (os::call(invoked_command) == 0) {
           builtins::mods.add_compiled_file(idx, path.filename().string());
         } else {
           if (builtins::cl_options.verbose) {
-            fprintf(stderr, "Error with command [%s]" LM_NL,
-                    invoked_command.c_str());
+            std::cerr << std::format("Error with command [{}]" LM_NL,
+                                     invoked_command);
           } else {
-            fprintf(stderr, "Error compiling [%s]" LM_NL, path.c_str());
+            std::cerr << std::format("Error compiling [{}]" LM_NL,
+                                     path.string());
           }
           builtins::mods.set_state_at(idx,
                                       builtins::LakeModules::ModState::error);

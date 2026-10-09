@@ -7,6 +7,7 @@
 #include <format>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace luamake {
 #ifdef LAKE_SMALL_STRING
@@ -137,6 +138,19 @@ LM_CXPR_DEF(auto FixedString::operator=(FixedString && that) noexcept
               that.size = 0;
               return *this;
             })
+
+struct ListOfStrings {
+  std::string buffer;
+  std::vector<StringViews> strings;
+
+  ListOfStrings() = default;
+  ListOfStrings(ListOfStrings &&) = default;
+  ListOfStrings &operator=(ListOfStrings &&) = default;
+  ~ListOfStrings() = default;
+
+  ListOfStrings(ListOfStrings const &) = delete;
+  ListOfStrings &operator=(ListOfStrings const &) = delete;
+};
 } // namespace luamake
 
 namespace std {

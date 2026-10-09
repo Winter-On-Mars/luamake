@@ -400,6 +400,8 @@ struct LakeModules final {
   auto get_tree_diff(ModIndex const, Module::DepTree const &,
                      Module::DepTree const &) -> std::vector<std::string_view>;
 
+  auto has_remaining(ModIndex const) noexcept -> bool;
+
 #ifdef DEBUG_MOD
   auto dump_paths(std::ostream &) const noexcept -> void;
   auto dump_modules(std::ostream &) const noexcept -> void;
@@ -440,8 +442,8 @@ private:
   // of std::atomic<T*>(?)
   uint mods_cap;
   uint num_mods;
-  std::unique_ptr<ModState[]> states;
   std::unique_ptr<std::mutex[]> mtxs;
+  std::unique_ptr<ModState[]> states;
   std::unique_ptr<std::atomic<size_t>[]> remaining_files;
   std::unique_ptr<std::vector<std::string>[]> compiled_files;
   std::unique_ptr<Module[]> mods;
