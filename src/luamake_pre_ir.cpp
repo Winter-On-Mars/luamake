@@ -3042,11 +3042,8 @@ auto Expressions::eval(std::string_view const expr, allocator::Page &alloc,
 auto Expressions::eval_impl(ExprNode const &e) -> int {
   switch (e.expr_t()) {
   case ExprNode::Expr_t::INT:
-    return static_cast<int>(e.to<ExprNode::Integer>().i);
   case ExprNode::Expr_t::CHARLIT:
-    // TODO: report this kind of error earlier
-    throw std::runtime_error(
-        std::format("While evaluating if expression found a not integer."));
+    return static_cast<int>(e.to<ExprNode::Integer>().i);
   case ExprNode::Expr_t::GROUPING: {
     auto const group = e.to<ExprNode::Grouping>();
     return eval_impl(*group.expr);

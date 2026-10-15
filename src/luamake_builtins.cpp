@@ -629,7 +629,6 @@ auto install_impl(lua_State *state) -> int {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
           }
           auto compiled_files = builtins::mods.get_all_compiled_files(idx);
-          expr_dbg(compiled_files);
           auto const &mod = builtins::mods.module_at(idx);
           spl::serialize(mod, std::move(compiled_files), cache_path);
         }
@@ -660,7 +659,12 @@ auto install_impl(lua_State *state) -> int {
     // idk maybe we could just capture parent_path(?)
     auto const &parent_path = builtins::mods.get_module_path(mod_idx);
     auto const &mod = builtins::mods.module_at(mod_idx);
-    auto const compiled_files = builtins::mods.get_all_compiled_files(mod_idx);
+    auto const compiled_files = [&]() {
+      auto const x = builtins::mods.get_all_compiled_files(mod_idx);
+      return std::accumulate(
+          x.begin(), x.end(), std::string(),
+          [](auto &&a, auto &&n) { return std::format("{} {}", a, n); });
+    }();
 
     // only way i could think to get this to work :) *should* be optimized away
     auto const invoked_command = [&]() -> std::string {
@@ -723,11 +727,17 @@ auto install_impl(lua_State *state) -> int {
                            fs::path(std::format("{}/{}", mod.get_install_dir(),
                                                 mod.get_name())));
 
+      auto const formatted_files = mod.accumulate_headers(
+          [pp = parent_path.parent_path().string()](auto &&a, auto &&n) {
+            return std::format("{} {}/{}", a, pp, n);
+          });
+      /*
       auto const formatted_files = std::accumulate(
           mod.headers.begin(), mod.headers.end(), std::string(),
           [pp = parent_path.parent_path().string()](auto &&e, auto &&next) {
             return std::format("{} {}/{}", e, pp, next.string());
           });
+          */
 
       auto const copy_headers = std::format(
           "cp --target-directory={} {}",
@@ -1003,7 +1013,9 @@ auto Module::DepTree::append_dep(Module const &mod,
 
     auto ec = std::error_code{};
     for (auto &&file : files_deps) {
-      for (auto &&include : mod.includes) {
+      // TODO: turn this into a for loop over include, so that we can avoid the
+      // allocation with std::vector, i'm just trying to get this to work rn :(
+      for (auto &&include : mod.get_includes()) {
         auto const include_rel_path =
             fs::relative(include / file, parent_path, ec);
         if (ec) {
@@ -1206,11 +1218,14 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 }
 #endif // DEBUG_MOD
 
-auto Module::DepTree::vectorize() const -> std::vector<StringViews> {
-  auto res = std::vector<StringViews>();
+// idk we could switch this to be a vector of StringViews, but ig this is fine
+// to keep around
+auto Module::DepTree::vectorize() const -> std::vector<std::string_view> {
+  auto res = std::vector<std::string_view>();
   for (auto i = size_t{}; i < num_files; ++i) {
     if (types[i] == Module::DepTree::SourceFile_t::IMPL) {
-      res.emplace_back(files[i]);
+      res.emplace_back(std::string_view{all_paths.buffer + files[i].start,
+                                        all_paths.buffer + files[i].end - 1});
     }
   }
   return res;
@@ -1245,6 +1260,155 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
   */
 
   return true;
+}
+
+auto Module::get_exe_root() const noexcept -> std::string_view {
+  if (is_interned(Interned::ROOTS)) {
+    return std::string_view{reinterpret_cast<char const *>(roots[0].buffer())};
+  } else {
+    return std::string_view{all_strings.buffer + roots[0].start(),
+                            all_strings.buffer + roots[0].end()};
+  }
+}
+
+auto Module::get_compiler() const noexcept -> std::string_view {
+  if (is_interned(Interned::COMPILER)) {
+    return std::string_view{reinterpret_cast<char const *>(compiler.in.data())};
+  } else {
+    return std::string_view{all_strings.buffer + compiler.sv.start,
+                            all_strings.buffer + compiler.sv.end};
+  }
+}
+
+auto Module::get_name() const noexcept -> std::string_view {
+  if (is_interned(Interned::NAME)) {
+    return std::string_view{reinterpret_cast<char const *>(name.in.data())};
+  } else {
+    return std::string_view{all_strings.buffer + name.sv.start,
+                            all_strings.buffer + name.sv.end};
+  }
+}
+
+auto Module::get_install_dir() const noexcept -> std::string_view {
+  if (is_interned(Interned::INSTALL_DIR)) {
+    return std::string_view{
+        reinterpret_cast<char const *>(install_dir.in.data())};
+  } else {
+    return std::string_view{all_strings.buffer + install_dir.sv.start,
+                            all_strings.buffer + install_dir.sv.end};
+  }
+}
+
+auto Module::get_includes() const noexcept -> std::vector<std::string_view> {
+  auto res = std::vector<std::string_view>();
+  res.reserve(includes.size());
+  for (auto &&include : includes) {
+    if (include.is_interned()) {
+      res.push_back(
+          std::string_view{reinterpret_cast<char const *>(include.buffer())});
+    } else {
+      res.push_back(std::string_view{all_strings.buffer + install_dir.sv.start,
+                                     all_strings.buffer + install_dir.sv.end});
+    }
+  }
+  return res;
+}
+
+auto Module::add_root(std::string_view const sv) noexcept -> void {
+  if (sv.length() < SVInterned::MAX_SIZE) {
+    // sso
+    roots.emplace_back(sv);
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    roots.emplace_back(StringViews{start, end});
+  }
+}
+
+auto Module::add_header(std::string_view const sv) noexcept -> void {
+  if (sv.length() < SVInterned::MAX_SIZE) {
+    // sso
+    headers.emplace_back(sv);
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    headers.emplace_back(StringViews{start, end});
+  }
+}
+
+auto Module::add_include(std::string_view const sv) noexcept -> void {
+  if (sv.length() < SVInterned::MAX_SIZE) {
+    // sso
+    includes.emplace_back(sv);
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    includes.emplace_back(StringViews{start, end});
+  }
+}
+
+auto Module::add_sys_include(std::string_view const sv) noexcept -> void {
+  if (sv.length() < SVInterned::MAX_SIZE) {
+    // sso
+    sys_includes.emplace_back(sv);
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    sys_includes.emplace_back(StringViews{start, end});
+  }
+}
+
+auto Module::add_link(std::string_view const sv) noexcept -> void {
+  if (sv.length() < SVInterned::MAX_SIZE) {
+    // sso
+    links.emplace_back(sv);
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    links.emplace_back(StringViews{start, end});
+  }
+}
+
+auto Module::add_sys_link(std::string_view const sv) noexcept -> void {
+  if (sv.length() < SVInterned::MAX_SIZE) {
+    // sso
+    sys_links.emplace_back(sv);
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    sys_links.emplace_back(StringViews{start, end});
+  }
+}
+
+Module::SVInterned::SVInterned(std::string_view const sv) noexcept : bytes({}) {
+  bytes[0] = IsInterned::IS;
+  ::memcpy(bytes.data() + 1, sv.data(), sv.length());
+}
+
+Module::SVInterned::SVInterned(StringViews const sv) noexcept : bytes({}) {
+  bytes[0] = IsInterned::NOT;
+  new (bytes.data() + 4) StringViews{sv};
+}
+
+// NOTE: we should be better about these because we're reading from the
+// StringViews that's held in here, but idk this should work unless we get
+// memory errors from it :)
+auto Module::SVInterned::start() const noexcept -> size_t {
+  auto res = size_t{};
+  memcpy(&res, bytes.data() + 4, sizeof(size_t));
+  return res;
+}
+
+auto Module::SVInterned::end() const noexcept -> size_t {
+  auto res = size_t{};
+  memcpy(&res, bytes.data() + 12, sizeof(size_t));
+  return res;
 }
 
 #ifdef DEBUG_MOD
@@ -1311,8 +1475,13 @@ auto Module::from_external(Module_t &&type, std::string &&links,
                            std::vector<fs::path> &&includes) -> Module {
   auto mod = Module();
   mod.type = type;
-  mod.links.push_back(std::move(links));
-  mod.sys_includes = std::move(includes);
+  mod.add_link(std::move(links));
+  // mod.links.push_back(std::move(links));
+  for (auto &&include : includes) {
+    // ??
+    mod.add_sys_include(include.string());
+  }
+  // mod.sys_includes = std::move(includes);
   return mod;
 }
 
@@ -1327,7 +1496,10 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
   if (auto includes = include_path_cache.find(compiler);
       includes != include_path_cache.end()) {
     // TODO
-    sys_includes = includes->second;
+    for (auto &&include : includes->second) {
+      add_sys_include(include.string());
+    }
+    // sys_includes = includes->second;
     return;
   }
   auto _pipes = std::array<int, 2>{};
@@ -1415,8 +1587,11 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
       }
       start_path = skip_ws(end_path);
     }
-    include_path_cache[compiler] = includes;
-    sys_includes = includes;
+    include_path_cache[std::string(compiler)] = includes;
+    // sys_includes = includes;
+    for (auto &&include : includes) {
+      add_sys_include(include.string());
+    }
     (void)waitpid(pid, nullptr, WNOHANG);
   } break;
   }
@@ -1428,8 +1603,9 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
 // allocations, while also avoiding the stack use after free that comes from
 // std::async call
 static auto predefined_macros_cache =
-    std::unordered_map<std::string, std::pair<pp::MacroMap, pp::StringSet>>();
-auto Module::append_predefined_macros(std::string const &compiler)
+    pp::StringMap<std::pair<pp::MacroMap, pp::StringSet>>();
+// std::unordered_map<std::string, std::pair<pp::MacroMap, pp::StringSet>>();
+auto Module::append_predefined_macros(std::string_view const compiler)
     -> std::pair<pp::MacroMap, pp::StringSet> {
   if (auto macros = predefined_macros_cache.find(compiler);
       macros != predefined_macros_cache.end()) {
@@ -1548,7 +1724,7 @@ auto Module::append_predefined_macros(std::string const &compiler)
 
     // reached EOF
     auto res = std::make_pair(std::move(macros), std::move(def_macros));
-    predefined_macros_cache[compiler] = res;
+    predefined_macros_cache[std::string(compiler)] = res;
     return res;
   } break;
   }
@@ -1618,7 +1794,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     case LUA_TSTRING: {
       auto len = size_t{};
       auto const *str = lua_tolstring(state, -1, &len);
-      push_root(str, len);
+      add_root(std::string_view{str, len});
       // roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
     } break;
     case LUA_TNIL:
@@ -1641,7 +1817,10 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
         if (value_t != LUA_TSTRING) {
           throw unexpected_type("roots[i]", LUA_TSTRING, value_t);
         }
-        roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
+        auto len = size_t{};
+        auto const *str = lua_tolstring(state, -1, &len);
+        add_root(std::string_view{str, len});
+        // roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
         --roots_tbl;
       }
       lua_pop(state, static_cast<int>(num_roots) + 1);
@@ -1659,7 +1838,9 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   switch (auto const install_dir_t = lua_getfield(state, -1, "install_dir")) {
   case LUA_TSTRING:
-    install_dir = (root / lua_tolstring(state, -1, nullptr)).string();
+    // TODO: make the install_dir relative to the luamake.lua file
+    set_install_dir((root / lua_tolstring(state, -1, nullptr)).string());
+    // install_dir = (root / lua_tolstring(state, -1, nullptr)).string();
     break;
   case LUA_TNIL:
     throw missing_field("install_dir");
@@ -1672,24 +1853,32 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   if (type == Module::EXE) {
     includes.reserve(1);
     [[likely]]
-    if (roots[0].has_parent_path()) {
-      includes.push_back(fs::canonical(roots[0]).parent_path());
+    // if (roots[0].has_parent_path()) {
+    if (fs::path(get_exe_root()).has_parent_path()) {
+      add_include(
+          fs::canonical(fs::path(get_exe_root())).parent_path().string());
+      // includes.push_back(fs::canonical(roots[0]).parent_path());
     } else {
-      includes.push_back(previous_path);
+      add_include(previous_path.string());
+      // includes.push_back(previous_path);
     }
   } else if (type == STATIC || type == DYNAMIC) {
     includes.reserve(roots.size());
-    for (auto const &root : roots) {
+    auto const rts = get_roots();
+    for (auto const &root : rts) {
       auto const parent_p = [&]() -> fs::path {
-        if (root.has_parent_path()) {
-          return fs::canonical(previous_path / root.parent_path());
+        if (fs::path(root).has_parent_path()) {
+          return fs::canonical(previous_path / fs::path(root).parent_path());
         } else {
           return previous_path;
         }
       }();
-      auto const found = std::find(includes.begin(), includes.end(), parent_p);
+      // auto const found = std::find(includes.begin(), includes.end(),
+      // parent_p);
+      auto const found = includes.end();
       if (found != includes.end()) {
-        includes.push_back(parent_p);
+        add_include(parent_p.string());
+        // includes.push_back(parent_p);
       }
     }
   }
@@ -1700,9 +1889,12 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     auto include = -1;
     for (auto i = 1; i <= len; ++i) {
       switch (auto const value_t = lua_geti(state, include, i)) {
-      case LUA_TSTRING:
-        includes.push_back(lua_tolstring(state, -1, nullptr));
-        break;
+      case LUA_TSTRING: {
+        auto len = size_t{};
+        auto const *str = lua_tolstring(state, -1, &len);
+        add_include(std::string_view{str, len});
+        // includes.push_back(lua_tolstring(state, -1, nullptr));
+      } break;
       default:
         throw unexpected_type("include[i]", LUA_TSTRING, value_t);
       }
@@ -1724,9 +1916,12 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     auto linking_idx = -1;
     for (auto i = 1; i <= len; ++i) {
       switch (auto const value_t = lua_geti(state, linking_idx, i)) {
-      case LUA_TSTRING:
-        sys_links.push_back(lua_tolstring(state, -1, nullptr));
-        break;
+      case LUA_TSTRING: {
+        auto len = size_t{};
+        auto const *str = lua_tolstring(state, -1, &len);
+        add_sys_link(std::string_view{str, len});
+        // sys_links.push_back(lua_tolstring(state, -1, nullptr));
+      } break;
       default:
         throw unexpected_type("linking[i]", LUA_TSTRING, value_t);
       }
@@ -1755,7 +1950,10 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
       for (auto i = 1; i <= len; ++i) {
         switch (auto const value_t = lua_geti(state, headers_tbl, i)) {
         case LUA_TSTRING: {
-          headers.push_back(fs::path(lua_tostring(state, -1)));
+          auto len = size_t{};
+          auto const *str = lua_tolstring(state, -1, &len);
+          add_header(std::string_view{str, len});
+          // headers.push_back(fs::path(lua_tostring(state, -1)));
         } break;
         default:
           throw unexpected_type("headers[i]", LUA_TSTRING, value_t);
@@ -1810,40 +2008,43 @@ auto Module::DepTree::gen_dep_tree(Module const &mod,
   auto const parent = mods.get_module_path(idx).parent_path();
   // NOTE: (Winter-On-Mars) because we are only pushing back the roots, if there
   // is an issue with one of the header files, we don't see it(?)
-  for (auto const &root : mod.roots) {
+  for (auto const &root : mod.get_roots()) {
     append_dep(mod, interpreter, idx, parent, root, DepTree::NIL_IDX);
   }
 }
 
 auto Module::format_includes() const -> std::string {
+  // TODO: make these not allocate the additional vectors
+  auto const include = get_includes();
+  auto const sys_include = get_sys_includes();
   auto include_func = [](auto &&e, auto &&next) {
-    return std::format("{} -I{}", e, next.string());
+    return std::format("{} -I{}", e, next);
   };
   auto sys_func = [](auto &&e, auto &&next) {
-    return std::format("{} -isystem {}", e, next.string());
+    return std::format("{} -isystem {}", e, next);
   };
-  return std::accumulate(includes.cbegin(), includes.cend(), std::string(),
+  return std::accumulate(include.cbegin(), include.cend(), std::string(),
                          include_func) +
-         std::accumulate(sys_includes.cbegin(), sys_includes.cend(),
+         std::accumulate(sys_include.cbegin(), sys_include.cend(),
                          std::string(), sys_func);
 }
 
 auto Module::format_links() const -> std::string {
   fn_print();
-  auto res = std::string();
-  res.reserve(512);
-  res += std::accumulate(
-      links.cbegin(), links.cend(), std::string(), [](auto &&a, auto &&next) {
-        auto const parent_path = next.parent_path();
-        return std::format("{} -Wl,-rpath={} {}", a, parent_path.string(),
-                           next.string());
-      });
-
-  res += std::accumulate(sys_links.cbegin(), sys_links.cend(), std::string(),
+  // TODO: holy fuck this wastes so much memory
+  auto const link = get_links();
+  auto const sys_link = get_sys_links();
+  return std::accumulate(link.cbegin(), link.cend(), std::string(),
                          [](auto &&a, auto &&next) {
-                           return std::format("{} -l{}", a, next.string());
+                           auto const parent_path =
+                               fs::path(next).parent_path();
+                           return std::format("{} -Wl,-rpath={} {}", a,
+                                              parent_path.string(), next);
+                         }) +
+         std::accumulate(sys_link.cbegin(), sys_link.cend(), std::string(),
+                         [](auto &&a, auto &&next) {
+                           return std::format("{} -l{}", a, next);
                          });
-  return res;
 }
 
 // TODO: double check that it's actually fine to throw an exception here and
@@ -2398,29 +2599,32 @@ auto Builder::link_lib(lua_State *state) noexcept -> int {
     auto &mod_d = mods.module_at(lib_d);
 
     if (!mod_l.tree.is_empty()) {
-      mod_d.includes.push_back(mods.get_module_path(lib_l) / mod_l.install_dir);
-      add_unique(mod_d.sys_links, mod_l.sys_links);
+      mod_d.add_include(
+          (mods.get_module_path(lib_l) / mod_l.get_install_dir()).string());
+      // add_unique(mod_d.sys_links, mod_l.sys_links);
     } else {
       // we shouldn't need to add_unique, because they should always be unique,
       // but this is fine
-      add_unique(mod_d.sys_includes, mod_l.sys_includes);
+      // add_unique(mod_d.sys_includes, mod_l.sys_includes);
     }
     // TODO: we should probably just have an output name that we can use instead
     // of this
     if (mod_l.type == Module::STATIC) {
-      mod_d.links.push_back(fs::path(mod_l.install_dir) /
-                            ("lib" + mod_l.name + ".a"));
+      mod_d.add_link((fs::path(mod_l.get_install_dir()) /
+                      ("lib" + std::string(mod_l.get_name()) + ".a"))
+                         .string());
     } else {
       if (!mod_l.tree.is_empty()) {
         // TODO: see todo around 640 about platform dependent file names
-        mod_d.links.push_back(fs::path(mod_l.install_dir) /
-                              ("lib" + mod_l.name + ".so"));
+        mod_d.add_link((fs::path(mod_l.get_install_dir()) /
+                        ("lib" + std::string(mod_l.get_name()) + ".so"))
+                           .string());
       }
     }
     // link all the stuff that the other mod also needs
     // TODO: idk how we should check that the path is correct, because i'm
     // currently using this for system includes (-lm, -llua, -lstdc++, etc)?
-    add_unique(mod_d.links, mod_l.links);
+    // add_unique(mod_d.links, mod_l.links);
 
     return 0;
   } catch (std::exception const &e) {
@@ -2826,11 +3030,12 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
   auto const &mod = mods[idx.mods];
 #ifdef DEBUG_MOD
   std::cout << LM_HELP "[pushing back]" LM_NORMAL
-            << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
+            << std::format("[{}/{}.o/{}.o]", mod.get_install_dir(),
+                           mod.get_name(), str)
             << " to " << idx << std::endl;
 #endif // DEBUG_MOD
-  lof.emplace_back(
-      std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
+  lof.emplace_back(std::format("{}/{}.o/{}.o", mod.get_install_dir(),
+                               mod.get_name(), std::move(str)));
   num_remaining_files[idx.mods]--;
   // this should work(?), and should mean that this is the last file that was
   // needed to be compiled(?)
@@ -2850,11 +3055,12 @@ auto LakeModules::add_failed_file(ModIndex const idx,
   auto const &mod = mods[idx.mods];
 #ifdef DEBUG_MOD
   std::cout << LM_HELP "[pushing back]" LM_NORMAL
-            << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
+            << std::format("[{}/{}.o/{}.o]", mod.get_install_dir(),
+                           mod.get_name(), str)
             << " to " << idx << std::endl;
 #endif // DEBUG_MOD
-  lof.emplace_back(
-      std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
+  lof.emplace_back(std::format("{}/{}.o/{}.o", mod.get_install_dir(),
+                               mod.get_name(), std::move(str)));
   num_remaining_files[idx.mods]--;
 }
 
@@ -2914,11 +3120,12 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
     }();
 #ifdef DEBUG_MOD
     std::cout << LM_HELP "[pushing back]" LM_NORMAL
-              << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, fname)
+              << std::format("[{}/{}.o/{}.o]", mod.get_install_dir(),
+                             mod.get_name(), fname)
               << " to " << mod_idx << std::endl;
 #endif // DEBUG_MOD
-    lof.emplace_back(
-        std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname));
+    lof.emplace_back(std::format("{}/{}.o/{}.o", mod.get_install_dir(),
+                                 mod.get_name(), fname));
   }
   return files_to_compile;
 }
@@ -2930,12 +3137,15 @@ auto LakeModules::get_allocator() noexcept -> allocator::Page & {
 }
 
 auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
-    -> ListOfStrings {
+    -> std::vector<std::string_view> {
   auto lock = std::unique_lock(mtxs[idx.mods]);
   auto const &vec = compiled_files[idx.mods];
-  return std::accumulate(
-      vec.begin(), vec.end(), std::string(),
-      [](auto &&a, auto &&next) { return std::format("{} {}", a, next); });
+  auto res = std::vector<std::string_view>();
+  res.reserve(vec.size());
+  for (auto &&v : vec) {
+    res.push_back(v);
+  }
+  return res;
 }
 
 auto LakeModules::append_module_with_path(fs::path const &path, Module &&mod)

@@ -72,9 +72,8 @@ auto CompilationPool::add_compile_tasks(
                                              std::filesystem::current_path());
       ++num_remaining_files;
 
-      tasks.push([idx, include_path, compiler = std::string_view{mod.compiler},
-                  install_dir = std::string_view{mod.install_dir},
-                  name = std::string_view{mod.name},
+      tasks.push([idx, include_path, compiler = mod.get_compiler(),
+                  install_dir = mod.get_install_dir(), name = mod.get_name(),
                   path = std::move(fname)]() -> void {
         // switched from calling .stem to make things easier when pushing back
         // already compiled files

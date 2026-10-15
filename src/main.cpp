@@ -549,7 +549,7 @@ new_proj(std::string_view const project_name,
           std::pair("", "src/main.cpp"),
           std::pair("src/dyn.hpp", "src/dyn.cpp"),
           std::pair("src/static.hpp", "src/static.cpp"),
-      };
+  };
 
   auto constexpr hpp_cpp_f_content =
       std::array<std::pair<std::string_view, std::string_view>, 3>{
@@ -615,7 +615,7 @@ new_proj(std::string_view const project_name,
               "}" LM_NL
                   // clang-format on
               }),
-      };
+  };
 
   auto &&[header_f_name, impl_f_name] = file_paths[static_cast<
       std::underlying_type_t<luamake::builtins::CLOptions::ProjectType>>(type)];
@@ -944,12 +944,12 @@ static auto clean(lua_State *const state, bool const rm_everything) noexcept
     if (mod.tree.is_empty()) {
       continue;
     }
-    auto const cache_path = fs::path(
-        std::format("{}/__luamake_cache/{}.cache", mod.install_dir, mod.name));
+    auto const cache_path = fs::path(std::format(
+        "{}/__luamake_cache/{}.cache", mod.get_install_dir(), mod.get_name()));
     (void)fs::remove(cache_path);
     if (rm_everything) {
-      auto const object_path =
-          fs::path(std::format("{}/{}.o", mod.install_dir, mod.name));
+      auto const object_path = fs::path(
+          std::format("{}/{}.o", mod.get_install_dir(), mod.get_name()));
       for (auto &&obj : fs::directory_iterator(object_path)) {
         (void)fs::remove(obj);
       }
@@ -994,38 +994,39 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
     if (mod.tree.is_empty()) {
       continue;
     }
-    auto const &directory = mod.install_dir;
+    auto const &directory = mod.get_install_dir();
     auto const arguments = [&]() -> std::string {
       auto res = std::string();
       res.reserve(1024);
       auto prev = size_t{};
       auto i = size_t{};
-      for (; i < mod.compiler.size(); ++i) {
-        if (mod.compiler[i] == ' ') {
+      auto const compiler = mod.get_compiler();
+      for (; i < compiler.size(); ++i) {
+        if (compiler[i] == ' ') {
           res.append(1, '"');
-          res.append(mod.compiler.substr(prev, i - prev));
+          res.append(compiler.substr(prev, i - prev));
           res.append(1, '"');
           res.append(1, ',');
           prev = i + 1;
         }
       }
       res.append(1, '"');
-      res.append(mod.compiler.substr(prev, i - prev));
+      res.append(compiler.substr(prev, i - prev));
       res.append(1, '"');
       res.append(1, ',');
       return res;
     }();
 
-    auto const includes =
-        std::accumulate(mod.includes.cbegin(), mod.includes.cend(),
-                        std::string(), [](auto &&a, auto &&next) {
-                          return std::format("{}\"-I{}\",", a, next.string());
+    auto const all_includes = mod.get_includes();
+    auto const includes = std::accumulate(
+        all_includes.cbegin(), all_includes.cend(), std::string(),
+        [](auto &&a, auto &&n) { return std::format("{}\"-I{}\",", a, n); });
+    auto const all_sys_includes = mod.get_sys_includes();
+    auto const sys_includes =
+        std::accumulate(all_sys_includes.cbegin(), all_sys_includes.cend(),
+                        std::string(), [](auto &&a, auto &&n) {
+                          return std::format("{}\"-isystem\",\"{}\",", a, n);
                         });
-    auto const sys_includes = std::accumulate(
-        mod.sys_includes.cbegin(), mod.sys_includes.cend(), std::string(),
-        [](auto &&a, auto &&next) {
-          return std::format("{}\"-isystem\",\"{}\",", a, next.string());
-        });
 
     auto cc_json_string = std::string(1, '[');
     for (auto i = size_t{}; i < mod.tree.size() - 1; ++i) {
@@ -1040,8 +1041,8 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
 
       cc_json_string.append("\"-c\",\"-o\",");
       auto const fname = mod.tree.get_path(i).stem().string();
-      auto const obj_path =
-          std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
+      auto const obj_path = std::format("{}/{}.o/{}.o", mod.get_install_dir(),
+                                        mod.get_name(), fname);
       auto const fpath = mod.tree.get_path(i);
       cc_json_string.append(
           std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
@@ -1064,8 +1065,8 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
 
     cc_json_string.append("\"-c\",\"-o\",");
     auto const fname = mod.tree.get_path(mod.tree.size() - 1).stem().string();
-    auto const obj_path =
-        std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, fname);
+    auto const obj_path = std::format("{}/{}.o/{}.o", mod.get_install_dir(),
+                                      mod.get_name(), fname);
     auto const fpath = mod.tree.get_path(mod.tree.size() - 1);
     cc_json_string.append(
         std::format("\"{}\",\"{}\"", obj_path.c_str(), fpath.c_str()));
@@ -1077,9 +1078,9 @@ static auto compile_commands_json(lua_State *const state) noexcept -> exit_t {
 
     cc_json_string += ']';
 
-    fs::create_directory(mod.install_dir);
+    fs::create_directory(mod.get_install_dir());
     auto const cc_json_path =
-        mod.install_dir / fs::path("compile_commands.json");
+        mod.get_install_dir() / fs::path("compile_commands.json");
     auto cc_json = luamake::File(cc_json_path,
                                  luamake::File::WRITE | luamake::File::CREATE);
     if (!cc_json) {

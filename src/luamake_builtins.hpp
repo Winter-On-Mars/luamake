@@ -7,6 +7,7 @@
 #include "luamake_spiral.hpp"
 #include "luamake_strings.hpp"
 
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -183,12 +184,29 @@ struct Module final {
   auto get_name() const noexcept -> std::string_view;
   auto get_install_dir() const noexcept -> std::string_view;
 
-  // TODO: get ride of these(?)
+  // TODO: have some functions to apply functions to these vectors, like the
+  // accumulate_headers function
   auto get_roots() const noexcept -> std::vector<std::string_view>;
   auto get_headers() const noexcept -> std::vector<std::string_view>;
   auto get_includes() const noexcept -> std::vector<std::string_view>;
+  auto get_sys_includes() const noexcept -> std::vector<std::string_view>;
   auto get_links() const noexcept -> std::vector<std::string_view>;
-  auto get_sys_links() const noexcept -> std::string_view;
+  auto get_sys_links() const noexcept -> std::vector<std::string_view>;
+
+  auto accumulate_headers(auto &&func) const -> std::string {
+    auto res = std::string();
+    for (auto &&sv : headers) {
+      auto str = [&]() {
+        if (sv.is_interned())
+          return std::string_view{reinterpret_cast<char const *>(sv.buffer())};
+        else
+          return std::string_view{all_strings.buffer + sv.start(),
+                                  all_strings.buffer + sv.end()};
+      }();
+      res = std::move(func(res, str));
+    }
+    return res;
+  }
 
   auto set_exe_root(std::string_view const) noexcept -> void;
   auto set_compiler(std::string_view const) noexcept -> void;
@@ -198,8 +216,9 @@ struct Module final {
   auto add_root(std::string_view const) noexcept -> void;
   auto add_header(std::string_view const) noexcept -> void;
   auto add_include(std::string_view const) noexcept -> void;
-  auto add_links(std::string_view const) noexcept -> void;
-  auto add_sys_links(std::string_view const) noexcept -> void;
+  auto add_sys_include(std::string_view const) noexcept -> void;
+  auto add_link(std::string_view const) noexcept -> void;
+  auto add_sys_link(std::string_view const) noexcept -> void;
 
   // this is kinda stupid i'm not gonna lie, but this is the only
   // way i can think to have DepTree be able to reference Module and vice versa
@@ -262,7 +281,7 @@ struct Module final {
       return num_files;
     }
 
-    auto vectorize() const -> std::vector<StringViews>;
+    auto vectorize() const -> std::vector<std::string_view>;
     auto is_empty() const noexcept -> bool;
 
   private:
@@ -328,26 +347,25 @@ private:
     SmallString<sizeof(StringViews)> in;
   };
   static_assert(sizeof(ModString) == sizeof(StringViews));
+  // TODO: write/pull in the MaskedPointer type to include the ptr intern
+  // metadata in the pointer, making this 16 bytes instead of 20, might also not
+  // be a good idea because we could use the extra space to store slightly
+  // longer strings, but it's still something to try
   struct SVInterned final {
-    // TODO: finish writing these
-    explicit constexpr SVInterned(std::string_view const sv) noexcept
-        : bytes({}) {
-      if (sv.length() < bytes.size() - 1) {
-        // sso
-        bytes[0] = IsInterned::IS;
-      } else {
-        bytes[0] = IsInterned::NOT;
-      }
-    }
+    static auto constexpr MAX_SIZE = 4 + sizeof(StringViews) - 1;
+    // NOTE: only used when doing sso, other ctors are used, because we have to
+    // copy some values over
+    explicit SVInterned(std::string_view const sv) noexcept;
+    explicit SVInterned(StringViews const sv) noexcept;
+
     auto constexpr is_interned() const noexcept -> bool {
       return bytes[0] == IsInterned::IS;
     }
     auto constexpr buffer() const noexcept -> u8 const * {
       return bytes.data() + 1;
     };
-    // TODO
-    auto constexpr start() const noexcept -> size_t { return 0; }
-    auto constexpr end() const noexcept -> size_t { return 0; }
+    auto start() const noexcept -> size_t;
+    auto end() const noexcept -> size_t;
 
     enum IsInterned : u8 {
       NOT,
@@ -474,7 +492,8 @@ struct LakeModules final {
   auto add_compiled_file(ModIndex const, std::string &&) noexcept -> void;
   auto add_failed_file(ModIndex const, std::string &&) noexcept -> void;
 
-  auto get_all_compiled_files(ModIndex const) noexcept -> std::string;
+  auto get_all_compiled_files(ModIndex const) noexcept
+      -> std::vector<std::string_view>;
 
   auto append_module_with_path(std::filesystem::path const &,
                                Module &&) noexcept(false) -> ModIndex;

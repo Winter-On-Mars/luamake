@@ -55,6 +55,10 @@ auto ByteBuffer::resize(size_t at_least) -> void {
 
 auto write(...) -> void = delete;
 
+// TODO: get rid of this, we shouldn't have to really worry about endian
+// ordering, because all cache files should be on the same computer. idk i could
+// see large projects having cache servers to store build info, but at the same
+// time bleh
 auto write(ByteBuffer &bytes, std::integral auto t) -> void {
   if (bytes.cur + sizeof(t) >= bytes.cap)
     bytes.resize(sizeof(t));
@@ -132,6 +136,17 @@ auto read<uint>(ByteBuffer &bytes) -> uint {
 
 template <>
 [[nodiscard]]
+auto read<int>(ByteBuffer &bytes) -> int {
+  check(bytes, sizeof(int), "int");
+  auto res = int{};
+  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(uint));
+  res = be32toh(res);
+  bytes.cur += sizeof(int);
+  return res;
+}
+
+template <>
+[[nodiscard]]
 auto read<u8>(ByteBuffer &bytes) -> u8 {
   check(bytes, sizeof(u8), "u8");
   auto res = u8{};
@@ -175,7 +190,7 @@ auto Serializer<std::span<T>>::serialize(std::span<T const> const span)
   auto str_serializer = Serializer<std::string_view>(bytes);
   for (auto i = size_t{}; i < span_size; ++i) {
     // this this causes an issue, but we'll test it
-    str_serializer.serialize(std::string_view(span[i].string()));
+    str_serializer.serialize(std::string_view(span[i]));
   }
 }
 
@@ -236,41 +251,23 @@ template <> struct Serializer<builtins::Module> {
     auto type_serializer = Serializer<builtins::Module::Module_t>(bytes);
     type_serializer.serialize(mod.type);
 
+    auto str_serializer = Serializer<std::string_view>(bytes);
+    str_serializer.serialize(mod.get_compiler());
+    str_serializer.serialize(mod.get_name());
+    str_serializer.serialize(mod.get_install_dir());
+
+    auto span_serializer = Serializer<std::span<std::string_view>>(bytes);
+    span_serializer.serialize(mod.get_roots());
+    span_serializer.serialize(mod.get_headers());
+    span_serializer.serialize(mod.get_includes());
+    span_serializer.serialize(mod.get_sys_includes());
+    span_serializer.serialize(mod.get_links());
+    span_serializer.serialize(mod.get_sys_links());
+
     auto tree_serializer = Serializer<builtins::Module::DepTree>(bytes);
     tree_serializer.serialize(mod.tree);
-
-    auto span_serializer = Serializer<std::span<fs::path>>(bytes);
-    span_serializer.serialize(mod.roots);
-    span_serializer.serialize(mod.headers);
-    span_serializer.serialize(mod.includes);
-    span_serializer.serialize(mod.sys_includes);
-    span_serializer.serialize(mod.links);
-    span_serializer.serialize(mod.sys_links);
-
-    auto str_serializer = Serializer<std::string_view>(bytes);
-    str_serializer.serialize(mod.compiler);
-    str_serializer.serialize(mod.name);
-    str_serializer.serialize(mod.install_dir);
   }
 
-  ByteBuffer &bytes;
-};
-
-template <> struct Serializer<ListOfStrings> {
-  Serializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
-  auto serialize(ListOfStrings const &los) -> void {
-    auto str_serializer = Serializer<std::string_view>(bytes);
-    str_serializer.serialize(los.buffer);
-
-    auto const span_size = los.strings.size();
-    write(bytes, span_size);
-    auto sv_serializer = Serializer<StringViews>(bytes);
-    for (auto i = size_t{}; i < span_size; ++i) {
-      str_serializer.serialize(
-          std::string_view{los.buffer.data() + los.strings[i].start,
-                           los.buffer.data() + los.strings[i].end});
-    }
-  }
   ByteBuffer &bytes;
 };
 
@@ -289,15 +286,15 @@ template <> struct Deserializer<std::string> {
   ByteBuffer &bytes;
 };
 
-template <> struct Deserializer<std::vector<fs::path>> {
+template <class T> struct Deserializer<std::vector<T>> {
   Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
-  auto deserialize() -> std::vector<fs::path> {
-    auto res = std::vector<fs::path>();
+  auto deserialize() -> std::vector<T> {
+    auto res = std::vector<T>();
     auto const size = read<size_t>(bytes);
     res.reserve(size);
     auto str_deserial = Deserializer<std::string>(bytes);
     for (auto i = size_t{}; i < size; ++i) {
-      res.emplace_back(fs::path(str_deserial.deserialize()));
+      res.emplace_back(T(str_deserial.deserialize()));
     }
     return res;
   }
@@ -361,54 +358,64 @@ template <> struct Deserializer<builtins::Module> {
     auto mod_t_deserial = Deserializer<builtins::Module::Module_t>(bytes);
     mod.type = mod_t_deserial.deserialize();
 
-    auto tree_deserial = Deserializer<builtins::Module::DepTree>(bytes);
-    mod.tree = tree_deserial.deserialize();
+    auto str_deserial = Deserializer<std::string>(bytes);
+    mod.set_compiler(str_deserial.deserialize());
+    mod.set_name(str_deserial.deserialize());
+    mod.set_install_dir(str_deserial.deserialize());
+    // mod.compiler = str_deserial.deserialize();
+    // mod.name = str_deserial.deserialize();
+    // mod.install_dir = str_deserial.deserialize();
 
-    auto vec_deserial = Deserializer<std::vector<fs::path>>(bytes);
+    auto vec_deserial = Deserializer<std::vector<std::string>>(bytes);
+    auto const root = vec_deserial.deserialize();
+    auto const header = vec_deserial.deserialize();
+    auto const include = vec_deserial.deserialize();
+    auto const sys_include = vec_deserial.deserialize();
+    auto const link = vec_deserial.deserialize();
+    auto const sys_link = vec_deserial.deserialize();
+#define FUCK_ME_IM_LAZY(x)                                                     \
+  {                                                                            \
+    for (auto &&foo : x) {                                                     \
+      mod.add_##x(foo);                                                        \
+    }                                                                          \
+  }
+
+    FUCK_ME_IM_LAZY(root);
+    FUCK_ME_IM_LAZY(header);
+    FUCK_ME_IM_LAZY(include);
+    FUCK_ME_IM_LAZY(sys_include);
+    FUCK_ME_IM_LAZY(link);
+    FUCK_ME_IM_LAZY(sys_link);
+
+#undef FUCK_ME_IM_LAZY
+    /*
     mod.roots = vec_deserial.deserialize();
     mod.headers = vec_deserial.deserialize();
     mod.includes = vec_deserial.deserialize();
     mod.sys_includes = vec_deserial.deserialize();
     mod.links = vec_deserial.deserialize();
     mod.sys_links = vec_deserial.deserialize();
+    */
 
-    auto str_deserial = Deserializer<std::string>(bytes);
-    mod.compiler = str_deserial.deserialize();
-    mod.name = str_deserial.deserialize();
-    mod.install_dir = str_deserial.deserialize();
+    auto tree_deserial = Deserializer<builtins::Module::DepTree>(bytes);
+    mod.tree = tree_deserial.deserialize();
+
     return mod;
   }
   ByteBuffer &bytes;
 };
 
-template <> struct Deserializer<ListOfStrings> {
-  Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
-  auto deserialize() -> ListOfStrings {
-    auto los = ListOfStrings();
-
-    auto str_deserial = Deserializer<std::string>(bytes);
-    los.buffer = str_deserial.deserialize();
-
-    auto const span_size = read<size_t>(bytes);
-    los.strings.resize(span_size);
-    auto sv_deserial = Deserializer<StringViews>(bytes);
-    for (auto i = size_t{}; i < span_size; ++i) {
-      los.strings[i] = sv_deserial.deserialize();
-    }
-
-    return los;
-  }
-  ByteBuffer &bytes;
-};
-
-auto serialize(builtins::Module const &mod, ListOfStrings &&compiled_files,
+auto serialize(builtins::Module const &mod,
+               std::span<std::string_view const> &&compiled_files,
                std::filesystem::path const &path) noexcept(false) -> void {
   auto bytes = ByteBuffer();
   auto mod_cereal = Serializer<builtins::Module>(bytes);
   mod_cereal.serialize(mod);
 
+  /*
   auto los_cereal = Serializer<ListOfStrings>(bytes);
   los_cereal.serialize(compiled_files);
+  */
 
   auto outfile = File(path, File::WRITE | File::CREATE);
   // we should also add some error checking for this
@@ -426,7 +433,8 @@ auto serialize(builtins::Module const &mod, ListOfStrings &&compiled_files,
 
 // will also throw if there's some big error
 auto deserialize(fs::path const &path)
-    -> std::variant<std::pair<builtins::Module, ListOfStrings>, std::string> {
+    -> std::variant<std::pair<builtins::Module, std::vector<std::string_view>>,
+                    std::string> {
   auto file = File(path, File::READ | File::BINARY);
   if (!file)
     return std::format("unable to open serialization file [{}]", path.string());
@@ -436,9 +444,11 @@ auto deserialize(fs::path const &path)
   auto &&[size, buffer] = file.dump_content();
   auto bytes = ByteBuffer(std::move(buffer), size);
   auto mod_decereal = Deserializer<builtins::Module>(bytes);
+  /*
   auto los_decereal = Deserializer<ListOfStrings>(bytes);
+  */
   auto mod = mod_decereal.deserialize();
-  auto los = los_decereal.deserialize();
-  return std::make_pair(std::move(mod), std::move(los));
+  throw std::runtime_error(__FUNCTION__);
+  //  return std::make_pair(std::move(mod), std::move(los));
 }
 } // namespace luamake::spl
