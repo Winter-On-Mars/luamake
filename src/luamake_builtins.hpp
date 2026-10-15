@@ -331,7 +331,7 @@ struct Module final {
   };
 
 private:
-  enum class Interned {
+  enum Interned {
     ROOTS = 1 << 0,
     COMPILER = 1 << 1,
     NAME = 1 << 2,

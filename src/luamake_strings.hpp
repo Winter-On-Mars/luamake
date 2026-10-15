@@ -106,9 +106,12 @@ struct FixedString final {
 template <size_t len, typename char_t> struct ASmallString final {
   static auto constexpr length() noexcept -> size_t { return len; }
 
+  auto constexpr data() noexcept -> char_t * { return buffer.data() + 1; }
+
   auto constexpr data() const noexcept -> char_t const * {
     return buffer.data() + 1;
   }
+
   auto constexpr find(char_t ch) const noexcept -> size_t {
     for (auto i = size_t{}; i < len; ++i) {
       if (buffer[i] == ch)

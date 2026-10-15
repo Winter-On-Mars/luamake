@@ -1299,6 +1299,36 @@ auto Module::get_install_dir() const noexcept -> std::string_view {
   }
 }
 
+auto Module::get_roots() const noexcept -> std::vector<std::string_view> {
+  auto res = std::vector<std::string_view>();
+  res.reserve(roots.size());
+  for (auto &&root : roots) {
+    if (root.is_interned()) {
+      res.push_back(
+          std::string_view{reinterpret_cast<char const *>(root.buffer())});
+    } else {
+      res.push_back(std::string_view{all_strings.buffer + root.start(),
+                                     all_strings.buffer + root.end()});
+    }
+  }
+  return res;
+}
+
+auto Module::get_headers() const noexcept -> std::vector<std::string_view> {
+  auto res = std::vector<std::string_view>();
+  res.reserve(headers.size());
+  for (auto &&header : headers) {
+    if (header.is_interned()) {
+      res.push_back(
+          std::string_view{reinterpret_cast<char const *>(header.buffer())});
+    } else {
+      res.push_back(std::string_view{all_strings.buffer + header.start(),
+                                     all_strings.buffer + header.end()});
+    }
+  }
+  return res;
+}
+
 auto Module::get_includes() const noexcept -> std::vector<std::string_view> {
   auto res = std::vector<std::string_view>();
   res.reserve(includes.size());
@@ -1307,11 +1337,96 @@ auto Module::get_includes() const noexcept -> std::vector<std::string_view> {
       res.push_back(
           std::string_view{reinterpret_cast<char const *>(include.buffer())});
     } else {
-      res.push_back(std::string_view{all_strings.buffer + install_dir.sv.start,
-                                     all_strings.buffer + install_dir.sv.end});
+      res.push_back(std::string_view{all_strings.buffer + include.start(),
+                                     all_strings.buffer + include.end()});
     }
   }
   return res;
+}
+
+auto Module::get_sys_includes() const noexcept
+    -> std::vector<std::string_view> {
+  auto res = std::vector<std::string_view>();
+  res.reserve(sys_includes.size());
+  for (auto &&sys_include : sys_includes) {
+    if (sys_include.is_interned()) {
+      res.push_back(std::string_view{
+          reinterpret_cast<char const *>(sys_include.buffer())});
+    } else {
+      res.push_back(std::string_view{all_strings.buffer + sys_include.start(),
+                                     all_strings.buffer + sys_include.end()});
+    }
+  }
+  return res;
+}
+
+auto Module::get_links() const noexcept -> std::vector<std::string_view> {
+  auto res = std::vector<std::string_view>();
+  res.reserve(links.size());
+  for (auto &&link : links) {
+    if (link.is_interned()) {
+      res.push_back(
+          std::string_view{reinterpret_cast<char const *>(link.buffer())});
+    } else {
+      res.push_back(std::string_view{all_strings.buffer + link.start(),
+                                     all_strings.buffer + link.end()});
+    }
+  }
+  return res;
+}
+
+auto Module::get_sys_links() const noexcept -> std::vector<std::string_view> {
+  auto res = std::vector<std::string_view>();
+  res.reserve(sys_links.size());
+  for (auto &&sys_link : sys_links) {
+    if (sys_link.is_interned()) {
+      res.push_back(
+          std::string_view{reinterpret_cast<char const *>(sys_link.buffer())});
+    } else {
+      res.push_back(std::string_view{all_strings.buffer + sys_link.start(),
+                                     all_strings.buffer + sys_link.end()});
+    }
+  }
+  return res;
+}
+
+auto Module::set_compiler(std::string_view const sv) noexcept -> void {
+  if (sv.length() < sizeof(StringViews)) {
+    // NOTE: this is fucking horrible don't do this
+    reinterpret_cast<int &>(meta) |= Interned::COMPILER;
+    ::memcpy(compiler.in.data(), sv.data(), sv.length());
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    compiler.sv = StringViews{start, end};
+  }
+}
+
+auto Module::set_name(std::string_view const sv) noexcept -> void {
+  if (sv.length() < sizeof(StringViews)) {
+    // NOTE: this is fucking horrible don't do this
+    reinterpret_cast<int &>(meta) |= Interned::NAME;
+    ::memcpy(name.in.data(), sv.data(), sv.length());
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    name.sv = StringViews{start, end};
+  }
+}
+
+auto Module::set_install_dir(std::string_view const sv) noexcept -> void {
+  if (sv.length() < sizeof(StringViews)) {
+    // NOTE: this is fucking horrible don't do this
+    reinterpret_cast<int &>(meta) |= Interned::NAME;
+    ::memcpy(install_dir.in.data(), sv.data(), sv.length());
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    install_dir.sv = StringViews{start, end};
+  }
 }
 
 auto Module::add_root(std::string_view const sv) noexcept -> void {
@@ -3128,6 +3243,10 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
                                  mod.get_name(), fname));
   }
   return files_to_compile;
+}
+
+auto LakeModules::has_remaining(ModIndex const idx) noexcept -> bool {
+  return num_remaining_files[idx.mods] != 0;
 }
 
 auto LakeModules::init_allocator() noexcept -> void { arena.init(); }
