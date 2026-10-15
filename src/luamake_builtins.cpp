@@ -547,7 +547,8 @@ auto install_impl(lua_State *state) -> int {
   // directory will be there, it's just annoying because we have to check
   // every time in case somebody changes the install_dir variable
   auto const install_dir =
-      parent_path / fs::path(std::format("{}/{}.o", mod.install_dir, mod.name));
+      parent_path /
+      fs::path(std::format("{}/{}.o", mod.get_install_dir(), mod.get_name()));
   auto ec = std::error_code{};
   if (fs::create_directories(install_dir, ec); ec) {
     // TODO: update to push the ec message
@@ -557,7 +558,7 @@ auto install_impl(lua_State *state) -> int {
     return lua_error(state);
   }
   auto const cache_dir =
-      fs::path(std::format("{}/__luamake_cache", mod.install_dir));
+      fs::path(std::format("{}/__luamake_cache", mod.get_install_dir()));
   if (fs::create_directories(cache_dir, ec); ec) {
     std::cerr << ec.message() << LM_NL;
     lua_pushstring(state, "Unable to create directory");
@@ -565,7 +566,7 @@ auto install_impl(lua_State *state) -> int {
   }
 
   auto const cache_path =
-      fs::path(std::format("{}/{}.cache", cache_dir.string(), mod.name));
+      fs::path(std::format("{}/{}.cache", cache_dir.string(), mod.get_name()));
   // NOTE: we might be able to put this on a background thread, then just
   // continue on doing things, and when this is done we do the comparison,
   // but for now we'll have this be blocking :)
@@ -573,17 +574,16 @@ auto install_impl(lua_State *state) -> int {
   auto files_to_compile = std::vector<std::string_view>();
   switch (maybe_cached_mod.index()) {
   case 0: {
-    std::cout << std::format("Checking [{}] cache" LM_NL, mod.name);
+    std::cout << std::format("Checking [{}] cache" LM_NL, mod.get_name());
     auto &&[cached_mod, compiled_files] =
-        std::get<std::pair<builtins::Module, std::vector<std::string>>>(
+        std::get<std::pair<builtins::Module, std::vector<std::string_view>>>(
             maybe_cached_mod);
     gen_dep_tree_fut.get();
     if (mod == cached_mod) {
       files_to_compile =
           builtins::mods.get_tree_diff(mod_idx, mod.tree, cached_mod.tree);
-      append_unique(files_to_compile, compiled_files);
       if (files_to_compile.empty()) {
-        std::cout << std::format("\t[{}] already built" LM_NL, mod.name);
+        std::cout << std::format("\t[{}] already built" LM_NL, mod.get_name());
         return 1;
       }
     } else {
@@ -596,9 +596,8 @@ auto install_impl(lua_State *state) -> int {
     }
   } break;
   case 1: {
-    // TODO: update this because it's not really an error
-    auto const &error_message = std::get<std::string>(maybe_cached_mod);
-    std::cerr << std::format("[{}]" LM_NL, error_message);
+    auto const &fail_message = std::get<std::string>(maybe_cached_mod);
+    std::cerr << std::format("[{}]" LM_NL, fail_message);
     gen_dep_tree_fut.get();
     // we don't have a cached tree to comp against, so we just push back
     // everything to be compiled
@@ -666,16 +665,17 @@ auto install_impl(lua_State *state) -> int {
     // only way i could think to get this to work :) *should* be optimized away
     auto const invoked_command = [&]() -> std::string {
       if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
-        return std::format("ar crs {}/lib{}.a {}", mod.install_dir, mod.name,
-                           compiled_files);
+        return std::format("ar crs {}/lib{}.a {}", mod.get_install_dir(),
+                           mod.get_name(), compiled_files);
       } else if constexpr (mod_t == builtins::Module::Module_t::EXE) {
-        return std::format("{} -o {}/{} {} {}", mod.compiler, mod.install_dir,
-                           mod.name, compiled_files, mod.format_links());
+        return std::format("{} -o {}/{} {} {}", mod.get_compiler(),
+                           mod.get_install_dir(), mod.get_name(),
+                           compiled_files, mod.format_links());
       } else if constexpr (mod_t == builtins::Module::Module_t::DYNAMIC) {
         // TODO: change the .so to .dll and .dyn(?) for depending on platform
-        return std::format("{} -shared -o {}/lib{}.so {} {}", mod.compiler,
-                           mod.install_dir, mod.name, compiled_files,
-                           mod.format_links());
+        return std::format("{} -shared -o {}/lib{}.so {} {}",
+                           mod.get_compiler(), mod.get_install_dir(),
+                           mod.get_name(), compiled_files, mod.format_links());
       } else {
         unreachable();
       }
@@ -685,12 +685,13 @@ auto install_impl(lua_State *state) -> int {
       std::cout << std::format("[{}]" LM_NL, invoked_command);
     } else {
       if constexpr (mod_t == builtins::Module::Module_t::STATIC) {
-        std::cout << std::format("Making archive for [{}]" LM_NL, mod.name);
+        std::cout << std::format("Making archive for [{}]" LM_NL,
+                                 mod.get_name());
       } else if constexpr (mod_t == builtins::Module::DYNAMIC) {
         std::cout << std::format("Making shared object for [{}]" LM_NL,
-                                 mod.name);
+                                 mod.get_name());
       } else {
-        std::cout << std::format("Building [{}]" LM_NL, mod.name);
+        std::cout << std::format("Building [{}]" LM_NL, mod.get_name());
       }
     }
     // NOTE: figure out how to handle errors with the lua vm, if there's
@@ -718,9 +719,9 @@ auto install_impl(lua_State *state) -> int {
     // header things, should also be required for dynamic modules
     if constexpr (mod_t == builtins::Module::STATIC ||
                   mod_t == builtins::Module::DYNAMIC) {
-      fs::create_directory(
-          parent_path /
-          fs::path(std::format("{}/{}", mod.install_dir, mod.name)));
+      fs::create_directory(parent_path /
+                           fs::path(std::format("{}/{}", mod.get_install_dir(),
+                                                mod.get_name())));
 
       auto const formatted_files = std::accumulate(
           mod.headers.begin(), mod.headers.end(), std::string(),
@@ -730,11 +731,12 @@ auto install_impl(lua_State *state) -> int {
 
       auto const copy_headers = std::format(
           "cp --target-directory={} {}",
-          (parent_path / mod.install_dir / mod.name).string(), formatted_files);
+          (parent_path / mod.get_install_dir() / mod.get_name()).string(),
+          formatted_files);
       if (builtins::cl_options.verbose) {
         std::cout << std::format("[{}]" LM_NL, copy_headers);
       } else {
-        std::cout << std::format("Copying [{}] headers" LM_NL, mod.name);
+        std::cout << std::format("Copying [{}] headers" LM_NL, mod.get_name());
       }
       if (os::call(copy_headers) != 0) {
         fprintf(stderr, "Error moving headers [%s]" LM_NL,
@@ -864,8 +866,8 @@ auto constexpr concat_lua_array(lua_State *state, int index,
   return res;
 }
 
-auto constexpr add_unique(std::vector<std::filesystem::path> &to,
-                          std::span<std::filesystem::path const> const from)
+template <class T>
+auto constexpr add_unique(std::vector<T> &to, std::span<T const> const from)
     -> void {
   for (auto &&path : from) {
     if (std::find(to.cbegin(), to.cend(), path) == to.cend()) {
@@ -1204,22 +1206,17 @@ auto Module::DepTree::display_impl(std::ostream &out, unsigned int const depth,
 }
 #endif // DEBUG_MOD
 
-auto Module::DepTree::vectorize() const -> std::vector<std::string_view> {
-  auto res = std::vector<std::string_view>();
-  res.reserve(num_files);
+auto Module::DepTree::vectorize() const -> std::vector<StringViews> {
+  auto res = std::vector<StringViews>();
   for (auto i = size_t{}; i < num_files; ++i) {
     if (types[i] == Module::DepTree::SourceFile_t::IMPL) {
-      res.push_back(std::string_view{all_paths.buffer + files[i].start,
-                                     all_paths.buffer + files[i].end - 1});
+      res.emplace_back(files[i]);
     }
   }
-
   return res;
 }
 
 auto Module::DepTree::is_empty() const noexcept -> bool {
-  // TODO: probably a good idea to have there be some variable we check, like
-  // using the unique_ptr's and doing a null check for this
   return num_files == 0;
 }
 
@@ -1230,9 +1227,10 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
     return false;
   }
 
-  // TODO: compare interpreters, i.e. the macros
+  throw std::runtime_error(__FUNCTION__);
 
   // rest of the class
+  /*
   if (compiler != that.compiler) {
     return false;
   }
@@ -1244,13 +1242,21 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
   if (install_dir != that.install_dir) {
     return false;
   }
+  */
 
   return true;
 }
 
 #ifdef DEBUG_MOD
 auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
-  auto _display = [&](auto x) { out << "\t\t" << x << "," LM_NL; };
+  auto _display = [&](auto x) {
+    out << "\t\t"
+        << (x.is_interned()
+                ? std::string_view{reinterpret_cast<char const *>(x.buffer())}
+                : std::string_view{all_strings.buffer + x.start(),
+                                   all_strings.buffer + x.end()})
+        << "," LM_NL;
+  };
 
   out << "mod = {" LM_NL;
 
@@ -1293,9 +1299,9 @@ auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
   std::for_each(sys_links.begin(), sys_links.end(), _display);
   out << "\t]" LM_NL;
 
-  out << "\tcompiler = " << compiler << LM_NL;
-  out << "\tname = " << name << LM_NL;
-  out << "\tinstall_dir = " << install_dir << LM_NL;
+  out << "\tcompiler = " << get_compiler() << LM_NL;
+  out << "\tname = " << get_name() << LM_NL;
+  out << "\tinstall_dir = " << get_install_dir() << LM_NL;
   out << "}" LM_NL;
   return out;
 }
@@ -1310,17 +1316,17 @@ auto Module::from_external(Module_t &&type, std::string &&links,
   return mod;
 }
 
-static auto include_path_cache =
-    std::unordered_map<std::string, std::vector<fs::path>>();
+static auto include_path_cache = pp::StringMap<std::vector<fs::path>>();
 // TODO: probably switch this to using popen, it seems like it will be more
 // performant, plus it *should* be more portable
-auto Module::append_include_paths(std::string const &compiler) -> void {
+auto Module::append_include_paths(std::string_view const compiler) -> void {
   // TODO: see if we need to cache the whole compiler string, or if it's
   // enough to just cache the path to the binary, i.e. if we can get away with
   // just caching /usr/bin/clang, then we can use the cache more, and don't
   // have to actually go into the function that much
   if (auto includes = include_path_cache.find(compiler);
       includes != include_path_cache.end()) {
+    // TODO
     sys_includes = includes->second;
     return;
   }
@@ -1555,12 +1561,13 @@ auto Module::append_predefined_macros(std::string const &compiler)
 // work with, see [[https://www.lua.org/manual/5.4/manual.html]] section 4 for
 // more info
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
-    : type(type), tree(8), roots(), headers(), includes(), sys_includes(),
-      links(), sys_links(), interpreter(nullptr), compiler(), name(),
-      install_dir() {
+    : type(type), all_strings(), compiler(), name(), install_dir(), roots(),
+      headers(), includes(), sys_includes(), links(), sys_links(), tree(8),
+      interpreter(nullptr) {
   switch (auto const compiler_t = lua_getfield(state, -1, "compiler")) {
   case LUA_TTABLE:
-    compiler = Module::parse_compiler_table(state);
+    set_compiler(parse_compiler_table(state));
+    // compiler = Module::parse_compiler_table(state);
     break;
   case LUA_TNIL:
     throw missing_field("compiler");
@@ -1571,22 +1578,33 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   // if the compiler string doesn't contain a space then it *should* just be the
   // path to the compiler, so just use the whole length
-  auto const compiler_space = compiler.find(' ') != compiler.npos
-                                  ? compiler.find(' ')
-                                  : compiler.length();
-  auto res = std::async(std::launch::async, [this, compiler_space]() {
-    auto const compiler_command = std::string(compiler.data(), compiler_space);
-    this->append_include_paths(compiler_command);
+  // NOTE: if this causes "memory issues" i'm going to rip my dick off, don't
+  // know why it would because it's on the stack, then we're making sure these
+  // functions are finished before this function ends idk
+  auto const compiler_cmd = [this]() -> std::string_view {
+    if (is_interned(Interned::COMPILER)) {
+      return std::string_view{compiler.in.data(),
+                              compiler.in.find(' ') == compiler.in.npos
+                                  ? compiler.in.find(' ')
+                                  : compiler.in.length()};
+    } else {
+      return std::string_view{all_strings.buffer + compiler.sv.start,
+                              all_strings.buffer + compiler.sv.end};
+    }
+  }();
+  auto res = std::async(std::launch::async, [this, compiler_cmd]() {
+    this->append_include_paths(compiler_cmd);
   });
-  auto macros_res = std::async(std::launch::async, [this, compiler_space]() {
-    auto const compiler_command = std::string(compiler.data(), compiler_space);
-    return this->append_predefined_macros(compiler_command);
+  auto macros_res = std::async(std::launch::async, [this, compiler_cmd]() {
+    return this->append_predefined_macros(compiler_cmd);
   });
 
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
-  case LUA_TSTRING:
-    name = lua_tolstring(state, -1, nullptr);
-    break;
+  case LUA_TSTRING: {
+    auto len = size_t{};
+    auto const *chars = lua_tolstring(state, -1, &len);
+    set_name(std::string_view{chars, len});
+  } break;
   case LUA_TNIL:
     throw missing_field("name");
   default:
@@ -1597,9 +1615,12 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   if (type == Module::EXE) {
     roots.reserve(1);
     switch (auto const root_t = lua_getfield(state, -1, "root")) {
-    case LUA_TSTRING:
-      roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
-      break;
+    case LUA_TSTRING: {
+      auto len = size_t{};
+      auto const *str = lua_tolstring(state, -1, &len);
+      push_root(str, len);
+      // roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
+    } break;
     case LUA_TNIL:
       throw missing_field("root");
     default:
@@ -2728,23 +2749,24 @@ auto operator<<(std::ostream &out, ModIndex const idx) noexcept
 
 LakeModules::LakeModules() noexcept
     : mods_cap(0), num_mods(0), states(nullptr), compiled_files(nullptr),
-      mods(nullptr), paths_cap(0), num_paths(0), luamake_paths(nullptr),
-      arena(LM_EXPR_ALLOC_SIZE) {}
+      failed_files(nullptr), mods(nullptr), paths_cap(0), num_paths(0),
+      luamake_paths(nullptr), arena(LM_EXPR_ALLOC_SIZE) {}
 
 auto LakeModules::init(size_t const cap) -> void {
   mods_cap = static_cast<uint>(cap);
   paths_cap = static_cast<uint>(cap);
   states = std::make_unique<LakeModules::ModState[]>(cap);
   mtxs = std::make_unique<std::mutex[]>(cap);
-  remaining_files = std::make_unique<std::atomic<size_t>[]>(cap);
+  num_remaining_files = std::make_unique<std::atomic<size_t>[]>(cap);
   compiled_files = std::make_unique<std::vector<std::string>[]>(cap);
+  failed_files = std::make_unique<std::vector<std::string>[]>(cap);
   luamake_paths = std::make_unique<fs::path[]>(cap);
   mods = std::make_unique<Module[]>(cap);
 
   luamake_paths[0] = fs::current_path() / "luamake.lua";
   // TODO: move these
   states[0] = ModState::uninitialized;
-  remaining_files[0] = 0;
+  num_remaining_files[0] = 0;
   ++num_paths;
 }
 
@@ -2753,8 +2775,9 @@ auto LakeModules::deinit() -> void {
   num_mods = num_paths = 0;
   states = nullptr;
   mtxs = nullptr;
-  remaining_files = nullptr;
+  num_remaining_files = nullptr;
   compiled_files = nullptr;
+  failed_files = nullptr;
   luamake_paths = nullptr;
   mods = nullptr;
 }
@@ -2808,16 +2831,31 @@ auto LakeModules::add_compiled_file(ModIndex const idx,
 #endif // DEBUG_MOD
   lof.emplace_back(
       std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
-  remaining_files[idx.mods]--;
+  num_remaining_files[idx.mods]--;
   // this should work(?), and should mean that this is the last file that was
   // needed to be compiled(?)
   // if this doesn't end up working, then we will need to probably have two
   // numbers, one that keeps track of the number of files compiled, and the
   // other that says how many files total we need to compile, then compare
   // those two number(?)
-  if (remaining_files[idx.mods] == 0) {
+  if (num_remaining_files[idx.mods] == 0) {
     states[idx.mods] = ModState::ready_for_final_compile;
   }
+}
+
+auto LakeModules::add_failed_file(ModIndex const idx,
+                                  std::string &&str) noexcept -> void {
+  auto lock = std::unique_lock(mtxs[idx.mods]);
+  auto &lof = failed_files[idx.mods];
+  auto const &mod = mods[idx.mods];
+#ifdef DEBUG_MOD
+  std::cout << LM_HELP "[pushing back]" LM_NORMAL
+            << std::format("[{}/{}.o/{}.o]", mod.install_dir, mod.name, str)
+            << " to " << idx << std::endl;
+#endif // DEBUG_MOD
+  lof.emplace_back(
+      std::format("{}/{}.o/{}.o", mod.install_dir, mod.name, std::move(str)));
+  num_remaining_files[idx.mods]--;
 }
 
 auto LakeModules::get_tree_diff(ModIndex const mod_idx,
@@ -2892,7 +2930,7 @@ auto LakeModules::get_allocator() noexcept -> allocator::Page & {
 }
 
 auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
-    -> std::string {
+    -> ListOfStrings {
   auto lock = std::unique_lock(mtxs[idx.mods]);
   auto const &vec = compiled_files[idx.mods];
   return std::accumulate(
@@ -2933,22 +2971,28 @@ auto LakeModules::resize_mods() -> void {
 
   auto n_states = std::make_unique<LakeModules::ModState[]>(n_cap);
   auto n_mtxs = std::make_unique<std::mutex[]>(n_cap);
-  auto n_remaining_files = std::make_unique<std::atomic<size_t>[]>(n_cap);
+  auto n_num_remaining_files = std::make_unique<std::atomic<size_t>[]>(n_cap);
   auto n_compiled_files = std::make_unique<std::vector<std::string>[]>(n_cap);
+  auto n_failed_files = std::make_unique<std::vector<std::string>[]>(n_cap);
   auto n_mods = std::make_unique<Module[]>(n_cap);
 
-  std::memcpy(n_states.get(), states.get(), sizeof(bool) * mods_cap);
+  std::memcpy(n_states.get(), states.get(),
+              sizeof(LakeModules::ModState) * mods_cap);
 
   for (auto i = size_t{}; i < mods_cap; ++i)
-    n_remaining_files[i] = std::move(static_cast<size_t>(remaining_files[i]));
+    n_num_remaining_files[i] =
+        std::move(static_cast<size_t>(num_remaining_files[i]));
   for (auto i = size_t{}; i < mods_cap; ++i)
     n_compiled_files[i] = std::move(compiled_files[i]);
+  for (auto i = size_t{}; i < mods_cap; ++i)
+    n_failed_files[i] = std::move(failed_files[i]);
   for (auto i = size_t{}; i < mods_cap; ++i)
     n_mods[i] = std::move(mods[i]);
 
   states = std::move(n_states);
-  remaining_files = std::move(n_remaining_files);
+  num_remaining_files = std::move(n_num_remaining_files);
   compiled_files = std::move(n_compiled_files);
+  failed_files = std::move(n_failed_files);
   mods = std::move(n_mods);
   // idk if we should have a mutex for this array of mutices (?), would that
   // defeat the point of having multiple mutexs to allow the parallel code to

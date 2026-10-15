@@ -7,15 +7,8 @@
 #include <format>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace luamake {
-#ifdef LAKE_SMALL_STRING
-using len_t = unsigned int;
-#else
-using len_t = size_t;
-#endif
-
 struct StringViews;
 
 /**
@@ -25,10 +18,10 @@ struct StringViews;
  */
 struct OwnedString final {
   char *buffer;
-  len_t size;
-  len_t capacity;
+  size_t size;
+  size_t capacity;
 
-  explicit LM_CXPR OwnedString(char *&buffer, len_t size) noexcept;
+  explicit LM_CXPR OwnedString(char *&buffer, size_t size) noexcept;
   LM_CXPR OwnedString() noexcept;
 
   LM_CXPR OwnedString(OwnedString &&that) noexcept;
@@ -39,6 +32,9 @@ struct OwnedString final {
 
   OwnedString(OwnedString const &) = delete;
   OwnedString &operator=(OwnedString const &) = delete;
+
+  LM_CXPR auto subview(size_t start, size_t end) const noexcept
+      -> std::string_view;
 
   auto append(std::string_view const) noexcept -> void;
   auto find(std::string_view const) const noexcept
@@ -51,11 +47,11 @@ struct OwnedString final {
 
 LM_CXPR_DEF(
     OwnedString::OwnedString(char *&buffer,
-                             len_t size) noexcept : buffer(buffer),
-    size(len_t{0}), capacity(size) { buffer = nullptr; })
+                             size_t size) noexcept : buffer(buffer),
+    size(size_t{0}), capacity(size) { buffer = nullptr; })
 
 LM_CXPR_DEF(OwnedString::OwnedString() noexcept : buffer(nullptr),
-            size(len_t{0}), capacity(len_t{0}){})
+            size(size_t{0}), capacity(size_t{0}){})
 
 LM_CXPR_DEF(
     OwnedString::OwnedString(OwnedString &&that) noexcept : buffer(that.buffer),
@@ -82,15 +78,15 @@ LM_CXPR_DEF(OwnedString::~OwnedString() noexcept {
 })
 
 struct StringViews final {
-  len_t start;
-  len_t end;
+  size_t start;
+  size_t end;
 };
 
 struct FixedString final {
   char const *buffer;
-  len_t size;
+  size_t size;
 
-  explicit LM_CXPR FixedString(char *&buffer, len_t size) noexcept;
+  explicit LM_CXPR FixedString(char *&buffer, size_t size) noexcept;
   LM_CXPR FixedString() noexcept;
 
   LM_CXPR FixedString(FixedString &&that) noexcept;
@@ -106,6 +102,28 @@ struct FixedString final {
     return std::string_view{buffer, size};
   }
 };
+
+template <size_t len, typename char_t> struct ASmallString final {
+  static auto constexpr length() noexcept -> size_t { return len; }
+
+  auto constexpr data() const noexcept -> char_t const * {
+    return buffer.data() + 1;
+  }
+  auto constexpr find(char_t ch) const noexcept -> size_t {
+    for (auto i = size_t{}; i < len; ++i) {
+      if (buffer[i] == ch)
+        return i;
+    }
+    return npos;
+  };
+
+  static auto constexpr npos = size_t(-1);
+
+private:
+  std::array<char_t, len> buffer;
+};
+
+template <size_t len> using SmallString = ASmallString<len, char>;
 
 LM_CXPR_DEF(
     FixedString::FixedString(char *&buffer,
@@ -138,19 +156,6 @@ LM_CXPR_DEF(auto FixedString::operator=(FixedString && that) noexcept
               that.size = 0;
               return *this;
             })
-
-struct ListOfStrings {
-  std::string buffer;
-  std::vector<StringViews> strings;
-
-  ListOfStrings() = default;
-  ListOfStrings(ListOfStrings &&) = default;
-  ListOfStrings &operator=(ListOfStrings &&) = default;
-  ~ListOfStrings() = default;
-
-  ListOfStrings(ListOfStrings const &) = delete;
-  ListOfStrings &operator=(ListOfStrings const &) = delete;
-};
 } // namespace luamake
 
 namespace std {

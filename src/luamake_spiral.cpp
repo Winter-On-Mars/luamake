@@ -187,8 +187,6 @@ auto Serializer<T>::serialize(std::string_view const str) -> void {
   write(bytes, str.data(), str_size * sizeof(char));
 }
 
-// NOTE: there should be a way to take these functions out of line, but i can't
-// figure out how without an error about no matching function templates
 template <> struct Serializer<builtins::Module::Module_t> {
   Serializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
   auto serialize(builtins::Module::Module_t const t) -> void {
@@ -255,6 +253,24 @@ template <> struct Serializer<builtins::Module> {
     str_serializer.serialize(mod.install_dir);
   }
 
+  ByteBuffer &bytes;
+};
+
+template <> struct Serializer<ListOfStrings> {
+  Serializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto serialize(ListOfStrings const &los) -> void {
+    auto str_serializer = Serializer<std::string_view>(bytes);
+    str_serializer.serialize(los.buffer);
+
+    auto const span_size = los.strings.size();
+    write(bytes, span_size);
+    auto sv_serializer = Serializer<StringViews>(bytes);
+    for (auto i = size_t{}; i < span_size; ++i) {
+      str_serializer.serialize(
+          std::string_view{los.buffer.data() + los.strings[i].start,
+                           los.buffer.data() + los.strings[i].end});
+    }
+  }
   ByteBuffer &bytes;
 };
 
@@ -365,14 +381,34 @@ template <> struct Deserializer<builtins::Module> {
   ByteBuffer &bytes;
 };
 
-auto serialize(builtins::Module const &mod, std::string &&compiled_files,
+template <> struct Deserializer<ListOfStrings> {
+  Deserializer(ByteBuffer &bytes) noexcept : bytes(bytes) {}
+  auto deserialize() -> ListOfStrings {
+    auto los = ListOfStrings();
+
+    auto str_deserial = Deserializer<std::string>(bytes);
+    los.buffer = str_deserial.deserialize();
+
+    auto const span_size = read<size_t>(bytes);
+    los.strings.resize(span_size);
+    auto sv_deserial = Deserializer<StringViews>(bytes);
+    for (auto i = size_t{}; i < span_size; ++i) {
+      los.strings[i] = sv_deserial.deserialize();
+    }
+
+    return los;
+  }
+  ByteBuffer &bytes;
+};
+
+auto serialize(builtins::Module const &mod, ListOfStrings &&compiled_files,
                std::filesystem::path const &path) noexcept(false) -> void {
   auto bytes = ByteBuffer();
   auto mod_cereal = Serializer<builtins::Module>(bytes);
   mod_cereal.serialize(mod);
 
-  auto str_cereal = Serializer<std::string>(bytes);
-  str_cereal.serialize(compiled_files);
+  auto los_cereal = Serializer<ListOfStrings>(bytes);
+  los_cereal.serialize(compiled_files);
 
   auto outfile = File(path, File::WRITE | File::CREATE);
   // we should also add some error checking for this
@@ -390,7 +426,7 @@ auto serialize(builtins::Module const &mod, std::string &&compiled_files,
 
 // will also throw if there's some big error
 auto deserialize(fs::path const &path)
-    -> std::variant<std::pair<builtins::Module, std::string>, std::string> {
+    -> std::variant<std::pair<builtins::Module, ListOfStrings>, std::string> {
   auto file = File(path, File::READ | File::BINARY);
   if (!file)
     return std::format("unable to open serialization file [{}]", path.string());
@@ -400,9 +436,9 @@ auto deserialize(fs::path const &path)
   auto &&[size, buffer] = file.dump_content();
   auto bytes = ByteBuffer(std::move(buffer), size);
   auto mod_decereal = Deserializer<builtins::Module>(bytes);
-  auto str_decereal = Deserializer<std::string>(bytes);
+  auto los_decereal = Deserializer<ListOfStrings>(bytes);
   auto mod = mod_decereal.deserialize();
-  auto str = str_decereal.deserialize();
-  return std::make_pair(std::move(mod), str);
+  auto los = los_decereal.deserialize();
+  return std::make_pair(std::move(mod), std::move(los));
 }
 } // namespace luamake::spl

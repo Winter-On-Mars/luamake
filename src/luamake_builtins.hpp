@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 extern "C" {
@@ -21,6 +22,8 @@ extern "C" {
 }
 
 static_assert(LUA_VERSION_NUM == 504);
+
+#define DEBUG_MOD
 
 namespace luamake {
 // defined in luamake_thread_pool
@@ -151,7 +154,7 @@ struct MacroStorage {
 // section and an include header section, to be used later when compiling +
 // generating compile_commands.json
 struct Module final {
-  enum class Module_t : u8 {
+  enum class Module_t {
     EXE,
     STATIC,
     DYNAMIC,
@@ -174,6 +177,29 @@ struct Module final {
   // NOTE: doesn't compare the trees bc we want to take a diff of them for
   // incrimental builds
   auto operator==(Module const &) const noexcept -> bool;
+
+  auto get_exe_root() const noexcept -> std::string_view;
+  auto get_compiler() const noexcept -> std::string_view;
+  auto get_name() const noexcept -> std::string_view;
+  auto get_install_dir() const noexcept -> std::string_view;
+
+  // TODO: get ride of these(?)
+  auto get_roots() const noexcept -> std::vector<std::string_view>;
+  auto get_headers() const noexcept -> std::vector<std::string_view>;
+  auto get_includes() const noexcept -> std::vector<std::string_view>;
+  auto get_links() const noexcept -> std::vector<std::string_view>;
+  auto get_sys_links() const noexcept -> std::string_view;
+
+  auto set_exe_root(std::string_view const) noexcept -> void;
+  auto set_compiler(std::string_view const) noexcept -> void;
+  auto set_name(std::string_view const) noexcept -> void;
+  auto set_install_dir(std::string_view const) noexcept -> void;
+
+  auto add_root(std::string_view const) noexcept -> void;
+  auto add_header(std::string_view const) noexcept -> void;
+  auto add_include(std::string_view const) noexcept -> void;
+  auto add_links(std::string_view const) noexcept -> void;
+  auto add_sys_links(std::string_view const) noexcept -> void;
 
   // this is kinda stupid i'm not gonna lie, but this is the only
   // way i can think to have DepTree be able to reference Module and vice versa
@@ -236,7 +262,7 @@ struct Module final {
       return num_files;
     }
 
-    auto vectorize() const -> std::vector<std::string_view>;
+    auto vectorize() const -> std::vector<StringViews>;
     auto is_empty() const noexcept -> bool;
 
   private:
@@ -285,22 +311,82 @@ struct Module final {
     friend spl::Deserializer<DepTree>;
   };
 
-  // NOTE: we could probably use the empty space in the vector<fs::path> headers
-  // field, where if headers.len == 0, then we have to be an executable
-  // we would need a way to encode the difference between static and dynamic
-  // library's still
-  // moreover, we can optimize this struct more by having the strings all be
-  // held in a giant string, then taking string_view into said string
+private:
+  enum class Interned {
+    ROOTS = 1 << 0,
+    COMPILER = 1 << 1,
+    NAME = 1 << 2,
+    INSTALL_DIR = 1 << 3
+  };
+  auto constexpr is_interned(Interned in) const noexcept -> bool {
+    return (static_cast<std::underlying_type_t<Interned>>(meta) &
+            static_cast<std::underlying_type_t<Interned>>(in)) ==
+           static_cast<std::underlying_type_t<Interned>>(in);
+  }
+  union ModString final {
+    StringViews sv;
+    SmallString<sizeof(StringViews)> in;
+  };
+  static_assert(sizeof(ModString) == sizeof(StringViews));
+  struct SVInterned final {
+    // TODO: finish writing these
+    explicit constexpr SVInterned(std::string_view const sv) noexcept
+        : bytes({}) {
+      if (sv.length() < bytes.size() - 1) {
+        // sso
+        bytes[0] = IsInterned::IS;
+      } else {
+        bytes[0] = IsInterned::NOT;
+      }
+    }
+    auto constexpr is_interned() const noexcept -> bool {
+      return bytes[0] == IsInterned::IS;
+    }
+    auto constexpr buffer() const noexcept -> u8 const * {
+      return bytes.data() + 1;
+    };
+    // TODO
+    auto constexpr start() const noexcept -> size_t { return 0; }
+    auto constexpr end() const noexcept -> size_t { return 0; }
 
-  // TODO: make this private and have an api for it or whatever
+    enum IsInterned : u8 {
+      NOT,
+      IS = 0xf7,
+    };
+    // NOTE: we can do perf testing here, try to find a good size, mark how many
+    // strings end up being interned, increase the size of needed, etc
+    std::array<u8, 4 + sizeof(StringViews)> bytes;
+  };
+  // TODO: figure out an order for these fields
+public:
   Module_t type;
+
+private:
+  Interned meta;
+  OwnedString all_strings;
+  ModString compiler;
+  ModString name;
+  ModString install_dir;
+  std::vector<SVInterned> roots;
+  std::vector<SVInterned> headers;
+  std::vector<SVInterned> includes;
+  std::vector<SVInterned> sys_includes;
+  std::vector<SVInterned> links;
+  std::vector<SVInterned> sys_links;
+
+public:
   DepTree tree;
-  std::vector<std::filesystem::path> roots;
-  std::vector<std::filesystem::path> headers;
-  std::vector<std::filesystem::path> includes;
-  std::vector<std::filesystem::path> sys_includes;
-  std::vector<std::filesystem::path> links;
-  std::vector<std::filesystem::path> sys_links;
+
+  /* std::vector<std::filesystem::path> roots;
+     std::vector<std::filesystem::path> headers;
+     std::vector<std::filesystem::path> includes;
+     std::vector<std::filesystem::path> sys_includes;
+     std::vector<std::filesystem::path> links;
+     std::vector<std::filesystem::path> sys_links;
+  std::string compiler;
+  std::string name;
+  std::string install_dir;
+     */
   // NOTE: we need to seperate this into the macros that are predefined, and
   // those that are then defined in files, as an example we could have something
   // like this
@@ -317,27 +403,24 @@ struct Module final {
   // redefines a macro
   std::unique_ptr<pp::Interpreter> interpreter;
   pp::StringMap<MacroStorage> macro_cache;
-  // TODO: optimize this :)
-  std::string compiler;
-  std::string name;
-  std::string install_dir;
 
   static auto from_external(Module_t &&, std::string &&,
                             std::vector<std::filesystem::path> &&) -> Module;
 
   Module() noexcept
-      : type(), tree(), roots(), headers(), includes(), sys_includes(), links(),
-        sys_links(), interpreter({}, {}), compiler(), name(), install_dir() {}
+      : type(), meta(), all_strings(), compiler(), name(), install_dir(),
+        roots(), headers(), includes(), sys_includes(), tree(),
+        interpreter({}, {}) {}
 
 #ifdef DEBUG_MOD
   auto display(std::ostream &) const noexcept -> std::ostream &;
 #endif // DEBUG_MOD
 
   // @throws std::runtime_error
-  auto append_include_paths(std::string const &) -> void;
+  auto append_include_paths(std::string_view const) -> void;
   // @throws std::runtime_error
   [[nodiscard]]
-  auto append_predefined_macros(std::string const &)
+  auto append_predefined_macros(std::string_view const)
       -> std::pair<pp::MacroMap, pp::StringSet>;
 
   // TODO: update these to return FixedString
@@ -389,6 +472,7 @@ struct LakeModules final {
   auto set_state_at(ModIndex const, ModState) noexcept -> void;
 
   auto add_compiled_file(ModIndex const, std::string &&) noexcept -> void;
+  auto add_failed_file(ModIndex const, std::string &&) noexcept -> void;
 
   auto get_all_compiled_files(ModIndex const) noexcept -> std::string;
 
@@ -444,8 +528,11 @@ private:
   uint num_mods;
   std::unique_ptr<std::mutex[]> mtxs;
   std::unique_ptr<ModState[]> states;
-  std::unique_ptr<std::atomic<size_t>[]> remaining_files;
+  std::unique_ptr<std::atomic<size_t>[]> num_remaining_files;
   std::unique_ptr<std::vector<std::string>[]> compiled_files;
+  // TODO: there is definately a better way to go about this, but i'm just
+  // trying to get this to work right now, optimization comes later :)
+  std::unique_ptr<std::vector<std::string>[]> failed_files;
   std::unique_ptr<Module[]> mods;
   // TODO: switch this to not have the luamake.lua in the path, i.e. just push
   // back the parent path

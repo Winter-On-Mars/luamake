@@ -79,8 +79,8 @@ auto CompilationPool::add_compile_tasks(
         // switched from calling .stem to make things easier when pushing back
         // already compiled files
         auto const invoked_command = std::format(
-            "{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path, path.c_str(),
-            install_dir, name, path.filename().c_str());
+            "{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path,
+            path.string(), install_dir, name, path.filename().string());
         if (builtins::cl_options.verbose) {
           std::cerr << std::format("[{}]" LM_NL, invoked_command);
         } else {
@@ -96,13 +96,14 @@ auto CompilationPool::add_compile_tasks(
             std::cerr << std::format("Error compiling [{}]" LM_NL,
                                      path.string());
           }
+          builtins::mods.add_failed_file(idx, path.filename().string());
           builtins::mods.set_state_at(idx,
                                       builtins::LakeModules::ModState::error);
         }
       });
     }
     mod_lock.lock();
-    builtins::mods.remaining_files[idx.mods] = num_remaining_files;
+    builtins::mods.num_remaining_files[idx.mods] = num_remaining_files;
   }
   waiting.notify_all();
 }
