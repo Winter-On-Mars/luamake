@@ -24,8 +24,6 @@ extern "C" {
 
 static_assert(LUA_VERSION_NUM == 504);
 
-#define DEBUG_MOD
-
 namespace luamake {
 // defined in luamake_thread_pool
 struct CompilationPool;
@@ -352,7 +350,7 @@ private:
   // be a good idea because we could use the extra space to store slightly
   // longer strings, but it's still something to try
   struct SVInterned final {
-    static auto constexpr MAX_SIZE = 4 + sizeof(StringViews) - 1;
+    static auto constexpr MAX_SIZE = 8 + sizeof(StringViews) - 1;
     // NOTE: only used when doing sso, other ctors are used, because we have to
     // copy some values over
     explicit SVInterned(std::string_view const sv) noexcept;
@@ -364,6 +362,7 @@ private:
     auto constexpr buffer() const noexcept -> u8 const * {
       return bytes.data() + 1;
     };
+    auto length() const noexcept -> size_t;
     auto start() const noexcept -> size_t;
     auto end() const noexcept -> size_t;
 
@@ -373,7 +372,7 @@ private:
     };
     // NOTE: we can do perf testing here, try to find a good size, mark how many
     // strings end up being interned, increase the size of needed, etc
-    std::array<u8, 4 + sizeof(StringViews)> bytes;
+    alignas(size_t) std::array<u8, 8 + sizeof(StringViews)> bytes;
   };
   // TODO: figure out an order for these fields
 public:
@@ -385,6 +384,10 @@ private:
   ModString compiler;
   ModString name;
   ModString install_dir;
+  // TODO: because when type == exe, there is only one root allowed, and we're
+  // storing said metadata about interment in the interned field, we could have
+  // this be a union of a vector<SVInterned> and a char[24]/StringViews, so that
+  // we can potentially store really long strings in the internal buffer
   std::vector<SVInterned> roots;
   std::vector<SVInterned> headers;
   std::vector<SVInterned> includes;
