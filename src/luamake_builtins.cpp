@@ -295,7 +295,7 @@ static auto compiler_impl(lua_State *state,
         }
       });
 
-  lua_createtable(state, 0, 4);
+  lua_createtable(state, 0, 2);
   auto const ret_tbl_idx = lua_absindex(state, -1);
 
   auto *opt_args = ::new (lua_newuserdata(state, sizeof(OptArgs)))(OptArgs){};
@@ -358,6 +358,8 @@ static auto compiler_impl(lua_State *state,
     lua_pushfstring(state, "Unable to find %s binary", compiler_name.data());
     return lua_error(state);
   }
+
+  expr_dbg(path_to_compiler.string());
 
   lua_pushstring(state, path_to_compiler.c_str());
 
@@ -1264,7 +1266,8 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
 
 auto Module::get_exe_root() const noexcept -> std::string_view {
   if (is_interned(Interned::ROOTS)) {
-    return std::string_view{reinterpret_cast<char const *>(roots[0].buffer())};
+    return std::string_view{reinterpret_cast<char const *>(roots[0].buffer()),
+                            roots[0].length()};
   } else {
     return std::string_view{all_strings.buffer + roots[0].start(),
                             all_strings.buffer + roots[0].end()};
@@ -1304,8 +1307,8 @@ auto Module::get_roots() const noexcept -> std::vector<std::string_view> {
   res.reserve(roots.size());
   for (auto &&root : roots) {
     if (root.is_interned()) {
-      res.push_back(
-          std::string_view{reinterpret_cast<char const *>(root.buffer())});
+      res.push_back(std::string_view{
+          reinterpret_cast<char const *>(root.buffer()), root.length()});
     } else {
       res.push_back(std::string_view{all_strings.buffer + root.start(),
                                      all_strings.buffer + root.end()});
@@ -1319,8 +1322,8 @@ auto Module::get_headers() const noexcept -> std::vector<std::string_view> {
   res.reserve(headers.size());
   for (auto &&header : headers) {
     if (header.is_interned()) {
-      res.push_back(
-          std::string_view{reinterpret_cast<char const *>(header.buffer())});
+      res.push_back(std::string_view{
+          reinterpret_cast<char const *>(header.buffer()), header.length()});
     } else {
       res.push_back(std::string_view{all_strings.buffer + header.start(),
                                      all_strings.buffer + header.end()});
@@ -1334,8 +1337,8 @@ auto Module::get_includes() const noexcept -> std::vector<std::string_view> {
   res.reserve(includes.size());
   for (auto &&include : includes) {
     if (include.is_interned()) {
-      res.push_back(
-          std::string_view{reinterpret_cast<char const *>(include.buffer())});
+      res.push_back(std::string_view{
+          reinterpret_cast<char const *>(include.buffer()), include.length()});
     } else {
       res.push_back(std::string_view{all_strings.buffer + include.start(),
                                      all_strings.buffer + include.end()});
@@ -1350,8 +1353,9 @@ auto Module::get_sys_includes() const noexcept
   res.reserve(sys_includes.size());
   for (auto &&sys_include : sys_includes) {
     if (sys_include.is_interned()) {
-      res.push_back(std::string_view{
-          reinterpret_cast<char const *>(sys_include.buffer())});
+      res.push_back(
+          std::string_view{reinterpret_cast<char const *>(sys_include.buffer()),
+                           sys_include.length()});
     } else {
       res.push_back(std::string_view{all_strings.buffer + sys_include.start(),
                                      all_strings.buffer + sys_include.end()});
@@ -1365,8 +1369,8 @@ auto Module::get_links() const noexcept -> std::vector<std::string_view> {
   res.reserve(links.size());
   for (auto &&link : links) {
     if (link.is_interned()) {
-      res.push_back(
-          std::string_view{reinterpret_cast<char const *>(link.buffer())});
+      res.push_back(std::string_view{
+          reinterpret_cast<char const *>(link.buffer()), link.length()});
     } else {
       res.push_back(std::string_view{all_strings.buffer + link.start(),
                                      all_strings.buffer + link.end()});
@@ -1381,7 +1385,8 @@ auto Module::get_sys_links() const noexcept -> std::vector<std::string_view> {
   for (auto &&sys_link : sys_links) {
     if (sys_link.is_interned()) {
       res.push_back(
-          std::string_view{reinterpret_cast<char const *>(sys_link.buffer())});
+          std::string_view{reinterpret_cast<char const *>(sys_link.buffer()),
+                           sys_link.length()});
     } else {
       res.push_back(std::string_view{all_strings.buffer + sys_link.start(),
                                      all_strings.buffer + sys_link.end()});
@@ -1393,6 +1398,7 @@ auto Module::get_sys_links() const noexcept -> std::vector<std::string_view> {
 auto Module::set_compiler(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
     // NOTE: this is fucking horrible don't do this
+    expr_dbg("SSO COMPILER");
     reinterpret_cast<int &>(meta) |= Interned::COMPILER;
     ::memcpy(compiler.in.data(), sv.data(), sv.length());
   } else {
@@ -1432,6 +1438,7 @@ auto Module::set_install_dir(std::string_view const sv) noexcept -> void {
 auto Module::add_root(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
     // sso
+    expr_dbg("SSO ROOT");
     roots.emplace_back(sv);
   } else {
     auto const start = all_strings.size;
@@ -1502,13 +1509,19 @@ auto Module::add_sys_link(std::string_view const sv) noexcept -> void {
 }
 
 Module::SVInterned::SVInterned(std::string_view const sv) noexcept : bytes({}) {
-  bytes[0] = IsInterned::IS;
+  auto const len = static_cast<u8>(sv.length());
+  bytes[0] = IsInterned::IS ^ len;
   ::memcpy(bytes.data() + 1, sv.data(), sv.length());
 }
 
 Module::SVInterned::SVInterned(StringViews const sv) noexcept : bytes({}) {
   bytes[0] = IsInterned::NOT;
-  new (bytes.data() + 4) StringViews{sv};
+  new (bytes.data() + 8) StringViews{sv};
+}
+
+auto Module::SVInterned::length() const noexcept -> size_t {
+  auto const len = bytes[0] ^ IsInterned::IS;
+  return static_cast<size_t>(len);
 }
 
 // NOTE: we should be better about these because we're reading from the
@@ -1516,13 +1529,13 @@ Module::SVInterned::SVInterned(StringViews const sv) noexcept : bytes({}) {
 // memory errors from it :)
 auto Module::SVInterned::start() const noexcept -> size_t {
   auto res = size_t{};
-  memcpy(&res, bytes.data() + 4, sizeof(size_t));
+  memcpy(&res, bytes.data() + 8, sizeof(size_t));
   return res;
 }
 
 auto Module::SVInterned::end() const noexcept -> size_t {
   auto res = size_t{};
-  memcpy(&res, bytes.data() + 12, sizeof(size_t));
+  memcpy(&res, bytes.data() + 16, sizeof(size_t));
   return res;
 }
 
@@ -1872,23 +1885,18 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   // NOTE: if this causes "memory issues" i'm going to rip my dick off, don't
   // know why it would because it's on the stack, then we're making sure these
   // functions are finished before this function ends idk
-  auto const compiler_cmd = [this]() -> std::string_view {
-    if (is_interned(Interned::COMPILER)) {
-      return std::string_view{compiler.in.data(),
-                              compiler.in.find(' ') == compiler.in.npos
-                                  ? compiler.in.find(' ')
-                                  : compiler.in.length()};
-    } else {
-      return std::string_view{all_strings.buffer + compiler.sv.start,
-                              all_strings.buffer + compiler.sv.end};
-    }
-  }();
+  auto const compiler_cmd = get_compiler();
+  append_include_paths(compiler_cmd);
+  auto &&[macros, def_macros] = append_predefined_macros(compiler_cmd);
+  /*
   auto res = std::async(std::launch::async, [this, compiler_cmd]() {
+    expr_dbg(compiler_cmd);
     this->append_include_paths(compiler_cmd);
   });
   auto macros_res = std::async(std::launch::async, [this, compiler_cmd]() {
     return this->append_predefined_macros(compiler_cmd);
   });
+  */
 
   switch (auto const name_t = lua_getfield(state, -1, "name")) {
   case LUA_TSTRING: {
@@ -1909,6 +1917,8 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     case LUA_TSTRING: {
       auto len = size_t{};
       auto const *str = lua_tolstring(state, -1, &len);
+      expr_dbg(len);
+      expr_dbg(str);
       add_root(std::string_view{str, len});
       // roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
     } break;
@@ -2086,7 +2096,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   } break;
   }
 
-  auto &&[macros, def_macros] = macros_res.get();
+  // auto &&[macros, def_macros] = macros_res.get();
   switch (auto const macro_t = lua_getfield(state, -1, "macros")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
@@ -2114,7 +2124,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   interpreter = std::make_unique<pp::Interpreter>(std::move(macros),
                                                   std::move(def_macros));
-  res.get();
+  // res.get();
 }
 
 auto Module::DepTree::gen_dep_tree(Module const &mod,
