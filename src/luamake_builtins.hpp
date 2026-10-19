@@ -164,9 +164,9 @@ struct Module final {
   Module(Module_t &&type, lua_State *state,
          std::filesystem::path const &) noexcept(false);
 
-  Module(Module &&) noexcept = default;
+  Module(Module &&) noexcept;
 
-  Module &operator=(Module &&that) noexcept = default;
+  Module &operator=(Module &&that) noexcept;
 
   ~Module() noexcept = default;
 
@@ -384,11 +384,16 @@ private:
   ModString compiler;
   ModString name;
   ModString install_dir;
-  // TODO: because when type == exe, there is only one root allowed, and we're
-  // storing said metadata about interment in the interned field, we could have
-  // this be a union of a vector<SVInterned> and a char[24]/StringViews, so that
-  // we can potentially store really long strings in the internal buffer
-  std::vector<SVInterned> roots;
+  // NOTE: never fucking do this, this is a horrible stupid idea because i'm a
+  // horrible stupid programmer who has too much hubris
+  union Roots final {
+    std::vector<SVInterned> lib;
+    SmallString<sizeof(std::vector<SVInterned>)> exe_small;
+    StringViews exe_big;
+
+    Roots() noexcept;
+    ~Roots() noexcept;
+  } roots;
   std::vector<SVInterned> headers;
   std::vector<SVInterned> includes;
   std::vector<SVInterned> sys_includes;

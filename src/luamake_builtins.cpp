@@ -1266,11 +1266,12 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
 
 auto Module::get_exe_root() const noexcept -> std::string_view {
   if (is_interned(Interned::ROOTS)) {
-    return std::string_view{reinterpret_cast<char const *>(roots[0].buffer()),
-                            roots[0].length()};
+    return std::string_view{
+        reinterpret_cast<char const *>(roots.exe_small.data()),
+        roots.exe_small.length()};
   } else {
-    return std::string_view{all_strings.buffer + roots[0].start(),
-                            all_strings.buffer + roots[0].end()};
+    return std::string_view{all_strings.buffer + roots.exe_big.start,
+                            all_strings.buffer + roots.exe_big.end};
   }
 }
 
@@ -1304,8 +1305,8 @@ auto Module::get_install_dir() const noexcept -> std::string_view {
 
 auto Module::get_roots() const noexcept -> std::vector<std::string_view> {
   auto res = std::vector<std::string_view>();
-  res.reserve(roots.size());
-  for (auto &&root : roots) {
+  res.reserve(roots.lib.size());
+  for (auto &&root : roots.lib) {
     if (root.is_interned()) {
       res.push_back(std::string_view{
           reinterpret_cast<char const *>(root.buffer()), root.length()});
@@ -1395,6 +1396,18 @@ auto Module::get_sys_links() const noexcept -> std::vector<std::string_view> {
   return res;
 }
 
+auto Module::set_exe_root(std::string_view const sv) noexcept -> void {
+  if (sv.length() < sizeof(StringViews)) {
+    reinterpret_cast<int &>(meta) |= Interned::ROOTS;
+    roots.exe_small = sv;
+  } else {
+    auto const start = all_strings.size;
+    all_strings.append(sv);
+    auto const end = all_strings.size;
+    roots.exe_big = StringViews{start, end};
+  }
+}
+
 auto Module::set_compiler(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
     // NOTE: this is fucking horrible don't do this
@@ -1439,12 +1452,12 @@ auto Module::add_root(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
     // sso
     expr_dbg("SSO ROOT");
-    roots.emplace_back(sv);
+    roots.lib.emplace_back(sv);
   } else {
     auto const start = all_strings.size;
     all_strings.append(sv);
     auto const end = all_strings.size;
-    roots.emplace_back(StringViews{start, end});
+    roots.lib.emplace_back(StringViews{start, end});
   }
 }
 
@@ -1521,6 +1534,8 @@ Module::SVInterned::SVInterned(StringViews const sv) noexcept : bytes({}) {
 
 auto Module::SVInterned::length() const noexcept -> size_t {
   auto const len = bytes[0] ^ IsInterned::IS;
+  expr_dbg(len);
+  expr_dbg(static_cast<size_t>(len));
   return static_cast<size_t>(len);
 }
 
@@ -1645,6 +1660,8 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
   case 0: { // in child proc
     // close reader
     close(read_pipe);
+    // TODO: there's an error where if the command is not SSO'd then this just
+    // doesn't work, no fucking clue why, but we'll deal with that later
     auto const command_string =
         std::format("{} -v -c -xc++ /dev/null -o {}/luamake_null.o", compiler,
                     fs::temp_directory_path().c_str());
@@ -1912,14 +1929,13 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   lua_pop(state, 1);
 
   if (type == Module::EXE) {
-    roots.reserve(1);
     switch (auto const root_t = lua_getfield(state, -1, "root")) {
     case LUA_TSTRING: {
       auto len = size_t{};
       auto const *str = lua_tolstring(state, -1, &len);
       expr_dbg(len);
       expr_dbg(str);
-      add_root(std::string_view{str, len});
+      set_exe_root(std::string_view{str, len});
       // roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
     } break;
     case LUA_TNIL:
@@ -1988,7 +2004,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
       // includes.push_back(previous_path);
     }
   } else if (type == STATIC || type == DYNAMIC) {
-    includes.reserve(roots.size());
+    includes.reserve(roots.lib.size());
     auto const rts = get_roots();
     for (auto const &root : rts) {
       auto const parent_p = [&]() -> fs::path {
