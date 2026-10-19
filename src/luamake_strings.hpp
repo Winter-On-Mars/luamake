@@ -104,12 +104,18 @@ struct FixedString final {
 };
 
 template <size_t len, typename char_t> struct ASmallString final {
-  static auto constexpr length() noexcept -> size_t { return len; }
+  auto constexpr length() const noexcept -> size_t {
+    for (auto i = size_t{}; i < len; ++i) {
+      if (buffer[i] == 0)
+        return i;
+    }
+    return len;
+  }
 
-  auto constexpr data() noexcept -> char_t * { return buffer.data() + 1; }
+  auto constexpr data() noexcept -> char_t * { return buffer.data(); }
 
   auto constexpr data() const noexcept -> char_t const * {
-    return buffer.data() + 1;
+    return buffer.data();
   }
 
   auto constexpr find(char_t ch) const noexcept -> size_t {
@@ -119,6 +125,17 @@ template <size_t len, typename char_t> struct ASmallString final {
     }
     return npos;
   };
+
+  // NOTE: we're just going to be making the assumption that sv.length <= len
+  auto constexpr operator=(std::basic_string_view<char_t> const sv) noexcept {
+    buffer = std::array<char_t, len>({});
+    for (auto i = size_t{}; i < sv.length(); ++i) {
+      buffer[i] = sv[i];
+    }
+    if (sv.length() != len) {
+      buffer[sv.length()] = char_t{0};
+    }
+  }
 
   static auto constexpr npos = size_t(-1);
 
