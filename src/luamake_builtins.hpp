@@ -166,7 +166,7 @@ struct Module final {
 
   Module(Module &&) noexcept;
 
-  Module &operator=(Module &&that) noexcept;
+  auto operator=(Module &&that) noexcept -> Module &;
 
   ~Module() noexcept = default;
 
@@ -387,9 +387,9 @@ private:
   // NOTE: never fucking do this, this is a horrible stupid idea because i'm a
   // horrible stupid programmer who has too much hubris
   union Roots final {
-    std::vector<SVInterned> lib;
     SmallString<sizeof(std::vector<SVInterned>)> exe_small;
     StringViews exe_big;
+    std::vector<SVInterned> lib;
 
     Roots() noexcept;
     ~Roots() noexcept;

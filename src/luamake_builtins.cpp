@@ -1614,6 +1614,10 @@ auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
 }
 #endif // DEBUG_MOD
 
+Module::Roots::Roots() noexcept : exe_small() {}
+
+Module::Roots::~Roots() noexcept {}
+
 auto Module::from_external(Module_t &&type, std::string &&links,
                            std::vector<fs::path> &&includes) -> Module {
   auto mod = Module();
@@ -2141,6 +2145,61 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   interpreter = std::make_unique<pp::Interpreter>(std::move(macros),
                                                   std::move(def_macros));
   // res.get();
+}
+
+auto Module::operator=(Module &&that) noexcept -> Module & {
+  std::swap(type, that.type);
+  std::swap(meta, that.meta);
+  std::swap(all_strings, that.all_strings);
+  std::swap(compiler, that.compiler);
+  std::swap(name, that.name);
+  std::swap(install_dir, that.install_dir);
+  if (type != that.type) {
+    // NOTE: we already swapped the meta info and type
+    switch (type) {
+    case Module::EXE:
+      if (that.type != Module::EXE)
+        roots.lib.~vector<SVInterned>();
+      if (is_interned(meta)) {
+        roots.exe_small = that.roots.exe_small;
+      } else {
+        roots.exe_big = that.roots.exe_big;
+      }
+      break;
+    case Module::STATIC:
+      [[fallthrough]];
+    case Module::DYNAMIC: {
+      switch (that.type) {
+      case Module::EXE:
+        // this was an exe, and that was a lib, so it *should* be fine to just
+        // do this, because there is no memory being managed in the case of an
+        // exe
+        roots.lib = that.roots.lib;
+        break;
+      case Module::STATIC:
+        [[fallthrough]];
+      case Module::DYNAMIC:
+        roots.lib = that.roots.lib;
+        break;
+      }
+    } break;
+    }
+  } else {
+    // HACK: UB
+    auto tmp = std::array<u8, sizeof(Roots)>({});
+    ::memset(tmp.data(), 0, sizeof(Roots));
+    memcpy(tmp.data(), &roots, sizeof(Roots));
+    memcpy(static_cast<void *>(&roots), &that.roots, sizeof(Roots));
+    memcpy(static_cast<void *>(&that.roots), tmp.data(), sizeof(Roots));
+  }
+  std::swap(headers, that.headers);
+  std::swap(includes, that.includes);
+  std::swap(sys_includes, that.sys_includes);
+  std::swap(links, that.links);
+  std::swap(tree, that.tree);
+  std::swap(interpreter, that.interpreter);
+  std::swap(macro_cache, that.macro_cache);
+  return *this;
 }
 
 auto Module::DepTree::gen_dep_tree(Module const &mod,
