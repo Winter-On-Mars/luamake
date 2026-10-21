@@ -168,7 +168,7 @@ struct Module final {
 
   auto operator=(Module &&that) noexcept -> Module &;
 
-  ~Module() noexcept = default;
+  ~Module() noexcept;
 
   Module(Module const &) = delete;
   Module &operator=(Module const &) = delete;
@@ -345,10 +345,6 @@ private:
     SmallString<sizeof(StringViews)> in;
   };
   static_assert(sizeof(ModString) == sizeof(StringViews));
-  // TODO: write/pull in the MaskedPointer type to include the ptr intern
-  // metadata in the pointer, making this 16 bytes instead of 20, might also not
-  // be a good idea because we could use the extra space to store slightly
-  // longer strings, but it's still something to try
   struct SVInterned final {
     static auto constexpr MAX_SIZE = 8 + sizeof(StringViews) - 1;
     // NOTE: only used when doing sso, other ctors are used, because we have to
@@ -357,7 +353,7 @@ private:
     explicit SVInterned(StringViews const sv) noexcept;
 
     auto constexpr is_interned() const noexcept -> bool {
-      return bytes[0] == IsInterned::IS;
+      return bytes[0] != IsInterned::NOT;
     }
     auto constexpr buffer() const noexcept -> u8 const * {
       return bytes.data() + 1;
@@ -434,8 +430,8 @@ public:
                             std::vector<std::filesystem::path> &&) -> Module;
 
   Module() noexcept
-      : type(), meta(), all_strings(), compiler(), name(), install_dir(),
-        roots(), headers(), includes(), sys_includes(), tree(),
+      : type(), meta(Interned::ROOTS), all_strings(), compiler(), name(),
+        install_dir(), roots(), headers(), includes(), sys_includes(), tree(),
         interpreter({}, {}) {}
 
 #ifdef DEBUG_MOD
