@@ -28,6 +28,7 @@ static auto counter = std::atomic<size_t>{};
 auto call(std::string_view const cmd) noexcept -> int {
 #ifndef PERF_TESTING
   try {
+    fn_print();
     auto const cur = counter++;
     // TODO: factor this out, also move the calling with the empty file into
     // this directory
@@ -36,6 +37,7 @@ auto call(std::string_view const cmd) noexcept -> int {
     auto const fname = std::filesystem::temp_directory_path() / "luamake" /
                        std::to_string(cur);
     auto out = fopen(fname.c_str(), "w+b");
+    std::cout << std::filesystem::current_path() << LM_NL;
 
     auto const pid = fork();
     // should probably throw?
