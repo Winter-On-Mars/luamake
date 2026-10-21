@@ -536,9 +536,12 @@ auto install_impl(lua_State *state) -> int {
   // make sure we have all of the dependency linking information at this
   // point, any sooner and we run into linking errors, everybodys favorite :)
   // TODO: try to move this into the threads structure with threads.add_task
+  mod.tree.gen_dep_tree(mod, *mod.interpreter, mod_idx);
+  /*
   auto gen_dep_tree_fut = std::async(std::launch::async, [&]() -> void {
     return mod.tree.gen_dep_tree(mod, *mod.interpreter, mod_idx);
   });
+  */
 
   // TODO: try to move these calls to create directory to be do when the
   // initial project is set up, that way we don't have to worry about trying
@@ -572,8 +575,10 @@ auto install_impl(lua_State *state) -> int {
   // NOTE: we might be able to put this on a background thread, then just
   // continue on doing things, and when this is done we do the comparison,
   // but for now we'll have this be blocking :)
+  auto files_to_compile = mod.tree.vectorize();
+  // std::vector<std::string_view>();
+  /*
   auto const maybe_cached_mod = spl::deserialize(cache_path);
-  auto files_to_compile = std::vector<std::string_view>();
   switch (maybe_cached_mod.index()) {
   case 0: {
     std::cout << std::format("Checking [{}] cache" LM_NL, mod.get_name());
@@ -608,6 +613,7 @@ auto install_impl(lua_State *state) -> int {
   default:
     unreachable();
   }
+  */
 #ifdef DEBUG_MOD
   std::cout << "[files to compile]\n\t";
   for (auto &&path : files_to_compile)
@@ -632,7 +638,7 @@ auto install_impl(lua_State *state) -> int {
           }
           auto compiled_files = builtins::mods.get_all_compiled_files(idx);
           auto const &mod = builtins::mods.module_at(idx);
-          spl::serialize(mod, std::move(compiled_files), cache_path);
+          // spl::serialize(mod, std::move(compiled_files), cache_path);
         }
       }
 
@@ -1354,12 +1360,22 @@ auto Module::get_sys_includes() const noexcept
   res.reserve(sys_includes.size());
   for (auto &&sys_include : sys_includes) {
     if (sys_include.is_interned()) {
-      res.push_back(
-          std::string_view{reinterpret_cast<char const *>(sys_include.buffer()),
-                           sys_include.length()});
+      auto const sv_sys_include =
+          std::string_view(reinterpret_cast<char const *>(sys_include.buffer()),
+                           sys_include.length());
+      expr_dbg(sv_sys_include);
+      res.push_back(sv_sys_include);
+      // std::string_view{reinterpret_cast<char const *>(sys_include.buffer()),
+      //                 sys_include.length()});
     } else {
-      res.push_back(std::string_view{all_strings.buffer + sys_include.start(),
-                                     all_strings.buffer + sys_include.end()});
+      auto const sv_sys_include =
+          std::string_view{all_strings.buffer + sys_include.start(),
+                           all_strings.buffer + sys_include.end()};
+      expr_dbg(sv_sys_include);
+      res.push_back(sv_sys_include);
+      // std::string_view{all_strings.buffer + sys_include.start(),
+      //                                     all_strings.buffer +
+      //                                     sys_include.end()});
     }
   }
   return res;
@@ -1486,10 +1502,14 @@ auto Module::add_include(std::string_view const sv) noexcept -> void {
 }
 
 auto Module::add_sys_include(std::string_view const sv) noexcept -> void {
+  fn_print();
+  expr_dbg(sv);
   if (sv.length() < SVInterned::MAX_SIZE) {
     // sso
+    expr_dbg("SSO");
     sys_includes.emplace_back(sv);
   } else {
+    expr_dbg("BIG");
     auto const start = all_strings.size;
     all_strings.append(sv);
     auto const end = all_strings.size;
@@ -1534,8 +1554,6 @@ Module::SVInterned::SVInterned(StringViews const sv) noexcept : bytes({}) {
 
 auto Module::SVInterned::length() const noexcept -> size_t {
   auto const len = bytes[0] ^ IsInterned::IS;
-  expr_dbg(len);
-  expr_dbg(static_cast<size_t>(len));
   return static_cast<size_t>(len);
 }
 
@@ -1556,7 +1574,7 @@ auto Module::SVInterned::end() const noexcept -> size_t {
 
 #ifdef DEBUG_MOD
 auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
-  auto _display = [&](auto x) {
+  auto const sv_display = [this, &out](auto x) {
     out << "\t\t"
         << (x.is_interned()
                 ? std::string_view{reinterpret_cast<char const *>(x.buffer())}
@@ -1582,33 +1600,37 @@ auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
 
   out << LM_NL;
 
-  out << "\troots = [";
-  std::for_each(roots.begin(), roots.end(), _display);
-  out << "\t]" LM_NL;
-
-  out << "\theaders = [";
-  std::for_each(headers.begin(), headers.end(), _display);
-  out << "\t]" LM_NL;
-
-  out << "\tincludes= [";
-  std::for_each(includes.begin(), includes.end(), _display);
-  out << "\t]" LM_NL;
-
-  out << "\tsys_includes= [";
-  std::for_each(sys_includes.begin(), sys_includes.end(), _display);
-  out << "\t]" LM_NL;
-
-  out << "\tlinks= [";
-  std::for_each(links.begin(), links.end(), _display);
-  out << "\t]" LM_NL;
-
-  out << "\tsys_links = [";
-  std::for_each(sys_links.begin(), sys_links.end(), _display);
-  out << "\t]" LM_NL;
-
   out << "\tcompiler = " << get_compiler() << LM_NL;
   out << "\tname = " << get_name() << LM_NL;
   out << "\tinstall_dir = " << get_install_dir() << LM_NL;
+
+  if (type == EXE) {
+    out << "\troot = " << get_exe_root() << LM_NL;
+  } else {
+    out << "\troots = [";
+    std::for_each(roots.lib.begin(), roots.lib.end(), sv_display);
+    out << "\t]" LM_NL;
+  }
+
+  out << "\theaders = [" LM_NL;
+  std::for_each(headers.begin(), headers.end(), sv_display);
+  out << "\t]" LM_NL;
+
+  out << "\tincludes = [" LM_NL;
+  std::for_each(includes.begin(), includes.end(), sv_display);
+  out << "\t]" LM_NL;
+
+  out << "\tsys_includes = [" LM_NL;
+  std::for_each(sys_includes.begin(), sys_includes.end(), sv_display);
+  out << "\t]" LM_NL;
+
+  out << "\tlinks = [" LM_NL;
+  std::for_each(links.begin(), links.end(), sv_display);
+  out << "\t]" LM_NL;
+
+  out << "\tsys_links = [" LM_NL;
+  std::for_each(sys_links.begin(), sys_links.end(), sv_display);
+  out << "\t]" LM_NL;
   out << "}" LM_NL;
   return out;
 }
@@ -2148,6 +2170,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 }
 
 auto Module::operator=(Module &&that) noexcept -> Module & {
+  fn_print();
   std::swap(type, that.type);
   std::swap(meta, that.meta);
   std::swap(all_strings, that.all_strings);
@@ -2160,7 +2183,7 @@ auto Module::operator=(Module &&that) noexcept -> Module & {
     case Module::EXE:
       if (that.type != Module::EXE)
         roots.lib.~vector<SVInterned>();
-      if (is_interned(meta)) {
+      if (is_interned(Interned::ROOTS)) {
         roots.exe_small = that.roots.exe_small;
       } else {
         roots.exe_big = that.roots.exe_big;
@@ -2202,14 +2225,25 @@ auto Module::operator=(Module &&that) noexcept -> Module & {
   return *this;
 }
 
+Module::~Module() noexcept {
+  if (type != Module::EXE) {
+    roots.lib.~vector();
+  }
+}
+
 auto Module::DepTree::gen_dep_tree(Module const &mod,
                                    pp::Interpreter &interpreter,
                                    ModIndex const idx) -> void {
   auto const parent = mods.get_module_path(idx).parent_path();
-  // NOTE: (Winter-On-Mars) because we are only pushing back the roots, if there
-  // is an issue with one of the header files, we don't see it(?)
-  for (auto const &root : mod.get_roots()) {
-    append_dep(mod, interpreter, idx, parent, root, DepTree::NIL_IDX);
+  if (mod.type == EXE) {
+    append_dep(mod, interpreter, idx, parent, mod.get_exe_root(),
+               DepTree::NIL_IDX);
+  } else {
+    // NOTE: (Winter-On-Mars) because we are only pushing back the roots, if
+    // there is an issue with one of the header files, we don't see it(?)
+    for (auto const &root : mod.get_roots()) {
+      append_dep(mod, interpreter, idx, parent, root, DepTree::NIL_IDX);
+    }
   }
 }
 
@@ -2340,6 +2374,9 @@ auto Builder::new_exe(lua_State *state) noexcept -> int {
   try {
     auto exe_mod =
         builtins::Module(builtins::Module::EXE, state, previous_path);
+#ifdef DEBUG_MOD
+    exe_mod.display(std::cout);
+#endif // DEBUG_MOD
     auto const index =
         mods.append_module_with_path(previous_path, std::move(exe_mod));
     lua_pushinteger(state, static_cast<lua_Integer>(index));
@@ -3354,6 +3391,9 @@ auto LakeModules::get_all_compiled_files(ModIndex const idx) noexcept
 
 auto LakeModules::append_module_with_path(fs::path const &path, Module &&mod)
     -> ModIndex {
+#ifdef DEBUG_MOD
+  mod.display(std::cout);
+#endif // DEBUG_MOD
   if (num_mods >= mods_cap) {
     resize_mods();
   }
