@@ -55,6 +55,7 @@ auto CompilationPool::add_compile_tasks(
     std::span<std::string_view const> const ftc,
     builtins::ModIndex const idx) noexcept -> void {
   auto const parent_path = builtins::mods.get_module_path(idx).parent_path();
+  expr_dbg(parent_path);
   auto const &mod = builtins::mods.module_at(idx);
   auto const include_path = mod.format_includes();
 
@@ -66,10 +67,9 @@ auto CompilationPool::add_compile_tasks(
     auto task_lock = std::unique_lock(task_mtx);
     auto num_remaining_files = size_t{};
     for (auto &&rel_path : ftc) {
-      // NOTE: rel_path is (currently) relative to its luamake.lua file, but we
-      // need it relative to the CWD
-      auto fname = std::filesystem::relative(parent_path / rel_path,
-                                             std::filesystem::current_path());
+      auto fname = parent_path / rel_path;
+      expr_dbg(mod.get_install_dir());
+      expr_dbg(include_path);
       ++num_remaining_files;
 
       tasks.push([idx, include_path, compiler = mod.get_compiler(),
@@ -78,8 +78,9 @@ auto CompilationPool::add_compile_tasks(
         // switched from calling .stem to make things easier when pushing back
         // already compiled files
         auto const invoked_command = std::format(
-            "{} {} -c {} -o {}/{}.o/{}.o", compiler, include_path,
-            path.string(), install_dir, name, path.filename().string());
+            "{} -c {} -o {}/{}.o/{}.o {}", compiler, include_path, install_dir,
+            name, path.filename().string(), path.string());
+        expr_dbg(invoked_command);
         if (builtins::cl_options.verbose) {
           std::cerr << std::format("[{}]" LM_NL, invoked_command);
         } else {
