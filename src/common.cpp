@@ -4,7 +4,6 @@
 #include <exception>
 #include <fcntl.h>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -37,7 +36,7 @@ auto call(std::string_view const cmd) noexcept -> int {
     auto const fname = std::filesystem::temp_directory_path() / "luamake" /
                        std::to_string(cur);
     auto out = fopen(fname.c_str(), "w+b");
-    std::cout << std::filesystem::current_path() << LM_NL;
+    expr_dbg(std::filesystem::current_path());
 
     auto const pid = fork();
     // should probably throw?
