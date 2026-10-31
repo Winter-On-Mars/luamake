@@ -147,6 +147,30 @@ struct MacroStorage {
   pp::StringSet defs;
 };
 
+enum class Interned {
+  roots = 1 << 0,
+  compiler = 1 << 1,
+  name = 1 << 2,
+  install_dir = 1 << 3,
+};
+
+auto constexpr operator&(Interned a, Interned b) noexcept -> bool {
+  return (static_cast<std::underlying_type_t<Interned>>(a) &
+          static_cast<std::underlying_type_t<Interned>>(b)) ==
+         static_cast<std::underlying_type_t<Interned>>(b);
+}
+
+auto constexpr operator|(Interned a, Interned b) noexcept -> Interned {
+  return static_cast<Interned>(
+      static_cast<std::underlying_type_t<Interned>>(a) |
+      static_cast<std::underlying_type_t<Interned>>(b));
+}
+
+auto constexpr operator|=(Interned &a, Interned const &b) noexcept
+    -> Interned & {
+  return a = a | b;
+}
+
 // TODO: add exported header field, and probably refactor this to be a tagged
 // union to discriminate between exe and library type modules
 // TODO: rewrite how the include files are processed to have a system header
@@ -329,17 +353,6 @@ struct Module final {
   };
 
 private:
-  enum Interned {
-    ROOTS = 1 << 0,
-    COMPILER = 1 << 1,
-    NAME = 1 << 2,
-    INSTALL_DIR = 1 << 3
-  };
-  auto constexpr is_interned(Interned in) const noexcept -> bool {
-    return (static_cast<std::underlying_type_t<Interned>>(meta) &
-            static_cast<std::underlying_type_t<Interned>>(in)) ==
-           static_cast<std::underlying_type_t<Interned>>(in);
-  }
   union ModString final {
     StringViews sv;
     SmallString<sizeof(StringViews)> in;
@@ -430,7 +443,7 @@ public:
                             std::vector<std::filesystem::path> &&) -> Module;
 
   Module() noexcept
-      : type(), meta(Interned::ROOTS), all_strings(), compiler(), name(),
+      : type(), meta(Interned::roots), all_strings(), compiler(), name(),
         install_dir(), roots(), headers(), includes(), sys_includes(), tree(),
         interpreter({}, {}) {}
 

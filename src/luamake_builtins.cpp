@@ -44,7 +44,6 @@ extern "C" {
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <endian.h>
@@ -630,21 +629,23 @@ auto install_impl(lua_State *state) -> int {
   // errors, but we still build all we can of the module for incrimental
   // builds
   threads.add_task([mod_idx, cache_path = std::move(cache_path)]() -> void {
-    struct AutoRun final {
-      ~AutoRun() {
-        if (builtins::cl_options.cache) {
-          while (builtins::mods.has_remaining(idx)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-          }
-          auto compiled_files = builtins::mods.get_all_compiled_files(idx);
-          auto const &mod = builtins::mods.module_at(idx);
-          // spl::serialize(mod, std::move(compiled_files), cache_path);
+    /*
+  struct AutoRun final {
+    ~AutoRun() {
+      if (builtins::cl_options.cache) {
+        while (builtins::mods.has_remaining(idx)) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+        // auto compiled_files = builtins::mods.get_all_compiled_files(idx);
+        // auto const &mod = builtins::mods.module_at(idx);
+        // spl::serialize(mod, std::move(compiled_files), cache_path);
       }
+    }
 
-      builtins::ModIndex idx;
-      fs::path const &cache_path;
-    } runner{mod_idx, cache_path};
+    builtins::ModIndex idx;
+    fs::path const &cache_path;
+  } runner{mod_idx, cache_path};
+  */
     for (auto mod_state = builtins::mods.state_at(mod_idx);
          mod_state != builtins::LakeModules::ModState::ready_for_final_compile;
          mod_state = builtins::mods.state_at(mod_idx)) {
@@ -1271,7 +1272,7 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
 }
 
 auto Module::get_exe_root() const noexcept -> std::string_view {
-  if (is_interned(Interned::ROOTS)) {
+  if (meta & Interned::roots) {
     return std::string_view{
         reinterpret_cast<char const *>(roots.exe_small.data()),
         roots.exe_small.length()};
@@ -1282,7 +1283,7 @@ auto Module::get_exe_root() const noexcept -> std::string_view {
 }
 
 auto Module::get_compiler() const noexcept -> std::string_view {
-  if (is_interned(Interned::COMPILER)) {
+  if (meta & Interned::compiler) {
     return std::string_view{reinterpret_cast<char const *>(compiler.in.data())};
   } else {
     return std::string_view{all_strings.buffer + compiler.sv.start,
@@ -1291,7 +1292,7 @@ auto Module::get_compiler() const noexcept -> std::string_view {
 }
 
 auto Module::get_name() const noexcept -> std::string_view {
-  if (is_interned(Interned::NAME)) {
+  if (meta & Interned::name) {
     return std::string_view{reinterpret_cast<char const *>(name.in.data())};
   } else {
     return std::string_view{all_strings.buffer + name.sv.start,
@@ -1300,7 +1301,7 @@ auto Module::get_name() const noexcept -> std::string_view {
 }
 
 auto Module::get_install_dir() const noexcept -> std::string_view {
-  if (is_interned(Interned::INSTALL_DIR)) {
+  if (meta & Interned::install_dir) {
     return std::string_view{
         reinterpret_cast<char const *>(install_dir.in.data())};
   } else {
@@ -1363,7 +1364,6 @@ auto Module::get_sys_includes() const noexcept
       auto const sv_sys_include =
           std::string_view(reinterpret_cast<char const *>(sys_include.buffer()),
                            sys_include.length());
-      expr_dbg(sv_sys_include);
       res.push_back(sv_sys_include);
       // std::string_view{reinterpret_cast<char const *>(sys_include.buffer()),
       //                 sys_include.length()});
@@ -1371,7 +1371,6 @@ auto Module::get_sys_includes() const noexcept
       auto const sv_sys_include =
           std::string_view{all_strings.buffer + sys_include.start(),
                            all_strings.buffer + sys_include.end()};
-      expr_dbg(sv_sys_include);
       res.push_back(sv_sys_include);
       // std::string_view{all_strings.buffer + sys_include.start(),
       //                                     all_strings.buffer +
@@ -1414,7 +1413,7 @@ auto Module::get_sys_links() const noexcept -> std::vector<std::string_view> {
 
 auto Module::set_exe_root(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
-    reinterpret_cast<int &>(meta) |= Interned::ROOTS;
+    meta |= Interned::roots;
     roots.exe_small = sv;
   } else {
     auto const start = all_strings.size;
@@ -1426,9 +1425,8 @@ auto Module::set_exe_root(std::string_view const sv) noexcept -> void {
 
 auto Module::set_compiler(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
-    // NOTE: this is fucking horrible don't do this
     expr_dbg("SSO COMPILER");
-    reinterpret_cast<int &>(meta) |= Interned::COMPILER;
+    meta |= Interned::compiler;
     ::memcpy(compiler.in.data(), sv.data(), sv.length());
   } else {
     auto const start = all_strings.size;
@@ -1440,8 +1438,7 @@ auto Module::set_compiler(std::string_view const sv) noexcept -> void {
 
 auto Module::set_name(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
-    // NOTE: this is fucking horrible don't do this
-    reinterpret_cast<int &>(meta) |= Interned::NAME;
+    meta |= Interned::name;
     ::memcpy(name.in.data(), sv.data(), sv.length());
   } else {
     auto const start = all_strings.size;
@@ -1453,8 +1450,7 @@ auto Module::set_name(std::string_view const sv) noexcept -> void {
 
 auto Module::set_install_dir(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
-    // NOTE: this is fucking horrible don't do this
-    reinterpret_cast<int &>(meta) |= Interned::NAME;
+    meta |= Interned::name;
     ::memcpy(install_dir.in.data(), sv.data(), sv.length());
   } else {
     auto const start = all_strings.size;
@@ -2183,7 +2179,7 @@ auto Module::operator=(Module &&that) noexcept -> Module & {
     case Module::EXE:
       if (that.type != Module::EXE)
         roots.lib.~vector<SVInterned>();
-      if (is_interned(Interned::ROOTS)) {
+      if (meta & Interned::roots) {
         roots.exe_small = that.roots.exe_small;
       } else {
         roots.exe_big = that.roots.exe_big;
