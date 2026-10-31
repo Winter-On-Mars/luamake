@@ -39,7 +39,9 @@ LM_CXPR_DEF_IMPL(OwnedString::~OwnedString() noexcept {
     free((void *)buffer);
 })
 
-auto OwnedString::append(std::string_view str) noexcept -> void {
+[[nodiscard]]
+auto OwnedString::append(std::string_view str) noexcept -> StringViews {
+  auto const start = size;
   auto const str_len = str.length();
   if (!(size + str_len + 1 < capacity)) {
     /* resize */
@@ -55,6 +57,8 @@ auto OwnedString::append(std::string_view str) noexcept -> void {
   size += str_len;
   buffer[size] = 0;
   ++size;
+  auto const end = size;
+  return StringViews{start, end};
 }
 
 auto OwnedString::find(std::string_view const str) const noexcept

@@ -921,9 +921,7 @@ Module::DepTree::DepTree(size_t const num_files) {
 // NOTE: this function *should* only be called when we know the path has not
 // been added
 auto Module::DepTree::append_path(fs::path const &path) -> StringViews {
-  auto const start = all_paths.size;
-  all_paths.append(path.string());
-  auto const end = all_paths.size;
+  auto &&[start, end] = all_paths.append(path.string());
 
   if (start >= std::numeric_limits<unsigned int>::max() ||
       end >= std::numeric_limits<unsigned int>::max()) {
@@ -1416,10 +1414,7 @@ auto Module::set_exe_root(std::string_view const sv) noexcept -> void {
     meta |= Interned::roots;
     roots.exe_small = sv;
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    roots.exe_big = StringViews{start, end};
+    roots.exe_big = all_strings.append(sv);
   }
 }
 
@@ -1429,10 +1424,7 @@ auto Module::set_compiler(std::string_view const sv) noexcept -> void {
     meta |= Interned::compiler;
     ::memcpy(compiler.in.data(), sv.data(), sv.length());
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    compiler.sv = StringViews{start, end};
+    compiler.sv = all_strings.append(sv);
   }
 }
 
@@ -1441,10 +1433,7 @@ auto Module::set_name(std::string_view const sv) noexcept -> void {
     meta |= Interned::name;
     ::memcpy(name.in.data(), sv.data(), sv.length());
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    name.sv = StringViews{start, end};
+    name.sv = all_strings.append(sv);
   }
 }
 
@@ -1453,23 +1442,15 @@ auto Module::set_install_dir(std::string_view const sv) noexcept -> void {
     meta |= Interned::name;
     ::memcpy(install_dir.in.data(), sv.data(), sv.length());
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    install_dir.sv = StringViews{start, end};
+    install_dir.sv = all_strings.append(sv);
   }
 }
 
 auto Module::add_root(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
-    // sso
-    expr_dbg("SSO ROOT");
     roots.lib.emplace_back(sv);
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    roots.lib.emplace_back(StringViews{start, end});
+    roots.lib.emplace_back(all_strings.append(sv));
   }
 }
 
@@ -1478,10 +1459,7 @@ auto Module::add_header(std::string_view const sv) noexcept -> void {
     // sso
     headers.emplace_back(sv);
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    headers.emplace_back(StringViews{start, end});
+    headers.emplace_back(all_strings.append(sv));
   }
 }
 
@@ -1490,26 +1468,16 @@ auto Module::add_include(std::string_view const sv) noexcept -> void {
     // sso
     includes.emplace_back(sv);
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    includes.emplace_back(StringViews{start, end});
+    includes.emplace_back(all_strings.append(sv));
   }
 }
 
 auto Module::add_sys_include(std::string_view const sv) noexcept -> void {
-  fn_print();
-  expr_dbg(sv);
   if (sv.length() < SVInterned::MAX_SIZE) {
     // sso
-    expr_dbg("SSO");
     sys_includes.emplace_back(sv);
   } else {
-    expr_dbg("BIG");
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    sys_includes.emplace_back(StringViews{start, end});
+    sys_includes.emplace_back(all_strings.append(sv));
   }
 }
 
@@ -1518,10 +1486,7 @@ auto Module::add_link(std::string_view const sv) noexcept -> void {
     // sso
     links.emplace_back(sv);
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    links.emplace_back(StringViews{start, end});
+    links.emplace_back(all_strings.append(sv));
   }
 }
 
@@ -1530,10 +1495,7 @@ auto Module::add_sys_link(std::string_view const sv) noexcept -> void {
     // sso
     sys_links.emplace_back(sv);
   } else {
-    auto const start = all_strings.size;
-    all_strings.append(sv);
-    auto const end = all_strings.size;
-    sys_links.emplace_back(StringViews{start, end});
+    sys_links.emplace_back(all_strings.append(sv));
   }
 }
 

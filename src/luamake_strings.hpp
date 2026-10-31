@@ -36,7 +36,8 @@ struct OwnedString final {
   LM_CXPR auto subview(size_t start, size_t end) const noexcept
       -> std::string_view;
 
-  auto append(std::string_view const) noexcept -> void;
+  [[nodiscard]]
+  auto append(std::string_view const) noexcept -> StringViews;
   auto find(std::string_view const) const noexcept
       -> std::pair<bool, StringViews>;
 
