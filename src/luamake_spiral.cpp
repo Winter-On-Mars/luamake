@@ -24,6 +24,8 @@
 // non portable section :)
 #include <endian.h>
 
+#define STRINGIFY(A) #A
+
 namespace fs = std::filesystem;
 
 namespace luamake::spl {
@@ -62,6 +64,15 @@ auto write(...) -> void = delete;
 auto write(ByteBuffer &bytes, std::integral auto t) -> void {
   if (bytes.cur + sizeof(t) >= bytes.cap)
     bytes.resize(sizeof(t));
+  memcpy(bytes.buffer.get() + bytes.cur, &t, sizeof(t));
+  bytes.cur += sizeof(t);
+  // NOTE: originally i did this so that you could (in theory) have something
+  // like a caching server that holds these, so we needed to serialize numbers
+  // in a standard way. i realize that i'm not properly serializing the length
+  // of strings and arrays, so fuck it. maybe if having a caching server is a
+  // cool idea and something people want (i don't care for it) we can add those
+  // back in
+  /*
   switch (sizeof(t)) {
   case 1: {
     // shouldn't need to do any byte flipping because this is a single byte
@@ -81,6 +92,7 @@ auto write(ByteBuffer &bytes, std::integral auto t) -> void {
   } break;
   }
   bytes.cur += sizeof(t);
+  */
 }
 
 // TODO: idk probably change this to a span(?)
@@ -110,48 +122,14 @@ template <class T>
 [[nodiscard]]
 auto read(ByteBuffer &) -> T = delete;
 
-// TODO: see if we can combine these into one template, like we do with read,
-// i'm not sure if we can because the return type of each is different(?)
-template <>
+template <class T>
+  requires std::integral<T>
 [[nodiscard]]
-auto read<size_t>(ByteBuffer &bytes) -> size_t {
-  check(bytes, sizeof(size_t), "size_t");
-  auto res = size_t{};
-  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(size_t));
-  res = be64toh(res);
-  bytes.cur += sizeof(size_t);
-  return res;
-}
-
-template <>
-[[nodiscard]]
-auto read<uint>(ByteBuffer &bytes) -> uint {
-  check(bytes, sizeof(uint), "uint");
-  auto res = uint{};
-  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(uint));
-  res = be32toh(res);
-  bytes.cur += sizeof(uint);
-  return res;
-}
-
-template <>
-[[nodiscard]]
-auto read<int>(ByteBuffer &bytes) -> int {
-  check(bytes, sizeof(int), "int");
-  auto res = int{};
-  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(uint));
-  res = be32toh(res);
-  bytes.cur += sizeof(int);
-  return res;
-}
-
-template <>
-[[nodiscard]]
-auto read<u8>(ByteBuffer &bytes) -> u8 {
-  check(bytes, sizeof(u8), "u8");
-  auto res = u8{};
-  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(u8));
-  bytes.cur += sizeof(u8);
+auto read(ByteBuffer &bytes) -> T {
+  check(bytes, sizeof(T), STRINGIFY(T));
+  auto res = T{};
+  memcpy(&res, bytes.buffer.get() + bytes.cur, sizeof(T));
+  bytes.cur += sizeof(T);
   return res;
 }
 
