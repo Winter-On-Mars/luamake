@@ -191,7 +191,10 @@ auto constexpr fnv1a(std::span<u8 const> const bytes) noexcept -> size_t {
 [[maybe_unused]]
 auto display_string_view(std::string_view const str) noexcept -> void {
   for (auto i = size_t{}; i != str.length(); ++i) {
-    std::cout << str[i] << '-';
+    if (str[i] == 0)
+      std::cout << "{}";
+    else
+      std::cout << str[i];
   }
   std::cout << std::endl;
 }
@@ -1062,34 +1065,17 @@ auto Module::DepTree::get_path(size_t const idx) const noexcept -> fs::path {
   if (idx == NIL_IDX)
     return fs::current_path();
   auto &&[start, end] = files[idx];
-  // NOTE: -1 because otherwise it includes the null term, and that fucks with
-  // fs::path comparing to strings and checking the extension type
-  return fs::path(all_paths.buffer + start, all_paths.buffer + end - 1);
+  return fs::path(all_paths.buffer + start, all_paths.buffer + end);
 }
 
-// TODO: update this to just use the num_files field, and the files array to
-// index directly into all_paths
 auto Module::DepTree::find(std::string_view const path) const noexcept
     -> size_t {
-  auto const *start = all_paths.buffer;
-  auto const *current = all_paths.buffer;
-  auto end = size_t{};
-
-  auto idx = size_t{};
-
-  while (end != all_paths.size) {
-    if (all_paths.buffer[end] == 0) {
-      current = all_paths.buffer + end;
-      auto const path_view = std::string_view{start, current};
-      if (path_view.size() == path.size() &&
-          *path_view.data() == *path.data() &&
-          strncmp(path_view.data(), path.data(), path_view.size()) == 0) {
-        return idx;
-      }
-      start = current + 1;
-      ++idx;
+  for (auto i = size_t{}; i < num_files; ++i) {
+    auto &&str = std::string_view{all_paths.buffer + files[i].start,
+                                  all_paths.buffer + files[i].end};
+    if (path == str) {
+      return i;
     }
-    ++end;
   }
   return NIL_IDX;
 }
@@ -1232,7 +1218,7 @@ auto Module::DepTree::vectorize() const -> std::vector<std::string_view> {
   for (auto i = size_t{}; i < num_files; ++i) {
     if (types[i] == Module::DepTree::SourceFile_t::IMPL) {
       res.emplace_back(std::string_view{all_paths.buffer + files[i].start,
-                                        all_paths.buffer + files[i].end - 1});
+                                        all_paths.buffer + files[i].end});
     }
   }
   return res;
@@ -1612,14 +1598,17 @@ auto Module::from_external(Module_t &&type, std::string &&links,
   return mod;
 }
 
-static auto include_path_cache = pp::StringMap<std::vector<fs::path>>();
+// NOTE: ignoring caching rn, just want to get things working
+// static auto include_path_cache = pp::StringMap<std::vector<fs::path>>();
 // TODO: probably switch this to using popen, it seems like it will be more
 // performant, plus it *should* be more portable
 auto Module::append_include_paths(std::string_view const compiler) -> void {
+  display_string_view(compiler);
   // TODO: see if we need to cache the whole compiler string, or if it's
   // enough to just cache the path to the binary, i.e. if we can get away with
   // just caching /usr/bin/clang, then we can use the cache more, and don't
   // have to actually go into the function that much
+  /*
   if (auto includes = include_path_cache.find(compiler);
       includes != include_path_cache.end()) {
     // TODO
@@ -1629,6 +1618,7 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
     // sys_includes = includes->second;
     return;
   }
+  */
   auto _pipes = std::array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
     throw capi(strerror(errno));
@@ -1649,6 +1639,8 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
     auto const command_string =
         std::format("{} -v -c -xc++ /dev/null -o {}/luamake_null.o", compiler,
                     fs::temp_directory_path().c_str());
+
+    display_string_view(command_string);
 
     dup2(write_pipe, STDERR_FILENO);
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
@@ -1716,7 +1708,7 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
       }
       start_path = skip_ws(end_path);
     }
-    include_path_cache[std::string(compiler)] = includes;
+    // include_path_cache[std::string(compiler)] = includes;
     // sys_includes = includes;
     for (auto &&include : includes) {
       add_sys_include(include.string());
@@ -1731,15 +1723,19 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
 // TODO: switch this to use the pp::StringHasher, so that we can avoid some
 // allocations, while also avoiding the stack use after free that comes from
 // std::async call
+/*
 static auto predefined_macros_cache =
     pp::StringMap<std::pair<pp::MacroMap, pp::StringSet>>();
+    */
 // std::unordered_map<std::string, std::pair<pp::MacroMap, pp::StringSet>>();
 auto Module::append_predefined_macros(std::string_view const compiler)
     -> std::pair<pp::MacroMap, pp::StringSet> {
-  if (auto macros = predefined_macros_cache.find(compiler);
-      macros != predefined_macros_cache.end()) {
-    return macros->second;
-  }
+  /*
+if (auto macros = predefined_macros_cache.find(compiler);
+  macros != predefined_macros_cache.end()) {
+return macros->second;
+}
+*/
   auto _pipes = std::array<int, 2>{};
   if (pipe(_pipes.data()) == -1) {
     throw capi(strerror(errno));
@@ -1853,7 +1849,7 @@ auto Module::append_predefined_macros(std::string_view const compiler)
 
     // reached EOF
     auto res = std::make_pair(std::move(macros), std::move(def_macros));
-    predefined_macros_cache[std::string(compiler)] = res;
+    // predefined_macros_cache[std::string(compiler)] = res;
     return res;
   } break;
   }
@@ -3271,10 +3267,9 @@ auto LakeModules::get_tree_diff(ModIndex const mod_idx,
     if (tree.types[i] != Module::DepTree::SourceFile_t::IMPL) {
       continue;
     }
-    // -1 bc otherwise it includes the null terminator
     auto const cur_file =
         std::string_view{tree.all_paths.buffer + tree.files[i].start,
-                         tree.all_paths.buffer + tree.files[i].end - 1};
+                         tree.all_paths.buffer + tree.files[i].end};
     auto const that_cur_file = cache_tree.find(cur_file);
     if (that_cur_file == Module::DepTree::NIL_IDX) {
 #ifdef DEBUG_MOD
