@@ -27,7 +27,6 @@ static auto counter = std::atomic<size_t>{};
 auto call(std::string_view const cmd) noexcept -> int {
 #ifndef PERF_TESTING
   try {
-    fn_print();
     auto const cur = counter++;
     // TODO: factor this out, also move the calling with the empty file into
     // this directory
@@ -36,10 +35,8 @@ auto call(std::string_view const cmd) noexcept -> int {
     auto const fname = std::filesystem::temp_directory_path() / "luamake" /
                        std::to_string(cur);
     auto out = fopen(fname.c_str(), "w+b");
-    expr_dbg(std::filesystem::current_path());
 
     auto const pid = fork();
-    // should probably throw?
     if (pid < 0) {
       return 1;
     }
@@ -61,12 +58,10 @@ auto call(std::string_view const cmd) noexcept -> int {
     } break;
     }
     switch (child_status) {
-    case -2:
-      throw std::runtime_error("Unable to set up logging file when need");
     case 0:
       break;
     default: {
-      // TODO: parse the file /tmp/luamake/<cur> to get the errors,
+      // TODO: parse the file <tmp>/luamake/<cur> to get the errors,
       // also figure out which compiler we used because they have different
       // error layouts
       // for now we just display (part of) the error message, just the head
