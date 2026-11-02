@@ -189,7 +189,7 @@ auto constexpr fnv1a(std::span<u8 const> const bytes) noexcept -> size_t {
 
 // helper function for displaying every byte of the string_view
 [[maybe_unused]]
-auto display_string_view(std::string_view const str) noexcept -> void {
+auto display_sv(std::string_view const str) noexcept -> void {
   for (auto i = size_t{}; i != str.length(); ++i) {
     if (str[i] == 0)
       std::cout << "{}";
@@ -360,8 +360,6 @@ static auto compiler_impl(lua_State *state,
     lua_pushfstring(state, "Unable to find %s binary", compiler_name.data());
     return lua_error(state);
   }
-
-  expr_dbg(path_to_compiler.string());
 
   lua_pushstring(state, path_to_compiler.c_str());
 
@@ -1268,7 +1266,8 @@ auto Module::get_exe_root() const noexcept -> std::string_view {
 
 auto Module::get_compiler() const noexcept -> std::string_view {
   if (meta & Interned::compiler) {
-    return std::string_view{reinterpret_cast<char const *>(compiler.in.data())};
+    return std::string_view{reinterpret_cast<char const *>(compiler.in.data()),
+                            compiler.in.length()};
   } else {
     return std::string_view{all_strings.buffer + compiler.sv.start,
                             all_strings.buffer + compiler.sv.end};
@@ -1277,7 +1276,8 @@ auto Module::get_compiler() const noexcept -> std::string_view {
 
 auto Module::get_name() const noexcept -> std::string_view {
   if (meta & Interned::name) {
-    return std::string_view{reinterpret_cast<char const *>(name.in.data())};
+    return std::string_view{reinterpret_cast<char const *>(name.in.data()),
+                            name.in.length()};
   } else {
     return std::string_view{all_strings.buffer + name.sv.start,
                             all_strings.buffer + name.sv.end};
@@ -1287,7 +1287,8 @@ auto Module::get_name() const noexcept -> std::string_view {
 auto Module::get_install_dir() const noexcept -> std::string_view {
   if (meta & Interned::install_dir) {
     return std::string_view{
-        reinterpret_cast<char const *>(install_dir.in.data())};
+        reinterpret_cast<char const *>(install_dir.in.data()),
+        install_dir.in.length()};
   } else {
     return std::string_view{all_strings.buffer + install_dir.sv.start,
                             all_strings.buffer + install_dir.sv.end};
@@ -1406,9 +1407,8 @@ auto Module::set_exe_root(std::string_view const sv) noexcept -> void {
 
 auto Module::set_compiler(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
-    expr_dbg("SSO COMPILER");
     meta |= Interned::compiler;
-    ::memcpy(compiler.in.data(), sv.data(), sv.length());
+    compiler.in = sv;
   } else {
     compiler.sv = all_strings.append(sv);
   }
@@ -1417,7 +1417,7 @@ auto Module::set_compiler(std::string_view const sv) noexcept -> void {
 auto Module::set_name(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
     meta |= Interned::name;
-    ::memcpy(name.in.data(), sv.data(), sv.length());
+    name.in = sv;
   } else {
     name.sv = all_strings.append(sv);
   }
@@ -1425,8 +1425,8 @@ auto Module::set_name(std::string_view const sv) noexcept -> void {
 
 auto Module::set_install_dir(std::string_view const sv) noexcept -> void {
   if (sv.length() < sizeof(StringViews)) {
-    meta |= Interned::name;
-    ::memcpy(install_dir.in.data(), sv.data(), sv.length());
+    meta |= Interned::install_dir;
+    install_dir.in = sv;
   } else {
     install_dir.sv = all_strings.append(sv);
   }
@@ -1478,7 +1478,6 @@ auto Module::add_link(std::string_view const sv) noexcept -> void {
 
 auto Module::add_sys_link(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
-    // sso
     sys_links.emplace_back(sv);
   } else {
     sys_links.emplace_back(all_strings.append(sv));
@@ -1521,7 +1520,8 @@ auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
   auto const sv_display = [this, &out](auto x) {
     out << "\t\t"
         << (x.is_interned()
-                ? std::string_view{reinterpret_cast<char const *>(x.buffer())}
+                ? std::string_view{reinterpret_cast<char const *>(x.buffer()),
+                                   x.length()}
                 : std::string_view{all_strings.buffer + x.start(),
                                    all_strings.buffer + x.end()})
         << "," LM_NL;
@@ -1603,7 +1603,6 @@ auto Module::from_external(Module_t &&type, std::string &&links,
 // TODO: probably switch this to using popen, it seems like it will be more
 // performant, plus it *should* be more portable
 auto Module::append_include_paths(std::string_view const compiler) -> void {
-  display_string_view(compiler);
   // TODO: see if we need to cache the whole compiler string, or if it's
   // enough to just cache the path to the binary, i.e. if we can get away with
   // just caching /usr/bin/clang, then we can use the cache more, and don't
@@ -1640,8 +1639,6 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
         std::format("{} -v -c -xc++ /dev/null -o {}/luamake_null.o", compiler,
                     fs::temp_directory_path().c_str());
 
-    display_string_view(command_string);
-
     dup2(write_pipe, STDERR_FILENO);
     if (execl("/bin/sh", "sh", "-c", command_string.c_str(), nullptr) == -1) {
       close(write_pipe); // we never actually close the write_pipe, but execl
@@ -1655,7 +1652,7 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
     close(write_pipe);
 
     auto includes = std::vector<fs::path>();
-    includes.reserve(10);
+    includes.reserve(8);
     auto constexpr buffer_size = sizeof(char) * size_t{2 << 8};
     auto const buffer = std::make_unique<char[]>(buffer_size + 1);
     if (buffer == nullptr)
@@ -1704,7 +1701,7 @@ auto Module::append_include_paths(std::string_view const compiler) -> void {
       if (*end_path == 0)
         break;
       if (fs::exists(fs::path(std::string_view(start_path, end_path)))) {
-        includes.emplace_back(fs::canonical(fs::path(start_path, end_path)));
+        includes.push_back(fs::canonical(fs::path(start_path, end_path)));
       }
       start_path = skip_ws(end_path);
     }
@@ -1868,7 +1865,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   switch (auto const compiler_t = lua_getfield(state, -1, "compiler")) {
   case LUA_TTABLE:
     set_compiler(parse_compiler_table(state));
-    // compiler = Module::parse_compiler_table(state);
     break;
   case LUA_TNIL:
     throw missing_field("compiler");
@@ -1877,14 +1873,18 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   }
   lua_pop(state, 1);
 
-  // if the compiler string doesn't contain a space then it *should* just be the
-  // path to the compiler, so just use the whole length
-  // NOTE: if this causes "memory issues" i'm going to rip my dick off, don't
-  // know why it would because it's on the stack, then we're making sure these
-  // functions are finished before this function ends idk
+  // NOTE: heap use after free because we get this string here, then if
+  // append_include_paths appends enough to realloc, then this is pointing at
+  // deallocated memory
+  // so i'm putting these calls in this order
+  // when we add back threading we need to look into how we solve that
+  // one potential solution is to have append_include_paths return a vector,
+  // then we append them when needed, that way we can have them run in parallel,
+  // then at the end of this function await the function and push back all of
+  // the results
   auto const compiler_cmd = get_compiler();
-  append_include_paths(compiler_cmd);
   auto &&[macros, def_macros] = append_predefined_macros(compiler_cmd);
+  append_include_paths(compiler_cmd);
   /*
   auto res = std::async(std::launch::async, [this, compiler_cmd]() {
     expr_dbg(compiler_cmd);
@@ -1913,10 +1913,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
     case LUA_TSTRING: {
       auto len = size_t{};
       auto const *str = lua_tolstring(state, -1, &len);
-      expr_dbg(len);
-      expr_dbg(str);
       set_exe_root(std::string_view{str, len});
-      // roots.push_back(fs::path(lua_tolstring(state, -1, nullptr)));
     } break;
     case LUA_TNIL:
       throw missing_field("root");
@@ -1972,19 +1969,18 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   // TODO: make this a relative path
   if (type == Module::EXE) {
-    includes.reserve(1);
+    // TODO:
+    // includes.reserve(1);
     [[likely]]
-    // if (roots[0].has_parent_path()) {
     if (fs::path(get_exe_root()).has_parent_path()) {
       add_include(
           fs::canonical(fs::path(get_exe_root())).parent_path().string());
-      // includes.push_back(fs::canonical(roots[0]).parent_path());
     } else {
       add_include(previous_path.string());
-      // includes.push_back(previous_path);
     }
   } else if (type == STATIC || type == DYNAMIC) {
-    includes.reserve(roots.lib.size());
+    // TODO:
+    // includes.reserve(roots.lib.size());
     auto const rts = get_roots();
     for (auto const &root : rts) {
       auto const parent_p = [&]() -> fs::path {
@@ -1994,12 +1990,9 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
           return previous_path;
         }
       }();
-      // auto const found = std::find(includes.begin(), includes.end(),
-      // parent_p);
       auto const found = includes.end();
       if (found != includes.end()) {
         add_include(parent_p.string());
-        // includes.push_back(parent_p);
       }
     }
   }
@@ -2014,7 +2007,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
         auto len = size_t{};
         auto const *str = lua_tolstring(state, -1, &len);
         add_include(std::string_view{str, len});
-        // includes.push_back(lua_tolstring(state, -1, nullptr));
       } break;
       default:
         throw unexpected_type("include[i]", LUA_TSTRING, value_t);
@@ -2033,7 +2025,12 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   switch (auto const linking_t = lua_getfield(state, -1, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
-    sys_links.reserve(len);
+    // TODO: i'm (all c++ is) fucking stupid. for some reason, calling reserve
+    // then emplace_back puts the new element at the end of the reserved array,
+    // instead of in the fucking array, you can only use reserve + push_back not
+    // reserve + emplace_back, but we use emplace_back because we need to de the
+    // construction, while push_back doesn't call any ctors
+    // sys_links.reserve(len);
     auto linking_idx = -1;
     for (auto i = 1; i <= len; ++i) {
       switch (auto const value_t = lua_geti(state, linking_idx, i)) {
@@ -2041,7 +2038,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
         auto len = size_t{};
         auto const *str = lua_tolstring(state, -1, &len);
         add_sys_link(std::string_view{str, len});
-        // sys_links.push_back(lua_tolstring(state, -1, nullptr));
       } break;
       default:
         throw unexpected_type("linking[i]", LUA_TSTRING, value_t);
@@ -2124,7 +2120,6 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 }
 
 auto Module::operator=(Module &&that) noexcept -> Module & {
-  fn_print();
   std::swap(type, that.type);
   std::swap(meta, that.meta);
   std::swap(all_strings, that.all_strings);
@@ -2173,6 +2168,7 @@ auto Module::operator=(Module &&that) noexcept -> Module & {
   std::swap(includes, that.includes);
   std::swap(sys_includes, that.sys_includes);
   std::swap(links, that.links);
+  std::swap(sys_links, that.sys_links);
   std::swap(tree, that.tree);
   std::swap(interpreter, that.interpreter);
   std::swap(macro_cache, that.macro_cache);
@@ -2218,7 +2214,6 @@ auto Module::format_includes() const -> std::string {
 }
 
 auto Module::format_links() const -> std::string {
-  fn_print();
   // TODO: holy fuck this wastes so much memory
   auto const link = get_links();
   auto const sys_link = get_sys_links();
