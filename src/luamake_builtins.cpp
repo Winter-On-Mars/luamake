@@ -1233,22 +1233,11 @@ auto Module::operator==(Module const &that) const noexcept -> bool {
     return false;
   }
 
-  throw std::runtime_error(__FUNCTION__);
-
   // rest of the class
-  /*
-  if (compiler != that.compiler) {
+  if (get_compiler() != that.get_compiler() || get_name() != that.get_name() ||
+      get_install_dir() != that.get_install_dir()) {
     return false;
   }
-
-  if (name != that.name) {
-    return false;
-  }
-
-  if (install_dir != that.install_dir) {
-    return false;
-  }
-  */
 
   return true;
 }
@@ -2143,9 +2132,9 @@ auto Module::operator=(Module &&that) noexcept -> Module & {
     case Module::DYNAMIC: {
       switch (that.type) {
       case Module::EXE:
-        // this was an exe, and that was a lib, so it *should* be fine to just
-        // do this, because there is no memory being managed in the case of an
-        // exe
+        // HACK: technically this is UB because roots active field is not lib,
+        // but StringViews and SmallString are both basically PODS so we don't
+        // need to call their dtors
         roots.lib = that.roots.lib;
         break;
       case Module::STATIC:
