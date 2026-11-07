@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <format>
 #include <string_view>
-#include <utility>
 
 namespace luamake {
 struct StringViews;
@@ -102,7 +101,7 @@ struct FixedString final {
   }
 };
 
-template <size_t len, typename char_t> struct ASmallString final {
+template <typename char_t, size_t len> struct ASmallString final {
   auto constexpr length() const noexcept -> size_t {
     for (auto i = size_t{}; i < len; ++i) {
       if (buffer[i] == 0)
@@ -142,7 +141,7 @@ private:
   std::array<char_t, len> buffer;
 };
 
-template <size_t len> using SmallString = ASmallString<len, char>;
+template <size_t len> using SmallString = ASmallString<char, len>;
 
 LM_CXPR_DEF(
     FixedString::FixedString(char *&buffer,
