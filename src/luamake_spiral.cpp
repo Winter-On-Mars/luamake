@@ -111,9 +111,9 @@ auto check(ByteBuffer &bytes, size_t const amount, std::string_view const type)
   [[unlikely]]
   if (bytes.cur + amount > bytes.cap) {
     throw std::runtime_error(std::format(
-        "Attempting to read [{}] bytes for [{}], but not enough bytes "
-        "available in buffer. Current position in buffer = [{}], size of "
-        "buffer = [{}].",
+        "Attempting to read [{0:} ({0:x})] bytes for [{1:}], but not enough "
+        "bytes available in buffer. Current position in buffer = [{2:}], size "
+        "of buffer = [{3:}].",
         amount, type, bytes.cur, bytes.cap));
   }
 }
@@ -235,7 +235,11 @@ template <> struct Serializer<builtins::Module> {
     str_serializer.serialize(mod.get_install_dir());
 
     auto span_serializer = Serializer<std::span<std::string_view>>(bytes);
-    span_serializer.serialize(mod.get_roots());
+    if (mod.type == builtins::Module::Module_t::EXE) {
+      str_serializer.serialize(mod.get_exe_root());
+    } else {
+      span_serializer.serialize(mod.get_roots());
+    }
     span_serializer.serialize(mod.get_headers());
     span_serializer.serialize(mod.get_includes());
     span_serializer.serialize(mod.get_sys_includes());
@@ -340,25 +344,28 @@ template <> struct Deserializer<builtins::Module> {
     mod.set_compiler(str_deserial.deserialize());
     mod.set_name(str_deserial.deserialize());
     mod.set_install_dir(str_deserial.deserialize());
-    // mod.compiler = str_deserial.deserialize();
-    // mod.name = str_deserial.deserialize();
-    // mod.install_dir = str_deserial.deserialize();
+
+    if (mod.type == builtins::Module::Module_t::EXE) {
+      mod.set_exe_root(str_deserial.deserialize());
+    }
 
     auto vec_deserial = Deserializer<std::vector<std::string>>(bytes);
-    auto const root = vec_deserial.deserialize();
-    auto const header = vec_deserial.deserialize();
-    auto const include = vec_deserial.deserialize();
-    auto const sys_include = vec_deserial.deserialize();
-    auto const link = vec_deserial.deserialize();
-    auto const sys_link = vec_deserial.deserialize();
 #define FUCK_ME_IM_LAZY(x)                                                     \
   {                                                                            \
     for (auto &&foo : x) {                                                     \
       mod.add_##x(foo);                                                        \
     }                                                                          \
   }
+    if (mod.type != builtins::Module::Module_t::EXE) {
+      auto const root = vec_deserial.deserialize();
+      FUCK_ME_IM_LAZY(root);
+    }
+    auto const header = vec_deserial.deserialize();
+    auto const include = vec_deserial.deserialize();
+    auto const sys_include = vec_deserial.deserialize();
+    auto const link = vec_deserial.deserialize();
+    auto const sys_link = vec_deserial.deserialize();
 
-    FUCK_ME_IM_LAZY(root);
     FUCK_ME_IM_LAZY(header);
     FUCK_ME_IM_LAZY(include);
     FUCK_ME_IM_LAZY(sys_include);
@@ -366,15 +373,6 @@ template <> struct Deserializer<builtins::Module> {
     FUCK_ME_IM_LAZY(sys_link);
 
 #undef FUCK_ME_IM_LAZY
-    /*
-    mod.roots = vec_deserial.deserialize();
-    mod.headers = vec_deserial.deserialize();
-    mod.includes = vec_deserial.deserialize();
-    mod.sys_includes = vec_deserial.deserialize();
-    mod.links = vec_deserial.deserialize();
-    mod.sys_links = vec_deserial.deserialize();
-    */
-
     auto tree_deserial = Deserializer<builtins::Module::DepTree>(bytes);
     mod.tree = tree_deserial.deserialize();
 
@@ -390,10 +388,8 @@ auto serialize(builtins::Module const &mod,
   auto mod_cereal = Serializer<builtins::Module>(bytes);
   mod_cereal.serialize(mod);
 
-  /*
-  auto los_cereal = Serializer<ListOfStrings>(bytes);
+  auto los_cereal = Serializer<std::span<std::string_view>>(bytes);
   los_cereal.serialize(compiled_files);
-  */
 
   auto outfile = File(path, File::WRITE | File::CREATE);
   // we should also add some error checking for this
@@ -411,7 +407,7 @@ auto serialize(builtins::Module const &mod,
 
 // will also throw if there's some big error
 auto deserialize(fs::path const &path)
-    -> std::variant<std::pair<builtins::Module, std::vector<std::string_view>>,
+    -> std::variant<std::pair<builtins::Module, std::vector<std::string>>,
                     std::string> {
   auto file = File(path, File::READ | File::BINARY);
   if (!file)
@@ -422,11 +418,9 @@ auto deserialize(fs::path const &path)
   auto &&[size, buffer] = file.dump_content();
   auto bytes = ByteBuffer(std::move(buffer), size);
   auto mod_decereal = Deserializer<builtins::Module>(bytes);
-  /*
-  auto los_decereal = Deserializer<ListOfStrings>(bytes);
-  */
   auto mod = mod_decereal.deserialize();
-  throw std::runtime_error(__FUNCTION__);
-  //  return std::make_pair(std::move(mod), std::move(los));
+  auto los_desereal = Deserializer<std::vector<std::string>>(bytes);
+  auto los = los_desereal.deserialize();
+  return std::make_pair(std::move(mod), std::move(los));
 }
 } // namespace luamake::spl
