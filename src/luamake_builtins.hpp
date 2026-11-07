@@ -185,12 +185,12 @@ struct Module final {
   using enum Module_t;
 
   // @throws std::runtime_error
-  Module(Module_t &&type, lua_State *state,
+  Module(Module_t &&, lua_State *,
          std::filesystem::path const &) noexcept(false);
 
   Module(Module &&) noexcept;
 
-  auto operator=(Module &&that) noexcept -> Module &;
+  auto operator=(Module &&) noexcept -> Module &;
 
   ~Module() noexcept;
 
