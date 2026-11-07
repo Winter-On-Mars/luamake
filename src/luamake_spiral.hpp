@@ -18,7 +18,7 @@ auto serialize(builtins::Module const &, std::span<std::string_view const> &&,
                std::filesystem::path const &) noexcept(false) -> void;
 
 auto deserialize(std::filesystem::path const &path) noexcept(false)
-    -> std::variant<std::pair<builtins::Module, std::vector<std::string_view>>,
+    -> std::variant<std::pair<builtins::Module, std::vector<std::string>>,
                     std::string>;
 
 template <class T> struct Serializer {
