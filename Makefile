@@ -19,7 +19,7 @@ _files:=$(LAKE_BUILD_DIR)/common.o $(LAKE_BUILD_DIR)/luamake_strings.o \
 _lua_a:=lua/liblua.a
 
 all: $(_files) $(_lua_a)
-	$(CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
+	$(LAKE_CC) $(_cc_flags) -o $(_bin_name) $(_files) -fuse-ld=$(LAKE_LINKER) $(_lua_a)
 
 dbg: _cc_flags+=-ggdb3 -DDEBUG -fno-omit-frame-pointer
 dbg: $(_files) $(_lua_a)
