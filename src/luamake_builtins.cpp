@@ -575,17 +575,16 @@ auto install_impl(lua_State *state) -> int {
   // NOTE: we might be able to put this on a background thread, then just
   // continue on doing things, and when this is done we do the comparison,
   // but for now we'll have this be blocking :)
-  auto files_to_compile = mod.tree.vectorize();
-  // std::vector<std::string_view>();
-  /*
+  auto files_to_compile = // mod.tree.vectorize();
+      std::vector<std::string_view>();
   auto const maybe_cached_mod = spl::deserialize(cache_path);
   switch (maybe_cached_mod.index()) {
   case 0: {
     std::cout << std::format("Checking [{}] cache" LM_NL, mod.get_name());
     auto &&[cached_mod, compiled_files] =
-        std::get<std::pair<builtins::Module, std::vector<std::string_view>>>(
+        std::get<std::pair<builtins::Module, std::vector<std::string>>>(
             maybe_cached_mod);
-    gen_dep_tree_fut.get();
+    // gen_dep_tree_fut.get();
     if (mod == cached_mod) {
       files_to_compile =
           builtins::mods.get_tree_diff(mod_idx, mod.tree, cached_mod.tree);
@@ -605,7 +604,7 @@ auto install_impl(lua_State *state) -> int {
   case 1: {
     auto const &fail_message = std::get<std::string>(maybe_cached_mod);
     std::cerr << std::format("[{}]" LM_NL, fail_message);
-    gen_dep_tree_fut.get();
+    // gen_dep_tree_fut.get();
     // we don't have a cached tree to comp against, so we just push back
     // everything to be compiled
     files_to_compile = mod.tree.vectorize();
@@ -613,7 +612,6 @@ auto install_impl(lua_State *state) -> int {
   default:
     unreachable();
   }
-  */
 #ifdef DEBUG_MOD
   std::cout << "[files to compile]\n\t";
   for (auto &&path : files_to_compile)
@@ -630,23 +628,21 @@ auto install_impl(lua_State *state) -> int {
   // errors, but we still build all we can of the module for incrimental
   // builds
   threads.add_task([mod_idx, cache_path = std::move(cache_path)]() -> void {
-    /*
-  struct AutoRun final {
-    ~AutoRun() {
-      if (builtins::cl_options.cache) {
-        while (builtins::mods.has_remaining(idx)) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    struct AutoRun final {
+      ~AutoRun() {
+        if (builtins::cl_options.cache) {
+          while (builtins::mods.has_remaining(idx)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          }
+          auto compiled_files = builtins::mods.get_all_compiled_files(idx);
+          auto const &mod = builtins::mods.module_at(idx);
+          spl::serialize(mod, std::move(compiled_files), cache_path);
         }
-        // auto compiled_files = builtins::mods.get_all_compiled_files(idx);
-        // auto const &mod = builtins::mods.module_at(idx);
-        // spl::serialize(mod, std::move(compiled_files), cache_path);
       }
-    }
 
-    builtins::ModIndex idx;
-    fs::path const &cache_path;
-  } runner{mod_idx, cache_path};
-  */
+      builtins::ModIndex idx;
+      fs::path const &cache_path;
+    } runner{mod_idx, cache_path};
     for (auto mod_state = builtins::mods.state_at(mod_idx);
          mod_state != builtins::LakeModules::ModState::ready_for_final_compile;
          mod_state = builtins::mods.state_at(mod_idx)) {
@@ -1569,7 +1565,8 @@ auto Module::display(std::ostream &out) const noexcept -> std::ostream & {
 }
 #endif // DEBUG_MOD
 
-Module::Roots::Roots() noexcept : exe_small() {}
+Module::Roots::Roots() noexcept
+    : exe_small(SmallString<sizeof(std::vector<SVInterned>)>{}) {}
 
 Module::Roots::~Roots() noexcept {}
 
@@ -2106,6 +2103,24 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   interpreter = std::make_unique<pp::Interpreter>(std::move(macros),
                                                   std::move(def_macros));
   // res.get();
+}
+
+Module::Module(Module &&that) noexcept
+    : type(that.type), meta(that.meta),
+      all_strings(std::move(that.all_strings)),
+      compiler(std::move(that.compiler)), name(std::move(that.name)),
+      install_dir(std::move(that.install_dir)), roots(),
+      headers(std::move(that.headers)), includes(std::move(that.includes)),
+      sys_includes(std::move(that.sys_includes)), links(std::move(that.links)),
+      sys_links(std::move(that.sys_links)), tree(std::move(that.tree)),
+      interpreter(std::move(that.interpreter)),
+      macro_cache(std::move(that.macro_cache)) {
+  if (type == EXE) {
+    // HACK: UB
+    memcpy((void *)&roots, &that.roots, sizeof(Roots));
+  } else {
+    roots.lib = std::move(that.roots.lib);
+  }
 }
 
 auto Module::operator=(Module &&that) noexcept -> Module & {
