@@ -1419,53 +1419,49 @@ auto Module::set_install_dir(std::string_view const sv) noexcept -> void {
 
 auto Module::add_root(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
-    roots.lib.emplace_back(sv);
+    roots.lib.push_back(SVInterned(sv));
   } else {
-    roots.lib.emplace_back(all_strings.append(sv));
+    roots.lib.push_back(SVInterned(all_strings.append(sv)));
   }
 }
 
 auto Module::add_header(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
-    // sso
-    headers.emplace_back(sv);
+    headers.push_back(SVInterned(sv));
   } else {
-    headers.emplace_back(all_strings.append(sv));
+    headers.push_back(SVInterned(all_strings.append(sv)));
   }
 }
 
 auto Module::add_include(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
-    // sso
-    includes.emplace_back(sv);
+    includes.push_back(SVInterned(sv));
   } else {
-    includes.emplace_back(all_strings.append(sv));
+    includes.push_back(SVInterned(all_strings.append(sv)));
   }
 }
 
 auto Module::add_sys_include(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
-    // sso
-    sys_includes.emplace_back(sv);
+    sys_includes.push_back(SVInterned(sv));
   } else {
-    sys_includes.emplace_back(all_strings.append(sv));
+    sys_includes.push_back(SVInterned(all_strings.append(sv)));
   }
 }
 
 auto Module::add_link(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
-    // sso
-    links.emplace_back(sv);
+    links.push_back(SVInterned(sv));
   } else {
-    links.emplace_back(all_strings.append(sv));
+    links.push_back(SVInterned(all_strings.append(sv)));
   }
 }
 
 auto Module::add_sys_link(std::string_view const sv) noexcept -> void {
   if (sv.length() < SVInterned::MAX_SIZE) {
-    sys_links.emplace_back(sv);
+    sys_links.push_back(SVInterned(sv));
   } else {
-    sys_links.emplace_back(all_strings.append(sv));
+    sys_links.push_back(SVInterned(all_strings.append(sv)));
   }
 }
 
@@ -1845,9 +1841,9 @@ return macros->second;
 // work with, see [[https://www.lua.org/manual/5.4/manual.html]] section 4 for
 // more info
 Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
-    : type(type), all_strings(), compiler(), name(), install_dir(), roots(),
-      headers(), includes(), sys_includes(), links(), sys_links(), tree(8),
-      interpreter(nullptr) {
+    : type(type), meta(Interned::roots), all_strings(), compiler(), name(),
+      install_dir(), roots(), headers(), includes(), sys_includes(), links(),
+      sys_links(), tree(8), interpreter(nullptr) {
   switch (auto const compiler_t = lua_getfield(state, -1, "compiler")) {
   case LUA_TTABLE:
     set_compiler(parse_compiler_table(state));
@@ -1955,8 +1951,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
 
   // TODO: make this a relative path
   if (type == Module::EXE) {
-    // TODO:
-    // includes.reserve(1);
+    includes.reserve(1);
     [[likely]]
     if (fs::path(get_exe_root()).has_parent_path()) {
       add_include(
@@ -1965,8 +1960,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
       add_include(previous_path.string());
     }
   } else if (type == STATIC || type == DYNAMIC) {
-    // TODO:
-    // includes.reserve(roots.lib.size());
+    includes.reserve(roots.lib.size());
     auto const rts = get_roots();
     for (auto const &root : rts) {
       auto const parent_p = [&]() -> fs::path {
@@ -2011,12 +2005,7 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   switch (auto const linking_t = lua_getfield(state, -1, "linking")) {
   case LUA_TTABLE: {
     auto const len = lua_rawlen(state, -1);
-    // TODO: i'm (all c++ is) fucking stupid. for some reason, calling reserve
-    // then emplace_back puts the new element at the end of the reserved array,
-    // instead of in the fucking array, you can only use reserve + push_back not
-    // reserve + emplace_back, but we use emplace_back because we need to de the
-    // construction, while push_back doesn't call any ctors
-    // sys_links.reserve(len);
+    sys_links.reserve(len);
     auto linking_idx = -1;
     for (auto i = 1; i <= len; ++i) {
       switch (auto const value_t = lua_geti(state, linking_idx, i)) {
@@ -2130,43 +2119,40 @@ auto Module::operator=(Module &&that) noexcept -> Module & {
   std::swap(compiler, that.compiler);
   std::swap(name, that.name);
   std::swap(install_dir, that.install_dir);
-  if (type != that.type) {
-    // NOTE: we already swapped the meta info and type
+  // NOTE: we already swapped the meta info and type
+  switch (that.type) {
+  case Module::EXE:
     switch (type) {
     case Module::EXE:
-      if (that.type != Module::EXE)
-        roots.lib.~vector<SVInterned>();
-      if (meta & Interned::roots) {
-        roots.exe_small = that.roots.exe_small;
-      } else {
-        roots.exe_big = that.roots.exe_big;
-      }
+      set_exe_root(that.get_exe_root());
       break;
     case Module::STATIC:
       [[fallthrough]];
-    case Module::DYNAMIC: {
-      switch (that.type) {
-      case Module::EXE:
-        // HACK: technically this is UB because roots active field is not lib,
-        // but StringViews and SmallString are both basically PODS so we don't
-        // need to call their dtors
-        roots.lib = that.roots.lib;
-        break;
-      case Module::STATIC:
-        [[fallthrough]];
-      case Module::DYNAMIC:
-        roots.lib = that.roots.lib;
-        break;
+    case Module::DYNAMIC:
+      if (that.meta & Interned::roots) {
+        roots.exe_small.~SmallString<sizeof(std::vector<SVInterned>)>();
+      } else {
+        roots.exe_big.~StringViews();
       }
-    } break;
+      roots.lib = std::move(that.roots.lib);
+      break;
     }
-  } else {
-    // HACK: UB
-    auto tmp = std::array<u8, sizeof(Roots)>({});
-    ::memset(tmp.data(), 0, sizeof(Roots));
-    memcpy(tmp.data(), &roots, sizeof(Roots));
-    memcpy(static_cast<void *>(&roots), &that.roots, sizeof(Roots));
-    memcpy(static_cast<void *>(&that.roots), tmp.data(), sizeof(Roots));
+    break;
+  case Module::STATIC:
+    [[fallthrough]];
+  case Module::DYNAMIC:
+    switch (type) {
+    case Module::EXE:
+      roots.lib.~vector<SVInterned>();
+      set_exe_root(that.get_exe_root());
+      break;
+    case Module::STATIC:
+      [[fallthrough]];
+    case Module::DYNAMIC:
+      roots.lib = std::move(that.roots.lib);
+      break;
+    }
+    break;
   }
   std::swap(headers, that.headers);
   std::swap(includes, that.includes);
