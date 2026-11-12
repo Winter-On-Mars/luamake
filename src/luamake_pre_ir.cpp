@@ -1848,6 +1848,11 @@ auto Lexer::handle_define(size_t &cur_t, size_t &cur_lex)
   auto lex = lexemes[cur_lex++];
   ++cur_t;
 
+  // case when this is the last thing defined
+  if (cur_t >= types.size()) {
+    return std::make_unique<DefineNode>(std::move(lex));
+  }
+
   switch (types[cur_t]) {
   case ir_t::LPAREN: {
     auto is_variadic = false;
