@@ -1864,7 +1864,16 @@ Module::Module(Module_t &&type, lua_State *state, fs::path const &root)
   // then we append them when needed, that way we can have them run in parallel,
   // then at the end of this function await the function and push back all of
   // the results
-  auto const compiler_cmd = get_compiler();
+  // we also have to do this because otherwise we can get some compiler flags in
+  // that can cause issues, or just annoying extra messages that aren't needed
+  auto const compiler_cmd = [this]() -> std::string_view {
+    auto const tmp = get_compiler();
+    if (tmp.find(' ') != tmp.npos) {
+      return tmp.substr(0, tmp.find(' '));
+    } else {
+      return tmp;
+    }
+  }();
   auto &&[macros, def_macros] = append_predefined_macros(compiler_cmd);
   append_include_paths(compiler_cmd);
   /*
